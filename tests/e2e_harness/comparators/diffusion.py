@@ -220,6 +220,24 @@ class DiffusionComparator:
             if not ref_std_ok:
                 all_pass = False
 
+        if frame_stats and ref_frame_stats:
+            pixel_std = float(frame_stats.get("std", 0.0))
+            ref_pixel_std = float(ref_frame_stats.get("std", 0.0))
+            min_ref_std = thresholds.get("reference_min_pixel_std_for_ratio", 0.08)
+            ratio_thresh = thresholds.get("min_reference_std_ratio", 0.35)
+            if ref_pixel_std >= min_ref_std:
+                ratio = pixel_std / ref_pixel_std if ref_pixel_std > 0.0 else 0.0
+                ratio_ok = ratio >= ratio_thresh
+                metrics["reference_pixel_std_ratio"] = MetricResult(
+                    value=ratio,
+                    threshold=ratio_thresh,
+                    operator=">=",
+                    passed=ratio_ok,
+                    note=f"trt_std={pixel_std:.4f}, ref_std={ref_pixel_std:.4f}",
+                )
+                if not ratio_ok:
+                    all_pass = False
+
         frames_dir = trt.data.get("frames_dir", "")
         if frames_dir:
             temporal_cs = _compute_temporal_consistency(frames_dir)

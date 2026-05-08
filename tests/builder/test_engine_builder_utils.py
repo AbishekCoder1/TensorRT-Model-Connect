@@ -27,6 +27,7 @@ try:
         _trt_abi_from_version,
         _get_gpu_name,
         _HF_ALLOW_PATTERNS,
+        _detect_diffusion_tokenizer_add_special_tokens,
         _ensure_tokenizer_json,
         build_bundle,
     )
@@ -100,6 +101,26 @@ class TestDetectTokenizerAddSpecialTokens:
         # Should not crash, falls through to fallback
         result = _detect_tokenizer_add_special_tokens(tmp_path)
         assert isinstance(result, bool)
+
+    def test_diffusion_detects_tokenizer_subdir(self, tmp_path):
+        tok_dir = tmp_path / "tokenizer"
+        tok_dir.mkdir()
+        (tok_dir / "tokenizer_config.json").write_text(
+            json.dumps({"add_eos_token": True}))
+        assert _detect_diffusion_tokenizer_add_special_tokens(tmp_path) is True
+
+    def test_diffusion_prefers_tokenizer_2(self, tmp_path):
+        tok_dir = tmp_path / "tokenizer"
+        tok_dir.mkdir()
+        (tok_dir / "tokenizer_config.json").write_text(
+            json.dumps({"add_eos_token": True}))
+
+        tok2_dir = tmp_path / "tokenizer_2"
+        tok2_dir.mkdir()
+        (tok2_dir / "tokenizer_config.json").write_text(
+            json.dumps({"add_eos_token": False}))
+
+        assert _detect_diffusion_tokenizer_add_special_tokens(tmp_path) is False
 
 
 class TestResolveModel:

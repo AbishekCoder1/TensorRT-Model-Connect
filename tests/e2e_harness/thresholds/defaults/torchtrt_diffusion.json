@@ -9,6 +9,8 @@
     "ssim": -1.0,
     "min_pixel_mean": 0.10,
     "max_pixel_mean": 0.90,
-    "min_pixel_std": 0.05
+    "min_pixel_std": 0.05,
+    "reference_min_pixel_std_for_ratio": 0.08,
+    "min_reference_std_ratio": 0.35
   }
 }

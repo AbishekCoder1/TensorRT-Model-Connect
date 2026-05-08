@@ -331,6 +331,7 @@ if len(models) > 10:
     args+=(--rebuild-engines)
   fi
   run_with_timeout "${SELECTIVE_E2E_TIMEOUT:-4h}" env HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${args[@]}"
+  run_diffusion_vlm_assessment
 }
 
 run_full_e2e() {
@@ -355,6 +356,55 @@ run_full_e2e() {
     args+=(--rebuild-engines)
   fi
   run_with_timeout "${FULL_E2E_TIMEOUT:-6h}" env HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${args[@]}"
+  run_diffusion_vlm_assessment
+}
+
+run_diffusion_vlm_assessment() {
+  if [ "${DIFFUSION_VLM_ASSESSMENT:-true}" != "true" ]; then
+    echo "Skipping: diffusion VLM assessment disabled"
+    return 0
+  fi
+  if [ ! -d e2e_artifacts/artifacts ]; then
+    echo "Skipping: no E2E artifacts directory for diffusion VLM assessment"
+    return 0
+  fi
+
+  local pair_count
+  pair_count=$(python3 -c '
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+count = 0
+for result_path in root.glob("*/result.json"):
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    case = result.get("case_config", {})
+    if case.get("task_strategy") != "diffusion_media_generation":
+        continue
+    model_dir = result_path.parent
+    has_trt = (model_dir / "frames").is_dir()
+    has_ref = (model_dir / "hf_frames").is_dir() or (model_dir / "ref_frames").is_dir()
+    if has_trt and has_ref:
+        count += 1
+print(count)
+' e2e_artifacts/artifacts)
+  if [ "${pair_count:-0}" -eq 0 ]; then
+    echo "Skipping: no TRT/HF diffusion frame pairs for VLM assessment"
+    return 0
+  fi
+
+  echo "=== Phase 3: diffusion VLM semantic assessment (${pair_count} pairs) ==="
+  run_with_timeout "${DIFFUSION_VLM_TIMEOUT:-45m}" env -u HF_HUB_OFFLINE \
+    python tools/evaluate_diffusion_vlm_similarity.py \
+      --artifacts-dir e2e_artifacts/artifacts \
+      --output e2e_artifacts/diffusion_vlm_assessment.json \
+      --model-id "${DIFFUSION_VLM_MODEL_ID:-Qwen/Qwen2.5-VL-3B-Instruct}" \
+      --max-side "${DIFFUSION_VLM_MAX_SIDE:-512}" \
+      --max-new-tokens "${DIFFUSION_VLM_MAX_NEW_TOKENS:-384}"
 }
 
 generate_coverage_map() {

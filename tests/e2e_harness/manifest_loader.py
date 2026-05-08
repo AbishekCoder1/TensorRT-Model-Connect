@@ -391,6 +391,11 @@ def _build_threshold_overrides(manifest: dict) -> dict:
         overrides["max_pixel_mean"] = manifest["max_pixel_mean"]
     if "min_pixel_std" in manifest:
         overrides["min_pixel_std"] = manifest["min_pixel_std"]
+    if "reference_min_pixel_std_for_ratio" in manifest:
+        overrides["reference_min_pixel_std_for_ratio"] = (
+            manifest["reference_min_pixel_std_for_ratio"])
+    if "min_reference_std_ratio" in manifest:
+        overrides["min_reference_std_ratio"] = manifest["min_reference_std_ratio"]
     if "speech_min_token_match" in manifest:
         overrides["speech_min_token_match"] = manifest["speech_min_token_match"]
     if "speech_min_frame_exact" in manifest:
@@ -441,6 +446,7 @@ def _build_metadata(manifest: dict) -> dict:
         "speech_min_token_match", "speech_min_frame_exact", "speech_min_rms",
         "point_x", "point_y", "num_expected_masks", "min_pixel_agreement",
         "min_pixel_mean", "max_pixel_mean", "min_pixel_std",
+        "reference_min_pixel_std_for_ratio", "min_reference_std_ratio",
         "video_num_frames", "video_height", "video_width",
         "num_inference_steps", "build_args", "preflight_requirements",
         "stages", "comparison_profile", "threshold_overrides", "determinism",

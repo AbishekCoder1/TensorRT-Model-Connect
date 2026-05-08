@@ -804,6 +804,62 @@ class TestRenderDiffusionModel:
         assert "Reference Frames" in html
         assert "data:image/png;base64," in html
 
+    def test_vlm_assessment_is_rendered(self):
+        mod = _import_report()
+        r = _make_result(
+            name="model-diff",
+            task_strategy="diffusion_media_generation",
+        )
+        r["vlm_assessment"] = {
+            "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+            "vlm_judgment": {
+                "trt_description": "a clear cat image",
+                "hf_description": "a cat image",
+                "semantic_similarity_0_to_5": 4.5,
+                "trt_prompt_alignment_0_to_5": 4.0,
+                "hf_prompt_alignment_0_to_5": 4.0,
+                "trt_visual_quality_0_to_5": 3.5,
+                "hf_visual_quality_0_to_5": 4.0,
+                "trt_relative_to_hf": "similar",
+                "is_regression": False,
+                "reason": "same main subject",
+                "vlm_gate": {"failed": False, "reasons": []},
+            },
+        }
+        html = mod.render_diffusion_model(r)
+        assert "VLM Semantic Assessment" in html
+        assert "Qwen/Qwen2.5-VL-3B-Instruct" in html
+        assert "Semantic similarity" in html
+        assert "4.5000" in html
+        assert "same main subject" in html
+
+    def test_load_all_results_attaches_vlm_assessment(self, tmp_path):
+        mod = _import_report()
+        artifacts_dir = tmp_path / "artifacts"
+        result = _make_result(
+            name="model-diff",
+            task_strategy="diffusion_media_generation",
+        )
+        _write_result(artifacts_dir, "model-diff", result)
+        (tmp_path / "diffusion_vlm_assessment.json").write_text(
+            json.dumps({
+                "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+                "results": [{
+                    "case_name": "model-diff",
+                    "vlm_judgment": {
+                        "semantic_similarity_0_to_5": 4.25,
+                        "vlm_gate": {"failed": False, "reasons": []},
+                    },
+                }],
+            }),
+            encoding="utf-8",
+        )
+        loaded = mod.load_all_results(artifacts_dir)
+        assert loaded[0]["vlm_assessment"]["model_id"] == (
+            "Qwen/Qwen2.5-VL-3B-Instruct")
+        assert loaded[0]["vlm_assessment"]["vlm_judgment"][
+            "semantic_similarity_0_to_5"] == 4.25
+
 
 class TestRenderAudioModel:
     """Tests for render_audio_model()."""

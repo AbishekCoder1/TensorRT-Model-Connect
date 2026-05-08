@@ -9,13 +9,13 @@
 #include "runtime/pipelines/pixart_torchtrt_pipeline.h"
 
 #include "runtime/domains/diffusion/diffusion_generation_plan.h"
+#include "runtime/domains/diffusion/wan_generation_conditioning.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
-#include <random>
 #include <vector>
 
 namespace trtmc {
@@ -64,24 +64,93 @@ inline float fp16_to_fp32(half_t h) {
     return f;
 }
 
-std::vector<half_t> to_fp16(const std::vector<float>& src) {
+inline half_t fp32_to_bf16(float v) {
+    uint32_t bits;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return static_cast<half_t>(bits >> 16U);
+}
+
+inline float bf16_to_fp32(half_t h) {
+    const uint32_t bits = static_cast<uint32_t>(h) << 16U;
+    float out;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+std::vector<half_t> convert_float_to_16(const std::vector<float>& src, DType dtype) {
     std::vector<half_t> dst(src.size());
-    for (std::size_t i = 0; i < src.size(); ++i)
-        dst[i] = fp32_to_fp16(src[i]);
+    for (std::size_t i = 0; i < src.size(); ++i) {
+        dst[i] = (dtype == DType::kBFloat16) ? fp32_to_bf16(src[i]) : fp32_to_fp16(src[i]);
+    }
     return dst;
 }
 
-std::vector<float> from_fp16(const half_t* src, std::size_t count) {
-    std::vector<float> dst(count);
-    for (std::size_t i = 0; i < count; ++i)
-        dst[i] = fp16_to_fp32(src[i]);
-    return dst;
+Tensor make_float_tensor(const std::vector<float>& values, const std::vector<int64_t>& shape) {
+    return Tensor{const_cast<float*>(values.data()), shape, DType::kFloat32};
+}
+
+Tensor make_model_tensor(const std::vector<float>& values, std::vector<half_t>& scratch16,
+                         DType dtype, const std::vector<int64_t>& shape) {
+    if (dtype == DType::kFloat32) {
+        return make_float_tensor(values, shape);
+    }
+    scratch16 = convert_float_to_16(values, dtype);
+    return Tensor{scratch16.data(), shape, dtype};
+}
+
+DType input_dtype_or(const TrtModule* module, const std::string& name, DType fallback) {
+    if (!module) {
+        return fallback;
+    }
+    for (const auto& info : module->input_info()) {
+        if (info.name == name) {
+            return info.dtype;
+        }
+    }
+    return fallback;
+}
+
+bool tensor_to_float_vector(const Tensor& tensor, std::size_t count, std::vector<float>& dst,
+                            const char* label) {
+    if (!tensor.data) {
+        std::cerr << "[torchtrt_diffusion] " << label << ": empty output tensor\n";
+        return false;
+    }
+    if (tensor.numel() < count) {
+        std::cerr << "[torchtrt_diffusion] " << label << ": output too small (got "
+                  << tensor.numel() << ", need " << count << ")\n";
+        return false;
+    }
+
+    dst.assign(count, 0.0F);
+    if (tensor.dtype == DType::kFloat32) {
+        const auto* src = static_cast<const float*>(tensor.data);
+        std::copy_n(src, count, dst.data());
+        return true;
+    }
+    if (tensor.dtype == DType::kFloat16) {
+        const auto* src = static_cast<const half_t*>(tensor.data);
+        for (std::size_t i = 0; i < count; ++i) {
+            dst[i] = fp16_to_fp32(src[i]);
+        }
+        return true;
+    }
+    if (tensor.dtype == DType::kBFloat16) {
+        const auto* src = static_cast<const half_t*>(tensor.data);
+        for (std::size_t i = 0; i < count; ++i) {
+            dst[i] = bf16_to_fp32(src[i]);
+        }
+        return true;
+    }
+
+    std::cerr << "[torchtrt_diffusion] " << label << ": unsupported output dtype\n";
+    return false;
 }
 
 } // anonymous namespace
 
 // ─── DPM-Solver++ Multistep Scheduler ────────────────────────────────────────
-// Matches HF diffusers DPMSolverMultistepScheduler exactly:
+// Matches HF diffusers DPMSolverMultistepScheduler:
 //   algorithm_type = "dpmsolver++"
 //   solver_order = 2
 //   solver_type = "midpoint"
@@ -97,7 +166,18 @@ std::vector<float> from_fp16(const half_t* src, std::size_t count) {
 
 namespace {
 
-// Convert epsilon prediction to x0 prediction
+double rms(const std::vector<float>& values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    double sum_sq = 0.0;
+    for (const auto v : values) {
+        sum_sq += static_cast<double>(v) * static_cast<double>(v);
+    }
+    return std::sqrt(sum_sq / static_cast<double>(values.size()));
+}
+
+// Convert epsilon prediction to x0 prediction.
 void eps_to_x0(const DpmSolverState& s, const float* eps, const float* x_s, float* x0,
                std::size_t count, int32_t t) {
     const auto ti = static_cast<std::size_t>(std::clamp(t, 0, s.num_train_timesteps - 1));
@@ -109,7 +189,6 @@ void eps_to_x0(const DpmSolverState& s, const float* eps, const float* x_s, floa
     }
 }
 
-// DPM-Solver++ first-order update
 void first_order_update(const DpmSolverState& s, const float* m0, const float* sample, float* x_out,
                         std::size_t count, int32_t t_s0, int32_t t_t) {
     const auto i_s0 = static_cast<std::size_t>(std::clamp(t_s0, 0, s.num_train_timesteps - 1));
@@ -122,7 +201,6 @@ void first_order_update(const DpmSolverState& s, const float* m0, const float* s
     }
 }
 
-// DPM-Solver++ second-order midpoint update
 void second_order_update(const DpmSolverState& s, const float* m0, const float* m1,
                          const float* sample, float* x_out, std::size_t count, int32_t t_s0,
                          int32_t t_s1, int32_t t_t) {
@@ -184,12 +262,14 @@ void DpmSolverState::step(const float* eps_pred, const float* sample, float* x_o
     eps_to_x0(*this, eps_pred, sample, x0.data(), count, t_s0);
 
     model_outputs.push_back(x0);
-    if (model_outputs.size() > 2)
+    if (model_outputs.size() > 2) {
         model_outputs.erase(model_outputs.begin());
+    }
 
     int32_t order = 2;
-    if (lower_order_nums < 1 || step_index == num_steps - 1)
+    if (lower_order_nums < 1 || step_index == num_steps - 1) {
         order = 1;
+    }
 
     if (order == 1 || model_outputs.size() < 2) {
         first_order_update(*this, model_outputs.back().data(), sample, x_out, count, t_s0, t_t);
@@ -200,8 +280,9 @@ void DpmSolverState::step(const float* eps_pred, const float* sample, float* x_o
                             t_s0, t_s1, t_t);
     }
 
-    if (lower_order_nums < 2)
+    if (lower_order_nums < 2) {
         ++lower_order_nums;
+    }
 }
 
 // CHW float → HWC float [0,1]  (VAE output is in [-1,1] for AutoencoderKL)
@@ -290,11 +371,8 @@ bool PixArtTorchTrtPipeline::run_t5_encoder(const std::vector<int32_t>& input_id
     }
 
     const auto emb_size = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(te_dim);
-    text_embeddings.resize(emb_size);
-    auto* data = static_cast<float*>(it->second.data);
-    // Output is [1, seq_len, te_dim] — skip batch dim
-    std::copy_n(data, emb_size, text_embeddings.data());
-    return true;
+    // Output is [1, seq_len, te_dim]; the helper copies the flattened payload.
+    return tensor_to_float_vector(it->second, emb_size, text_embeddings, "T5 encoder");
 }
 
 // ─── DiT denoiser ───────────────────────────────────────────────────────
@@ -312,43 +390,48 @@ bool PixArtTorchTrtPipeline::run_denoiser(const std::vector<float>& latent,
     const int32_t seq_len = config_.text_seq_len;
     const int32_t te_dim = config_.text_encoder_dim;
 
-    // Torch-trt DiT engine inputs (fp16):
-    //   sample: fp16 [1, z_dim, h_lat, w_lat]
-    //   encoder_hidden_states: fp16 [1, seq_len, te_dim]
-    //   timestep: fp16 [1]
-    //   encoder_attention_mask: fp16 [1, seq_len] (1=real, 0=padding)
+    // Torch-trt DiT engine inputs:
+    //   sample: [1, z_dim, h_lat, w_lat]
+    //   encoder_hidden_states: [1, seq_len, te_dim]
+    //   timestep: [1]
+    //   encoder_attention_mask: [1, seq_len] (1=real, 0=padding)
     //
     // The engine's PixArtDiTWrapper converts the {0,1} mask to additive
     // attention bias ({0, -10000}) and passes it as 3D to the model's
     // cross-attention layers (using TRT-safe matmul+softmax, not SDPA).
     //
-    // Pipeline works in fp32; convert fp32→fp16 for engine, fp16→fp32 for output.
+    // Pipeline works in fp32; pack inputs to each TensorRT engine's actual
+    // dtype, then convert outputs back to fp32.
+    const DType sample_dtype = input_dtype_or(denoiser_.get(), "sample", DType::kFloat16);
+    const DType text_dtype = input_dtype_or(denoiser_.get(), "encoder_hidden_states", sample_dtype);
+    const DType timestep_dtype = input_dtype_or(denoiser_.get(), "timestep", sample_dtype);
+    const DType mask_dtype =
+        input_dtype_or(denoiser_.get(), "encoder_attention_mask", sample_dtype);
 
-    auto sample_fp16 = to_fp16(latent);
-    auto text_fp16 = to_fp16(text_embeddings);
-    auto ts_fp16_val = fp32_to_fp16(timestep);
-    std::vector<half_t> ts_fp16 = {ts_fp16_val};
+    std::vector<half_t> sample_scratch16;
+    std::vector<half_t> text_scratch16;
+    std::vector<half_t> timestep_scratch16;
+    std::vector<half_t> mask_scratch16;
+    std::vector<float> timestep_vec = {timestep};
 
     // Build encoder attention mask
     const auto mask_len = static_cast<std::size_t>(seq_len);
-    std::vector<half_t> enc_mask(mask_len, fp32_to_fp16(0.0F));
+    std::vector<float> enc_mask(mask_len, 0.0F);
     const auto real = std::min(static_cast<std::size_t>(num_real_tokens), mask_len);
     for (std::size_t i = 0; i < real; ++i) {
-        enc_mask[i] = fp32_to_fp16(1.0F);
+        enc_mask[i] = 1.0F;
     }
 
     TensorMap inputs;
-    inputs["sample"] = Tensor{
-        sample_fp16.data(),
-        {1, static_cast<int64_t>(z_dim), static_cast<int64_t>(h_lat), static_cast<int64_t>(w_lat)},
-        DType::kFloat16};
+    inputs["sample"] = make_model_tensor(
+        latent, sample_scratch16, sample_dtype,
+        {1, static_cast<int64_t>(z_dim), static_cast<int64_t>(h_lat), static_cast<int64_t>(w_lat)});
     inputs["encoder_hidden_states"] =
-        Tensor{text_fp16.data(),
-               {1, static_cast<int64_t>(seq_len), static_cast<int64_t>(te_dim)},
-               DType::kFloat16};
-    inputs["timestep"] = Tensor{ts_fp16.data(), {1}, DType::kFloat16};
+        make_model_tensor(text_embeddings, text_scratch16, text_dtype,
+                          {1, static_cast<int64_t>(seq_len), static_cast<int64_t>(te_dim)});
+    inputs["timestep"] = make_model_tensor(timestep_vec, timestep_scratch16, timestep_dtype, {1});
     inputs["encoder_attention_mask"] =
-        Tensor{enc_mask.data(), {1, static_cast<int64_t>(seq_len)}, DType::kFloat16};
+        make_model_tensor(enc_mask, mask_scratch16, mask_dtype, {1, static_cast<int64_t>(seq_len)});
 
     TensorMap outputs_map = denoiser_->forward(inputs);
 
@@ -361,14 +444,12 @@ bool PixArtTorchTrtPipeline::run_denoiser(const std::vector<float>& latent,
         }
     }
 
-    // Output is fp16 [1, out_channels, h_lat, w_lat]
+    // Output is [1, out_channels, h_lat, w_lat]. Torch-TensorRT may keep this
+    // in fp16 or promote it to fp32 depending on the compiled graph.
     // PixArt-Sigma outputs 8 channels (learned sigma); take first z_dim channels
     const auto out_per_channel = static_cast<std::size_t>(h_lat) * static_cast<std::size_t>(w_lat);
     const auto out_total = static_cast<std::size_t>(z_dim) * out_per_channel;
-    auto* raw_fp16 = static_cast<half_t*>(it->second.data);
-    output = from_fp16(raw_fp16, out_total);
-
-    return true;
+    return tensor_to_float_vector(it->second, out_total, output, "DiT");
 }
 
 // ─── VAE decode ─────────────────────────────────────────────────────────
@@ -382,16 +463,16 @@ bool PixArtTorchTrtPipeline::decode_vae(const std::vector<float>& latent, int32_
     const int32_t h_out = h_lat * config_.scale_factor_spatial;
     const int32_t w_out = w_lat * config_.scale_factor_spatial;
 
-    // Torch-trt VAE engine: "latent" fp16 [1, z_dim, h_lat, w_lat]
+    // Torch-trt VAE engine: "latent" [1, z_dim, h_lat, w_lat]
     //                       → "output0" fp32 [1, 3, h, w]
     // VAE scaling is already applied inside the VAEDecoderWrapper.
-    auto lat_fp16 = to_fp16(latent);
+    const DType latent_dtype = input_dtype_or(vae_.get(), "latent", DType::kFloat16);
+    std::vector<half_t> latent_scratch16;
 
     TensorMap inputs;
-    inputs["latent"] = Tensor{
-        lat_fp16.data(),
-        {1, static_cast<int64_t>(z_dim), static_cast<int64_t>(h_lat), static_cast<int64_t>(w_lat)},
-        DType::kFloat16};
+    inputs["latent"] = make_model_tensor(
+        latent, latent_scratch16, latent_dtype,
+        {1, static_cast<int64_t>(z_dim), static_cast<int64_t>(h_lat), static_cast<int64_t>(w_lat)});
 
     TensorMap outputs_map = vae_->forward(inputs);
 
@@ -468,7 +549,9 @@ bool PixArtTorchTrtPipeline::denoise_loop(std::vector<float>& latents,
         latents = std::move(new_latents);
 
         if ((step + 1) % 5 == 0 || step == num_steps - 1)
-            std::cerr << "[torchtrt_diffusion] Step " << (step + 1) << "/" << num_steps << "\n";
+            std::cerr << "[torchtrt_diffusion] Step " << (step + 1) << "/" << num_steps
+                      << " t=" << t << " eps_std=" << rms(eps_combined)
+                      << " lat_std=" << rms(latents) << "\n";
     }
     return true;
 }
@@ -519,19 +602,15 @@ ImageResult PixArtTorchTrtPipeline::generate_image(const std::string& prompt,
         return result;
     }
 
-    // 2. Set up scheduler (DPM-Solver++ 2nd-order, matching HF diffusers)
+    // 2. Set up scheduler (DPM-Solver++, matching the HF PixArt pipeline)
     DpmSolverState scheduler;
     scheduler.set_timesteps(num_steps);
 
-    // 3. Initialize latents with random noise
-    std::vector<float> latents(latent_count);
-    {
-        int32_t seed = (cfg.seed >= 0) ? cfg.seed : 42;
-        std::mt19937 gen(static_cast<unsigned>(seed));
-        std::normal_distribution<float> dist(0.0F, 1.0F);
-        for (auto& v : latents)
-            v = dist(gen);
-    }
+    // 3. Initialize latents with the same deterministic Box-Muller path used
+    // by the native PixArt/WAN runtime and HF reference harness.
+    const uint32_t seed = (cfg.seed >= 0) ? static_cast<uint32_t>(cfg.seed) : 42U;
+    std::vector<float> latents = diffusion::make_wan_initial_latents(latent_count, seed);
+    std::cerr << "[torchtrt_diffusion] Initial latent std=" << rms(latents) << "\n";
 
     // 4. Denoising loop with CFG
     if (!denoise_loop(latents, text_embeddings, static_cast<int32_t>(input_ids.size()), null_text,

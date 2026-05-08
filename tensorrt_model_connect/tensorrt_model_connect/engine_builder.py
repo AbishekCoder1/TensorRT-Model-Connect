@@ -423,6 +423,15 @@ def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     return False
 
 
+def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
+    """Detect add-special behavior from the tokenizer embedded in diffusion bundles."""
+    for tok_subdir in ("tokenizer_2", "tokenizer"):
+        tok_dir = model_dir / tok_subdir
+        if tok_dir.is_dir():
+            return _detect_tokenizer_add_special_tokens(tok_dir)
+    return _detect_tokenizer_add_special_tokens(model_dir)
+
+
 def _ensure_tokenizer_json(model_dir: Path) -> None:
     """If the model directory lacks tokenizer.json, generate it from the
     slow tokenizer using HF transformers. This ensures the C++ runtime can
@@ -1139,6 +1148,13 @@ def _build_diffusion_bundle(
 
     trt_version = _get_trt_version()
     trt_abi = _trt_abi_from_version(trt_version)
+    tokenizer_t0 = time.monotonic()
+    tokenizer_add_special_tokens = _detect_diffusion_tokenizer_add_special_tokens(
+        model_dir_path)
+    _add_build_timing(
+        build_timing, "tokenizer_special_tokens_detection_s",
+        time.monotonic() - tokenizer_t0)
+    _write_build_timing(build_timing)
 
     # Build config.json with diffusion config injected
     _effective_precision = "bf16" if fp8_scales else precision
@@ -1149,6 +1165,7 @@ def _build_diffusion_bundle(
         "engine_backend": "trt_rtx" if rtx else "trt",
         "trt_version": trt_version,
         "num_text_encoders": len(components["text_encoders"]),
+        "tokenizer_add_special_tokens": int(tokenizer_add_special_tokens),
     }
     if trt_abi:
         cfg_dict["trt_abi"] = trt_abi
@@ -1229,6 +1246,7 @@ def _build_diffusion_bundle(
         runtime_strategy=getattr(plugin, "runtime_strategy", "diffusion"),
         precision=precision,
         max_cache_length=max_cache_length,
+        tokenizer_add_special_tokens=tokenizer_add_special_tokens,
     )
 
     write_t0 = time.monotonic()

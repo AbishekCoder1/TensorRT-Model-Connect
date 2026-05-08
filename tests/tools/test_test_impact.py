@@ -50,7 +50,9 @@ def mock_repo(tmp_path):
     (tmp_path / "tests" / "e2e" / "data").mkdir(parents=True)
     (tmp_path / "tests" / "e2e_harness" / "runners").mkdir(parents=True)
     (tmp_path / "tests" / "e2e_harness" / "comparators").mkdir(parents=True)
+    (tmp_path / "tests" / "e2e_harness" / "plugins").mkdir(parents=True)
     (tmp_path / "tests" / "e2e_harness" / "references").mkdir(parents=True)
+    (tmp_path / "tests" / "e2e_harness" / "thresholds" / "defaults").mkdir(parents=True)
     (tmp_path / "tests" / "builder").mkdir(parents=True)
     (tmp_path / "tests" / "cpp").mkdir(parents=True)
     (tmp_path / "tests" / "tools").mkdir(parents=True)
@@ -123,6 +125,7 @@ def mock_repo(tmp_path):
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "config.py").write_text("")
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "checkpoint_mapper.py").write_text("")
     (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "graph_ops.py").write_text("")
+    (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "strategies").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "pipelines" / "flux_pipeline.cpp").write_text(
         '#include "runtime/core/gpu_matmul.h"\n'
         '#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"\n',
@@ -524,6 +527,32 @@ class TestHarness:
         assert "flux-schnell" in match.models
         assert "qwen3-0.6b" not in match.models
 
+    def test_harness_plugin(self, imap):
+        """plugins/diffusion.py -> diffusion models."""
+        match = test_impact.classify_file(
+            "tests/e2e_harness/plugins/diffusion.py", imap)
+        assert match.rule == "harness_plugin"
+        assert "flux-schnell" in match.models
+        assert "qwen3-0.6b" not in match.models
+
+    def test_harness_threshold_profile(self, imap):
+        """Diffusion threshold profiles should stay scoped to diffusion models."""
+        match = test_impact.classify_file(
+            "tests/e2e_harness/thresholds/defaults/diffusion_media_generation.json",
+            imap)
+        assert match.rule == "harness_threshold_profile"
+        assert "flux-schnell" in match.models
+        assert "qwen3-0.6b" not in match.models
+
+    def test_torchtrt_diffusion_strategy(self, imap):
+        """Torch-TRT diffusion strategy changes should stay scoped to diffusion."""
+        match = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/strategies/diffusion.py",
+            imap)
+        assert match.rule == "torchtrt_strategy"
+        assert "flux-schnell" in match.models
+        assert "qwen3-0.6b" not in match.models
+
     def test_harness_shared(self, imap):
         """e2e_harness/orchestrator.py -> ALL models."""
         match = test_impact.classify_file(
@@ -582,6 +611,36 @@ diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.
         assert refined.rule == "harness_shared_fp8_scales"
         assert refined.models == ["flux-2-dev-fp8"]
 
+    def test_manifest_loader_diffusion_threshold_diff_can_be_refined(self, imap):
+        """Diffusion-only threshold plumbing in manifest_loader narrows scope."""
+        diff_text = """
+diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_loader.py
+@@ -1 +1 @@
++    if "reference_min_pixel_std_for_ratio" in manifest:
++        overrides["reference_min_pixel_std_for_ratio"] = manifest["reference_min_pixel_std_for_ratio"]
++    if "min_reference_std_ratio" in manifest:
++        overrides["min_reference_std_ratio"] = manifest["min_reference_std_ratio"]
+"""
+        broad = test_impact.classify_file("tests/e2e_harness/manifest_loader.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/manifest_loader.py", broad, diff_text, imap)
+        assert refined.rule == "harness_manifest_diffusion_thresholds"
+        assert "flux-schnell" in refined.models
+        assert "qwen3-0.6b" not in refined.models
+
+    def test_waives_diff_can_be_refined_to_named_model(self, imap):
+        """A waiver change for one known model should only re-run that model."""
+        diff_text = """
+diff --git a/tests/e2e/waives.txt b/tests/e2e/waives.txt
+@@ -1 +1 @@
+-flux-schnell XFAIL (old waiver)
+"""
+        broad = test_impact.classify_file("tests/e2e/waives.txt", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e/waives.txt", broad, diff_text, imap)
+        assert refined.rule == "e2e_waives_model_lines"
+        assert refined.models == ["flux-schnell"]
+
 
 class TestDiffAwareBuilderRefinement:
     def test_cli_fp8_diff_can_be_refined(self, imap):
@@ -621,6 +680,80 @@ diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py b/t
             "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py", broad, diff_text, imap)
         assert refined.rule == "shared_builder_fp8_scales_engine"
         assert refined.models == ["flux-2-dev-fp8"]
+
+    def test_engine_builder_diffusion_tokenizer_diff_can_be_refined(self, imap):
+        """Diffusion tokenizer metadata plumbing should not select every model."""
+        diff_text = """
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py b/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py
+@@ -1 +1 @@
++def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
++    for tok_subdir in ("tokenizer_2", "tokenizer"):
++        tok_dir = model_dir / tok_subdir
++            return _detect_tokenizer_add_special_tokens(tok_dir)
++    tokenizer_add_special_tokens = _detect_diffusion_tokenizer_add_special_tokens(model_dir_path)
++        "tokenizer_add_special_tokens": int(tokenizer_add_special_tokens),
+"""
+        broad = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "shared_builder_diffusion_tokenizer"
+        assert "flux-schnell" in refined.models
+        assert "qwen3-0.6b" not in refined.models
+
+    def test_torchtrt_compiler_tokenizer_diff_can_be_refined(self, mock_repo):
+        """Torch-TRT tokenizer metadata changes narrow to Torch-TRT tokenizer users."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "qwen2.5-0.5b-torchtrt.json",
+            {
+                "name": "qwen2.5-0.5b-torchtrt",
+                "family": "qwen",
+                "runtime_strategy": "torchtrt_decoder",
+                "hf_id": "Q/Qwen2.5",
+            },
+        )
+        _write_json(
+            models_dir / "pixart-sigma-1024-torchtrt.json",
+            {
+                "name": "pixart-sigma-1024-torchtrt",
+                "family": "pixart",
+                "runtime_strategy": "diffusion_pixart_torchtrt",
+                "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        diff_text = """
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py b/tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py
+@@ -1 +1 @@
++        from transformers import AutoTokenizer
++        ids_default = tok.encode("hello")
++        ids_without = tok.encode("hello", add_special_tokens=False)
++        return ids_default != ids_without
++            if bool(tok_cfg.get("add_eos_token", False)):
++                return True
++def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
++    tokenizer_add_special_tokens = _detect_diffusion_tokenizer_add_special_tokens(model_dir_path)
+"""
+        broad = test_impact.classify_file(
+            "tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
+            imap,
+        )
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py",
+            broad,
+            diff_text,
+            imap,
+        )
+        assert refined.rule == "torchtrt_compiler_tokenizer"
+        assert set(refined.models) == {
+            "pixart-sigma-1024-torchtrt",
+            "qwen2.5-0.5b-torchtrt",
+        }
 
 
 # ---------------------------------------------------------------------------

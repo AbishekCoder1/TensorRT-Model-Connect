@@ -23,9 +23,9 @@
     "vae_decode_cosine": 0.95,
     "min_pixel_mean": 0.10,
     "max_pixel_mean": 0.90,
-    "min_pixel_std": 0.01,
+    "min_pixel_std": 0.05,
     "psnr": 2.0,
     "ssim": -1.0
   },
-  "notes": "Torch-TRT PixArt-Sigma: torch_tensorrt compiled engines with fp16 precision. Per-component stages compare individual engines (T5, DiT, VAE) via cosine similarity against HF. End-to-end uses simplified DDIM scheduler (not identical to diffusers DPM-Solver++), so pixel-level PSNR/SSIM will be low — focus is on valid image generation."
+  "notes": "Torch-TRT PixArt-Sigma: torch_tensorrt compiled engines with engine-declared tensor precision. Per-component stages compare individual engines (T5, DiT, VAE) via cosine similarity against HF. End-to-end uses DPM-Solver++ and gates image variance against the HF reference, so blank or garbage images fail even when PSNR/SSIM are weak."
 }

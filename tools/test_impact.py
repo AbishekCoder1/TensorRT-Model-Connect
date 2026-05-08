@@ -161,6 +161,16 @@ COMPARATOR_TASK_STRATEGIES: Dict[str, List[str]] = {
     "neural_operator": ["neural_operator"],
 }
 
+# E2E contract plugin filename (stem) -> task_strategies
+PLUGIN_TASK_STRATEGIES: Dict[str, List[str]] = {
+    "diffusion": ["diffusion_media_generation"],
+    "vl_qa": ["vision_language_generation"],
+    "multimodal_chat": ["omni_multimodal"],
+    "time_series_regression": ["neural_operator"],
+    "time_series_classification": ["neural_operator"],
+    "tts": ["text_to_audio"],
+}
+
 # E2E reference filename (stem) -> task_strategies
 REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
     "hf_transformers": [
@@ -170,6 +180,15 @@ REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
     ],
     "hf_diffusers": ["diffusion_media_generation"],
     "torch_reference": ["speech_to_speech", "omni_multimodal", "neural_operator"],
+}
+
+# E2E threshold profile filename (stem) -> task_strategies
+THRESHOLD_PROFILE_TASK_STRATEGIES: Dict[str, List[str]] = {
+    "diffusion_media_generation": ["diffusion_media_generation"],
+    "torchtrt_diffusion": ["diffusion_media_generation"],
+    "vision_language_generation": ["vision_language_generation"],
+    "omni_multimodal": ["omni_multimodal"],
+    "segmentation": ["segmentation"],
 }
 
 # Shared C++ helper -> affected task_strategies
@@ -535,6 +554,19 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     if m:
         return RuleMatch("torchtrt_family_base", list(imap.all_model_names), unit_tiers, rebuild)
 
+    # Rule 1e: Torch-TRT strategy modules with known modality scope
+    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/strategies/(\w+)\.py$", path)
+    if m:
+        strategy_stem = m.group(1)
+        if strategy_stem == "diffusion":
+            return RuleMatch(
+                "torchtrt_strategy",
+                _models_for_task_strategies(["diffusion_media_generation"], imap),
+                unit_tiers,
+                rebuild,
+            )
+        return RuleMatch("torchtrt_strategy_unknown", list(imap.all_model_names), unit_tiers, rebuild)
+
     # Rule 2: Specialized builder (auto-detected via import scan)
     m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/(\w+)\.py$", path)
     if m:
@@ -664,7 +696,37 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             )
         return RuleMatch("harness_reference_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
-    # Rule 8d: Any other E2E harness file
+    # Rule 8d: E2E contract plugin
+    m = re.match(r"tests/e2e_harness/plugins/(\w+)\.py$", path)
+    if m:
+        plugin_stem = m.group(1)
+        if plugin_stem == "__init__":
+            return RuleMatch("harness_plugin_init", list(imap.all_model_names), unit_tiers, rebuild)
+        task_strategies = PLUGIN_TASK_STRATEGIES.get(plugin_stem, [])
+        if task_strategies:
+            return RuleMatch(
+                "harness_plugin",
+                _models_for_task_strategies(task_strategies, imap),
+                unit_tiers,
+                rebuild,
+            )
+        return RuleMatch("harness_plugin_unknown", list(imap.all_model_names), unit_tiers, rebuild)
+
+    # Rule 8e: E2E threshold profiles
+    m = re.match(r"tests/e2e_harness/thresholds/defaults/([\w_]+)\.json$", path)
+    if m:
+        profile_stem = m.group(1)
+        task_strategies = THRESHOLD_PROFILE_TASK_STRATEGIES.get(profile_stem, [])
+        if task_strategies:
+            return RuleMatch(
+                "harness_threshold_profile",
+                _models_for_task_strategies(task_strategies, imap),
+                unit_tiers,
+                rebuild,
+            )
+        return RuleMatch("harness_threshold_unknown", list(imap.all_model_names), unit_tiers, rebuild)
+
+    # Rule 8f: Any other E2E harness file
     if path.startswith("tests/e2e_harness/"):
         return RuleMatch("harness_shared", list(imap.all_model_names), unit_tiers, rebuild)
 
@@ -916,6 +978,110 @@ def maybe_refine_match_with_diff(
             return RuleMatch(
                 "shared_builder_fp8_scales_engine", fp8_models,
                 match.unit_tiers, match.rebuild_cpp,
+            )
+
+    if path == "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py":
+        allowed_tokens = (
+            "detect_diffusion_tokenizer_add_special_tokens",
+            "detect_tokenizer_add_special_tokens",
+            "detect_add_special",
+            "diffusion",
+            "tokenizer_add_special_tokens",
+            "tokenizer_special_tokens_detection_s",
+            "tokenizer_t0",
+            "tokenizer_2",
+            "tok_subdir",
+            "tok_dir",
+            "if_tok_dir",
+            "model_dir_path",
+            "time_monotonic",
+            "build_timing",
+            "write_build_timing",
+            "add_build_timing",
+            "return_detect_tokenizer_add_special_tokens",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "shared_builder_diffusion_tokenizer",
+                _models_for_task_strategies(["diffusion_media_generation"], imap),
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path == "tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py":
+        allowed_tokens = (
+            "detect_tokenizer_add_special_tokens",
+            "detect_diffusion_tokenizer_add_special_tokens",
+            "detect_add_special",
+            "diffusion",
+            "tokenizer_add_special_tokens",
+            "tokenizer_config_json",
+            "tokenizer_2",
+            "autotokenizer",
+            "ids_default",
+            "ids_without",
+            "add_special_tokens",
+            "add_bos_token",
+            "add_eos_token",
+            "tok_config_path",
+            "tok_cfg",
+            "tok_subdir",
+            "tok_dir",
+            "tok_=",
+            "if_tok_dir",
+            "model_dir_path",
+            "except_exception",
+            "try:",
+            "pass",
+            "return_bool",
+            "return_true",
+            "return_detect_tokenizer_add_special_tokens",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "torchtrt_compiler_tokenizer",
+                _models_for_runtime_strategies(
+                    ["torchtrt_decoder", "diffusion_pixart_torchtrt"], imap),
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path == "tests/e2e_harness/manifest_loader.py":
+        allowed_tokens = (
+            "reference_min_pixel_std_for_ratio",
+            "min_reference_std_ratio",
+            "min_pixel_std",
+            "overrides",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "harness_manifest_diffusion_thresholds",
+                _models_for_task_strategies(["diffusion_media_generation"], imap),
+                match.unit_tiers,
+                match.rebuild_cpp,
+            )
+
+    if path == "tests/e2e/waives.txt":
+        models = []
+        for line in lines:
+            fields = line.split()
+            if fields and fields[0] in imap.all_model_names_set:
+                models.append(fields[0])
+        if models:
+            return RuleMatch(
+                "e2e_waives_model_lines",
+                sorted(set(models)),
+                match.unit_tiers,
+                match.rebuild_cpp,
             )
 
     return match

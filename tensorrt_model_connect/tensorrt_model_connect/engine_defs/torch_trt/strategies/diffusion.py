@@ -77,16 +77,20 @@ class _TrtSafeAttnProcessor:
         key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
         value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
-        # Attention: Q @ K^T / sqrt(d) + mask → softmax → @ V
-        # Using basic ops that TRT can compile.
-        attn_scores = torch.matmul(query, key.transpose(-2, -1))
+        # Attention: Q @ K^T / sqrt(d) + mask -> softmax -> @ V.
+        # Accumulate the score path in fp32. PixArt cross-attention can
+        # overflow in pure fp16 and silently produce NaNs after compilation.
+        query_f = query.float()
+        key_f = key.float()
+        value_f = value.float()
+        attn_scores = torch.matmul(query_f, key_f.transpose(-2, -1))
         attn_scores = attn_scores * (head_dim ** -0.5)
 
         if attention_mask is not None:
-            attn_scores = attn_scores + attention_mask
+            attn_scores = attn_scores + attention_mask.float()
 
         attn_probs = attn_scores.softmax(dim=-1)
-        hidden_states = torch.matmul(attn_probs, value)
+        hidden_states = torch.matmul(attn_probs, value_f).to(query.dtype)
 
         hidden_states = hidden_states.transpose(1, 2).reshape(
             batch_size, -1, attn.heads * head_dim)

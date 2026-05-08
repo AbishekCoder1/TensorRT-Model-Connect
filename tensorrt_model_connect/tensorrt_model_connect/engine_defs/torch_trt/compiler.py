@@ -134,16 +134,36 @@ def _get_gpu_name() -> str:
 
 def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     """Detect whether the HF tokenizer adds special tokens by default."""
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+        ids_default = tok.encode("hello")
+        ids_without = tok.encode("hello", add_special_tokens=False)
+        return ids_default != ids_without
+    except Exception:
+        pass
+
     tok_config_path = model_dir / "tokenizer_config.json"
     if tok_config_path.exists():
         try:
             tok_cfg = json.load(open(tok_config_path))
-            if "add_bos_token" in tok_cfg:
-                return bool(tok_cfg["add_bos_token"])
+            if bool(tok_cfg.get("add_bos_token", False)):
+                return True
+            if bool(tok_cfg.get("add_eos_token", False)):
+                return True
         except Exception:
             pass
     return False
 
+
+def _detect_diffusion_tokenizer_add_special_tokens(model_dir: Path) -> bool:
+    """Detect add-special behavior from the tokenizer embedded in diffusion bundles."""
+    for tok_subdir in ("tokenizer_2", "tokenizer"):
+        tok_dir = model_dir / tok_subdir
+        if tok_dir.is_dir():
+            return _detect_tokenizer_add_special_tokens(tok_dir)
+    return _detect_tokenizer_add_special_tokens(model_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +434,8 @@ def _build_multi_engine_bundle(
     diffusion_config = result.get("diffusion_config", {})
     trt_version = _get_trt_version()
     trt_abi = _trt_abi_from_version(trt_version)
+    tokenizer_add_special_tokens = _detect_diffusion_tokenizer_add_special_tokens(
+        model_dir_path)
 
     # Build config.json for the bundle (using normalized strategy)
     bundle_config = {
@@ -421,6 +443,7 @@ def _build_multi_engine_bundle(
         "engine_backend": "trt",
         "build_backend": "torch_trt",
         "trt_version": trt_version,
+        "tokenizer_add_special_tokens": int(tokenizer_add_special_tokens),
         **diffusion_config,
     }
     if trt_abi:
@@ -455,6 +478,7 @@ def _build_multi_engine_bundle(
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         precision=precision,
         runtime_strategy=normalized_strategy,
+        tokenizer_add_special_tokens=tokenizer_add_special_tokens,
         build_backend="torch_trt",
     )
 

@@ -94,7 +94,54 @@ def load_all_results(artifacts_dir: Path) -> List[Dict[str, Any]]:
                 results.append(data)
             except (json.JSONDecodeError, OSError) as exc:
                 print(f"WARNING: skipping {rj}: {exc}", file=sys.stderr)
+    _attach_diffusion_vlm_assessments(results, artifacts_dir)
     return results
+
+
+def _load_diffusion_vlm_assessments(artifacts_dir: Path) -> Dict[str, Dict[str, Any]]:
+    """Load optional paired-VLM diffusion assessments keyed by case name."""
+    candidates = [
+        artifacts_dir.parent / "diffusion_vlm_assessment.json",
+        artifacts_dir / "diffusion_vlm_assessment.json",
+        artifacts_dir.parent / "diffusion_vlm_similarity.json",
+        artifacts_dir / "diffusion_vlm_similarity.json",
+    ]
+    assessment_path = next((p for p in candidates if p.is_file()), None)
+    if assessment_path is None:
+        return {}
+
+    try:
+        payload = json.loads(assessment_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"WARNING: skipping {assessment_path}: {exc}", file=sys.stderr)
+        return {}
+
+    model_id = payload.get("model_id", "")
+    by_case: Dict[str, Dict[str, Any]] = {}
+    for item in payload.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        case_name = str(item.get("case_name") or "")
+        if not case_name:
+            continue
+        enriched = dict(item)
+        enriched.setdefault("model_id", model_id)
+        enriched.setdefault("_assessment_path", str(assessment_path))
+        by_case[case_name] = enriched
+    return by_case
+
+
+def _attach_diffusion_vlm_assessments(
+    results: List[Dict[str, Any]],
+    artifacts_dir: Path,
+) -> None:
+    assessments = _load_diffusion_vlm_assessments(artifacts_dir)
+    if not assessments:
+        return
+    for result in results:
+        case_name = str(result.get("case_name") or "")
+        if case_name in assessments:
+            result["vlm_assessment"] = assessments[case_name]
 
 
 # ---------------------------------------------------------------------------
@@ -958,7 +1005,39 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
         fallback_dir_name="frames",
     )
 
-    if trt_frame_paths:
+    # Reference frames (side-by-side if available)
+    ref_frame_paths = _resolve_frame_paths(
+        artifacts.get("ref_frames", []),
+        art_dir=art_dir,
+        fallback_dir_name="ref_frames",
+    )
+
+    if trt_frame_paths and ref_frame_paths:
+        selected_trt = _select_frames(trt_frame_paths, _MAX_DIFFUSION_FRAMES)
+        selected_ref = _select_frames(ref_frame_paths, _MAX_DIFFUSION_FRAMES)
+        parts.append("<h4>Visual Review: TRT vs Reference</h4>")
+        parts.append('<div class="frame-compare">')
+        for idx, (trt_fp, ref_fp) in enumerate(zip(selected_trt, selected_ref)):
+            trt_uri = encode_file_base64(trt_fp, "image/png")
+            ref_uri = encode_file_base64(ref_fp, "image/png")
+            parts.append('<div class="frame-pair">')
+            parts.append(f'<div class="frame-pair-title">Frame {idx + 1}</div>')
+            parts.append('<div class="frame-pair-images">')
+            if trt_uri:
+                parts.append(
+                    '<figure><figcaption>TRT</figcaption>'
+                    f'<img src="{trt_uri}" class="frame-img" /></figure>')
+            else:
+                parts.append("<span class='missing'>TRT frame too large</span>")
+            if ref_uri:
+                parts.append(
+                    '<figure><figcaption>Reference</figcaption>'
+                    f'<img src="{ref_uri}" class="frame-img" /></figure>')
+            else:
+                parts.append("<span class='missing'>Reference frame too large</span>")
+            parts.append("</div></div>")
+        parts.append("</div>")
+    elif trt_frame_paths:
         selected = _select_frames(trt_frame_paths, _MAX_DIFFUSION_FRAMES)
         parts.append("<h4>TRT Generated Frames</h4>")
         parts.append('<div class="frame-gallery">')
@@ -969,15 +1048,7 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
             else:
                 parts.append("<span class='missing'>Frame too large</span>")
         parts.append("</div>")
-
-    # Reference frames (side-by-side if available)
-    ref_frame_paths = _resolve_frame_paths(
-        artifacts.get("ref_frames", []),
-        art_dir=art_dir,
-        fallback_dir_name="ref_frames",
-    )
-
-    if ref_frame_paths:
+    elif ref_frame_paths:
         selected_ref = _select_frames(ref_frame_paths, _MAX_DIFFUSION_FRAMES)
         parts.append("<h4>Reference Frames</h4>")
         parts.append('<div class="frame-gallery">')
@@ -987,10 +1058,78 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
                 parts.append(f'<img src="{uri}" class="frame-img" />')
         parts.append("</div>")
 
+    parts.append(_render_diffusion_vlm_assessment(result))
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
     parts.append(_render_timing_sections(result))
     return "\n".join(parts)
+
+
+def _render_diffusion_vlm_assessment(result: Dict[str, Any]) -> str:
+    assessment = result.get("vlm_assessment")
+    if not isinstance(assessment, dict):
+        return (
+            "<h4>VLM Semantic Assessment</h4>"
+            "<p><em>No VLM assessment artifact was found for this model.</em></p>"
+        )
+
+    judgment = assessment.get("vlm_judgment", {})
+    if not isinstance(judgment, dict):
+        judgment = {}
+    gate = judgment.get("vlm_gate", {})
+    if not isinstance(gate, dict):
+        gate = {}
+
+    gate_failed = bool(gate.get("failed", False))
+    gate_label = "FAIL" if gate_failed else "PASS"
+    gate_cls = "vlm-fail" if gate_failed else "vlm-pass"
+    reasons = gate.get("reasons") or []
+    if isinstance(reasons, list):
+        reason_text = (
+            "; ".join(str(r) for r in reasons)
+            or str(judgment.get("reason", ""))
+        )
+    else:
+        reason_text = str(reasons)
+
+    rows = [
+        ("Judge model", assessment.get("model_id", "")),
+        ("Semantic similarity", judgment.get("semantic_similarity_0_to_5", "")),
+        ("TRT prompt alignment", judgment.get("trt_prompt_alignment_0_to_5", "")),
+        ("HF prompt alignment", judgment.get("hf_prompt_alignment_0_to_5", "")),
+        ("TRT visual quality", judgment.get("trt_visual_quality_0_to_5", "")),
+        ("HF visual quality", judgment.get("hf_visual_quality_0_to_5", "")),
+        ("TRT relative to HF", judgment.get("trt_relative_to_hf", "")),
+        ("Regression", judgment.get("is_regression", "")),
+        ("Gate", gate_label),
+        ("Reason", reason_text or judgment.get("reason", "")),
+    ]
+    table_rows = "\n".join(
+        f"<tr><td>{_esc(name)}</td><td>{_format_value(value)}</td></tr>"
+        for name, value in rows
+        if value not in ("", None)
+    )
+
+    descriptions = []
+    trt_description = judgment.get("trt_description")
+    hf_description = judgment.get("hf_description")
+    if trt_description:
+        descriptions.append(
+            f"<p><strong>TRT description:</strong> {_esc(trt_description)}</p>")
+    if hf_description:
+        descriptions.append(
+            f"<p><strong>HF description:</strong> {_esc(hf_description)}</p>")
+
+    return (
+        '<section class="vlm-assessment">'
+        '<h4>VLM Semantic Assessment</h4>'
+        f'<p class="{gate_cls}"><strong>Gate:</strong> {gate_label}</p>'
+        '<table class="vlm-table"><tbody>'
+        f"{table_rows}"
+        "</tbody></table>"
+        + "".join(descriptions)
+        + "</section>"
+    )
 
 
 def _stage_output_returncode(stage: Dict[str, Any]) -> Any:
@@ -1250,6 +1389,15 @@ def render_model_section(
 
 def _key_metric(result: Dict[str, Any]) -> str:
     """Extract the single most representative metric for the summary row."""
+    assessment = result.get("vlm_assessment")
+    if isinstance(assessment, dict):
+        judgment = assessment.get("vlm_judgment", {})
+        if isinstance(judgment, dict) and "semantic_similarity_0_to_5" in judgment:
+            return (
+                "vlm_semantic_similarity="
+                f"{_format_value(judgment.get('semantic_similarity_0_to_5'))}"
+            )
+
     stages = result.get("stages", {})
     # Priority: logit_cosine_p5, token_agreement_rate, miou, psnr, mel_distance
     priority = [
@@ -1460,10 +1608,28 @@ summary:hover { background: #f8fafc; }
   cursor: pointer; font-size: 0.75em; }
 .copy-btn:hover { background: #64748b; }
 .frame-gallery { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.frame-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px; margin: 8px 0; }
+.frame-pair { border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px;
+  background: #fff; }
+.frame-pair-title { font-weight: 600; font-size: 0.85em; margin-bottom: 6px; }
+.frame-pair-images { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.frame-pair figure { margin: 0; }
+.frame-pair figcaption { font-size: 0.75em; color: #64748b; margin-bottom: 3px; }
+.frame-pair .frame-img { width: 100%; height: auto; max-height: 170px;
+  object-fit: contain; background: #f8fafc; }
 .frame-img { max-width: 220px; max-height: 180px; border-radius: 4px;
   border: 1px solid #e2e8f0; }
 .preview-img { max-width: 400px; max-height: 300px; border-radius: 6px;
   margin: 6px 0; border: 1px solid #e2e8f0; }
+.vlm-assessment { margin: 12px 0; padding: 10px; border: 1px solid #e2e8f0;
+  border-radius: 6px; background: #f8fafc; }
+.vlm-pass { color: #166534; }
+.vlm-fail { color: #991b1b; }
+.vlm-table { width: 100%; border-collapse: collapse; margin: 6px 0;
+  font-size: 0.9em; }
+.vlm-table td { padding: 5px 8px; border-bottom: 1px solid #e2e8f0; }
+.vlm-table td:first-child { width: 220px; color: #475569; font-weight: 600; }
 audio { margin: 6px 0; }
 .missing { color: #9ca3af; font-style: italic; }
 .env-section ul { list-style: none; columns: 2; }

@@ -49,6 +49,16 @@ def _compare_frame_dirs(trt_dir: str, ref_dir: str) -> tuple[float, float] | Non
     return float(np.mean(psnr_values)), float(np.mean(ssim_values))
 
 
+def _threshold(
+    metrics: dict,
+    contract_key: str,
+    general_key: str,
+    default: float,
+) -> float:
+    value = metrics.get(contract_key, metrics.get(general_key, default))
+    return float(value)
+
+
 class DiffusionPlugin:
     reference_families = ["diffusers_image_gen", "diffusers_video_gen"]
     user_contract = "diffusion_image"
@@ -101,9 +111,15 @@ class DiffusionPlugin:
             mean = trt_pixels.get("mean", 0.0)
             std = trt_pixels.get("std", 0.0)
 
-            min_mean = threshold.metrics.get("contract_min_pixel_mean", 0.05)
-            max_mean = threshold.metrics.get("contract_max_pixel_mean", 0.95)
-            min_std = threshold.metrics.get("contract_min_pixel_std", 0.01)
+            min_mean = _threshold(
+                threshold.metrics, "contract_min_pixel_mean",
+                "min_pixel_mean", 0.05)
+            max_mean = _threshold(
+                threshold.metrics, "contract_max_pixel_mean",
+                "max_pixel_mean", 0.95)
+            min_std = _threshold(
+                threshold.metrics, "contract_min_pixel_std",
+                "min_pixel_std", 0.05)
 
             mean_ok = min_mean <= mean <= max_mean
             std_ok = std >= min_std
@@ -120,9 +136,15 @@ class DiffusionPlugin:
             mean = ref_pixels.get("mean", 0.0)
             std = ref_pixels.get("std", 0.0)
 
-            min_mean = threshold.metrics.get("contract_min_pixel_mean", 0.05)
-            max_mean = threshold.metrics.get("contract_max_pixel_mean", 0.95)
-            min_std = threshold.metrics.get("contract_min_pixel_std", 0.01)
+            min_mean = _threshold(
+                threshold.metrics, "contract_min_pixel_mean",
+                "min_pixel_mean", 0.05)
+            max_mean = _threshold(
+                threshold.metrics, "contract_max_pixel_mean",
+                "max_pixel_mean", 0.95)
+            min_std = _threshold(
+                threshold.metrics, "contract_min_pixel_std",
+                "min_pixel_std", 0.05)
 
             mean_ok = min_mean <= mean <= max_mean
             std_ok = std >= min_std
@@ -133,6 +155,32 @@ class DiffusionPlugin:
             metrics["reference_pixel_std"] = MetricResult(
                 value=std, threshold=min_std, operator=">=",
                 passed=std_ok, note="reference non-uniform check")
+
+        if isinstance(trt_pixels, dict) and isinstance(ref_pixels, dict):
+            trt_std = float(trt_pixels.get("std", 0.0))
+            ref_std = float(ref_pixels.get("std", 0.0))
+            min_ref_std = _threshold(
+                threshold.metrics,
+                "contract_reference_min_pixel_std_for_ratio",
+                "reference_min_pixel_std_for_ratio",
+                0.08,
+            )
+            ratio_threshold = _threshold(
+                threshold.metrics,
+                "contract_min_reference_std_ratio",
+                "min_reference_std_ratio",
+                0.35,
+            )
+            if ref_std >= min_ref_std:
+                ratio = trt_std / ref_std if ref_std > 0.0 else 0.0
+                ratio_ok = ratio >= ratio_threshold
+                metrics["reference_pixel_std_ratio"] = MetricResult(
+                    value=ratio,
+                    threshold=ratio_threshold,
+                    operator=">=",
+                    passed=ratio_ok,
+                    note=f"trt_std={trt_std:.4f}, ref_std={ref_std:.4f}",
+                )
 
         psnr_threshold = threshold.metrics.get(
             "contract_psnr_threshold", threshold.metrics.get("psnr"))
