@@ -59,6 +59,32 @@ prepare_shared_directories() {
 
 prepare_shared_directories
 
+configure_e2e_timing_cache() {
+  local cache_root="${TRTMC_STORAGE_ROOT:-${ENGINE_DIR:-.}}"
+  local opt_level="${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-default}"
+  local cache_suffix="opt${opt_level}"
+  if [ -n "${TRTMC_MAX_NUM_TACTICS:-}" ]; then
+    cache_suffix="${cache_suffix}-tactics${TRTMC_MAX_NUM_TACTICS}"
+  fi
+  if [ -n "${TRTMC_AVG_TIMING_ITERATIONS:-}" ]; then
+    cache_suffix="${cache_suffix}-avg${TRTMC_AVG_TIMING_ITERATIONS}"
+  fi
+  if [ -z "${TRTMC_TRT_TIMING_CACHE_PATH:-}" ]; then
+    export TRTMC_TRT_TIMING_CACHE_PATH="${cache_root%/}/trt-timing-cache/tensorrt-${cache_suffix}.cache"
+  fi
+  mkdir -p "$(dirname "$TRTMC_TRT_TIMING_CACHE_PATH")"
+  echo "TRTMC_TRT_TIMING_CACHE_PATH=${TRTMC_TRT_TIMING_CACHE_PATH}"
+  if [ -n "${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-}" ]; then
+    echo "TRTMC_BUILDER_OPTIMIZATION_LEVEL=${TRTMC_BUILDER_OPTIMIZATION_LEVEL}"
+  fi
+  if [ -n "${TRTMC_MAX_NUM_TACTICS:-}" ]; then
+    echo "TRTMC_MAX_NUM_TACTICS=${TRTMC_MAX_NUM_TACTICS}"
+  fi
+  if [ -n "${TRTMC_AVG_TIMING_ITERATIONS:-}" ]; then
+    echo "TRTMC_AVG_TIMING_ITERATIONS=${TRTMC_AVG_TIMING_ITERATIONS}"
+  fi
+}
+
 setup_environment() {
   git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" || true
   git config --global --add safe.directory "*" || true
@@ -318,6 +344,9 @@ if len(models) > 10:
     return 0
   fi
 
+  export TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-1}"
+  configure_e2e_timing_cache
+
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
   env -u HF_HUB_OFFLINE python scripts/warm_hf_cache.py --models-file e2e_models.txt
   echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
@@ -343,6 +372,7 @@ run_full_e2e() {
 
   echo "=== Nightly Full E2E: all models ==="
   nvidia-smi
+  configure_e2e_timing_cache
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
   python scripts/warm_hf_cache.py --exclude-ci-tier l0_only
   echo "=== Phase 2: parallel rebuild (offline, local cache) ==="

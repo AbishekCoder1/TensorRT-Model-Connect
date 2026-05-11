@@ -194,63 +194,14 @@ echo "Collected $TOTAL tests"
 # --- Schedule tests across GPUs × workers ------------------------------------
 
 SCHEDULE_JSON="$RESULT_DIR/schedule.json"
-echo "$TESTS" | python "$SCRIPT_DIR/schedule_e2e.py" \
-    --num-gpus "$NUM_GPUS" \
-    --workers-per-gpu "$WORKERS_PER_GPU" \
+SCHEDULE_ARGS=(
+    --num-gpus "$NUM_GPUS"
+    --workers-per-gpu "$WORKERS_PER_GPU"
+    --split-exclusive-phases
+)
+echo "$TESTS" | python "$SCRIPT_DIR/schedule_e2e.py" "${SCHEDULE_ARGS[@]}" \
     > "$SCHEDULE_JSON"
 
-echo ""
-
-# --- Launch workers -----------------------------------------------------------
-
-PIDS=()
-WORKER_LABELS=()
-START_TIME=$(date +%s)
-
-# Parse schedule JSON and launch one pytest per worker slot.
-# jq-free: use Python to emit "gpu_id worker_idx test1 test2 ..." lines.
-while IFS= read -r line; do
-    GPU_ID=$(echo "$line" | cut -d' ' -f1)
-    WORKER_IDX=$(echo "$line" | cut -d' ' -f2)
-    WORKER_TESTS=$(echo "$line" | cut -d' ' -f3-)
-    WORKER_COUNT=$(echo "$WORKER_TESTS" | wc -w)
-
-    [ "$WORKER_COUNT" -eq 0 ] && continue
-
-    LABEL="gpu${GPU_ID}-w${WORKER_IDX}"
-    PHYSICAL_GPU_ID="${GPU_IDS[$GPU_ID]}"
-    echo "  $LABEL: $WORKER_COUNT tests"
-
-    (
-        export CUDA_VISIBLE_DEVICES=$PHYSICAL_GPU_ID
-        # shellcheck disable=SC2086
-        "$HF_PYTHON" -m pytest $WORKER_TESTS -v \
-            --engine-dir "$ENGINE_DIR" \
-            --trtmc-binary "$TRTMC_BINARY" \
-            --hf-python "$HF_PYTHON" \
-            --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
-            --junitxml="$RESULT_DIR/junit-${LABEL}.xml" \
-            "${EXTRA_ARGS[@]}" \
-            > "$RESULT_DIR/console-${LABEL}.log" 2>&1
-    ) &
-    PIDS+=($!)
-    WORKER_LABELS+=("$LABEL")
-
-done < <(python -c "
-import json, sys
-schedule = json.load(open('$SCHEDULE_JSON'))
-for gpu_id in sorted(schedule, key=int):
-    for w_idx, tests in enumerate(schedule[gpu_id]):
-        print(f'{gpu_id} {w_idx} {\" \".join(tests)}')
-")
-
-TOTAL_WORKERS=${#PIDS[@]}
-
-echo ""
-echo "Workers launched: $TOTAL_WORKERS (PIDs: ${PIDS[*]})"
-echo "Logs: $RESULT_DIR/console-gpu*-w*.log"
-echo "  (live output suppressed to avoid interleaving — tail -f a log to watch)"
-echo "Waiting for all workers..."
 echo ""
 
 # --- Helpers ------------------------------------------------------------------
@@ -335,60 +286,386 @@ print_progress() {
         eta_str=" | ETA $(format_duration "$eta")"
     fi
 
-    echo "[progress $(date +%H:%M:%S)] tests ${done}/${TOTAL} (${pct}%) pass=${pass} fail=${fail} skip=${skip} xfail=${xfail} xpass=${xpass} | workers ${workers_done}/${TOTAL_WORKERS} done, ${workers_running} running | elapsed $(format_duration "$elapsed")${eta_str}"
+    echo "[progress $(date +%H:%M:%S)] tests ${done}/${TOTAL} (${pct}%) pass=${pass} fail=${fail} skip=${skip} xfail=${xfail} xpass=${xpass} | ${CURRENT_PHASE} workers ${workers_done}/${TOTAL_WORKERS} done, ${workers_running} running | elapsed $(format_duration "$elapsed")${eta_str}"
 }
 
-# --- Wait and collect exit codes ----------------------------------------------
+run_schedule_phase() {
+    local phase_idx="$1"
+    local phase_name
+    phase_name=$(python - "$SCHEDULE_JSON" "$phase_idx" <<'PY'
+import json
+import sys
 
-FAILURES=0
-WORKERS_DONE=0
-LAST_PROGRESS_TS=0
-declare -a WORKER_FINISHED
-for i in "${!PIDS[@]}"; do
-    WORKER_FINISHED[$i]=0
-done
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+print(data["phases"][int(sys.argv[2])]["name"])
+PY
+)
+    CURRENT_PHASE="$phase_name"
 
-while [ "$WORKERS_DONE" -lt "$TOTAL_WORKERS" ]; do
-    RUNNING_NOW=0
-    for i in "${!PIDS[@]}"; do
-        if [ "${WORKER_FINISHED[$i]}" -eq 1 ]; then
-            continue
-        fi
+    echo "=== E2E phase: $phase_name ==="
 
-        pid="${PIDS[$i]}"
-        if kill -0 "$pid" 2>/dev/null; then
-            RUNNING_NOW=$((RUNNING_NOW + 1))
-            continue
-        fi
+    local -a pids=()
+    local -a worker_labels=()
+    local phase_start
+    phase_start=$(date +%s)
 
-        if wait "$pid"; then
-            rc=0
-        else
-            rc=$?
-        fi
+    # Parse schedule JSON and launch one pytest per worker slot.
+    # jq-free: use Python to emit "gpu_id worker_idx test1 test2 ..." lines.
+    while IFS= read -r line; do
+        GPU_ID=$(echo "$line" | cut -d' ' -f1)
+        WORKER_IDX=$(echo "$line" | cut -d' ' -f2)
+        WORKER_TESTS=$(echo "$line" | cut -d' ' -f3-)
+        WORKER_COUNT=$(echo "$WORKER_TESTS" | wc -w)
 
-        WORKER_FINISHED[$i]=1
-        WORKERS_DONE=$((WORKERS_DONE + 1))
-        if [ "$rc" -ne 0 ]; then
-            FAILURES=$((FAILURES + 1))
-            echo "  ${WORKER_LABELS[$i]}: FAILED (exit code $rc)"
-        else
-            echo "  ${WORKER_LABELS[$i]}: OK"
-        fi
+        [ "$WORKER_COUNT" -eq 0 ] && continue
 
-        LOG="$RESULT_DIR/console-${WORKER_LABELS[$i]}.log"
-        SUMMARY=$(grep -E "^=+ .* in .* =+$" "$LOG" | tail -1 || true)
-        [ -n "$SUMMARY" ] && echo "    $SUMMARY"
-    done
+        LABEL="gpu${GPU_ID}-${phase_name}-w${WORKER_IDX}"
+        PHYSICAL_GPU_ID="${GPU_IDS[$GPU_ID]}"
+        echo "  $LABEL: $WORKER_COUNT tests"
 
-    NOW_TS=$(date +%s)
-    if [ "$LAST_PROGRESS_TS" -eq 0 ] || [ $(( NOW_TS - LAST_PROGRESS_TS )) -ge "$PROGRESS_INTERVAL" ] || [ "$RUNNING_NOW" -eq 0 ]; then
-        print_progress "$WORKERS_DONE" "$RUNNING_NOW"
-        LAST_PROGRESS_TS="$NOW_TS"
+        (
+            export CUDA_VISIBLE_DEVICES=$PHYSICAL_GPU_ID
+            # shellcheck disable=SC2086
+            "$HF_PYTHON" -m pytest $WORKER_TESTS -v \
+                --engine-dir "$ENGINE_DIR" \
+                --trtmc-binary "$TRTMC_BINARY" \
+                --hf-python "$HF_PYTHON" \
+                --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
+                --junitxml="$RESULT_DIR/junit-${LABEL}.xml" \
+                "${EXTRA_ARGS[@]}" \
+                > "$RESULT_DIR/console-${LABEL}.log" 2>&1
+        ) &
+        pids+=($!)
+        worker_labels+=("$LABEL")
+        ALL_WORKER_LABELS+=("$LABEL")
+
+    done < <(python - "$SCHEDULE_JSON" "$phase_idx" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+schedule = data["phases"][int(sys.argv[2])]["schedule"]
+for gpu_id in sorted(schedule, key=int):
+    for w_idx, tests in enumerate(schedule[gpu_id]):
+        print(f'{gpu_id} {w_idx} {" ".join(tests)}')
+PY
+)
+
+    TOTAL_WORKERS=${#pids[@]}
+    if [ "$TOTAL_WORKERS" -eq 0 ]; then
+        echo "No workers in phase $phase_name"
+        return 0
     fi
 
-    [ "$WORKERS_DONE" -lt "$TOTAL_WORKERS" ] && sleep 5
-done
+    echo ""
+    echo "Workers launched: $TOTAL_WORKERS (PIDs: ${pids[*]})"
+    echo "Logs: $RESULT_DIR/console-gpu*-w*.log"
+    echo "  (live output suppressed to avoid interleaving; tail -f a log to watch)"
+    echo "Waiting for phase $phase_name workers..."
+    echo ""
+
+    local phase_failures=0
+    local workers_done=0
+    local last_progress_ts=0
+    local -a worker_finished=()
+    local i pid rc running_now now_ts log summary
+    for i in "${!pids[@]}"; do
+        worker_finished[$i]=0
+    done
+
+    while [ "$workers_done" -lt "$TOTAL_WORKERS" ]; do
+        running_now=0
+        for i in "${!pids[@]}"; do
+            if [ "${worker_finished[$i]}" -eq 1 ]; then
+                continue
+            fi
+
+            pid="${pids[$i]}"
+            if kill -0 "$pid" 2>/dev/null; then
+                running_now=$((running_now + 1))
+                continue
+            fi
+
+            if wait "$pid"; then
+                rc=0
+            else
+                rc=$?
+            fi
+
+            worker_finished[$i]=1
+            workers_done=$((workers_done + 1))
+            if [ "$rc" -ne 0 ]; then
+                phase_failures=$((phase_failures + 1))
+                FAILURES=$((FAILURES + 1))
+                echo "  ${worker_labels[$i]}: FAILED (exit code $rc)"
+            else
+                echo "  ${worker_labels[$i]}: OK"
+            fi
+
+            log="$RESULT_DIR/console-${worker_labels[$i]}.log"
+            summary=$(grep -E "^=+ .* in .* =+$" "$log" | tail -1 || true)
+            [ -n "$summary" ] && echo "    $summary"
+        done
+
+        now_ts=$(date +%s)
+        if [ "$last_progress_ts" -eq 0 ] || [ $(( now_ts - last_progress_ts )) -ge "$PROGRESS_INTERVAL" ] || [ "$running_now" -eq 0 ]; then
+            print_progress "$workers_done" "$running_now"
+            last_progress_ts="$now_ts"
+        fi
+
+        [ "$workers_done" -lt "$TOTAL_WORKERS" ] && sleep 5
+    done
+
+    local phase_end phase_elapsed phase_minutes phase_seconds_rem
+    phase_end=$(date +%s)
+    phase_elapsed=$(( phase_end - phase_start ))
+    phase_minutes=$(( phase_elapsed / 60 ))
+    phase_seconds_rem=$(( phase_elapsed % 60 ))
+
+    echo ""
+    echo "=== Phase $phase_name finished in ${phase_minutes}m ${phase_seconds_rem}s ==="
+
+    return "$phase_failures"
+}
+
+run_pipelined_exclusive_shared() {
+    CURRENT_PHASE="pipelined"
+
+    echo "=== E2E pipelined phases: exclusive_gpu -> shared ==="
+    echo "Exclusive workers keep whole-GPU isolation; each GPU starts its shared workers as soon as its exclusive queue finishes."
+    echo ""
+
+    local -a pids=()
+    local -a worker_labels=()
+    local -a worker_gpu_ids=()
+    local -a worker_phase_names=()
+    local -a worker_finished=()
+    local -a shared_started=()
+    local planned_workers
+    planned_workers=$(python - "$SCHEDULE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+print(sum(len(workers) for phase in data["phases"] for workers in phase["schedule"].values()))
+PY
+)
+    TOTAL_WORKERS="$planned_workers"
+
+    launch_worker() {
+        local phase_name="$1"
+        local gpu_id="$2"
+        local worker_idx="$3"
+        local worker_tests="$4"
+        local worker_count label physical_gpu_id
+
+        worker_count=$(echo "$worker_tests" | wc -w)
+        [ "$worker_count" -eq 0 ] && return 0
+
+        label="gpu${gpu_id}-${phase_name}-w${worker_idx}"
+        physical_gpu_id="${GPU_IDS[$gpu_id]}"
+        echo "  $label: $worker_count tests"
+
+        (
+            export CUDA_VISIBLE_DEVICES=$physical_gpu_id
+            # shellcheck disable=SC2086
+            "$HF_PYTHON" -m pytest $worker_tests -v \
+                --engine-dir "$ENGINE_DIR" \
+                --trtmc-binary "$TRTMC_BINARY" \
+                --hf-python "$HF_PYTHON" \
+                --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
+                --junitxml="$RESULT_DIR/junit-${label}.xml" \
+                "${EXTRA_ARGS[@]}" \
+                > "$RESULT_DIR/console-${label}.log" 2>&1
+        ) &
+        pids+=($!)
+        worker_labels+=("$label")
+        worker_gpu_ids+=("$gpu_id")
+        worker_phase_names+=("$phase_name")
+        worker_finished+=(0)
+        ALL_WORKER_LABELS+=("$label")
+    }
+
+    launch_shared_for_gpu() {
+        local gpu_id="$1"
+        if [ "${shared_started[$gpu_id]:-0}" -eq 1 ]; then
+            return 0
+        fi
+        shared_started[$gpu_id]=1
+
+        while IFS= read -r line; do
+            local worker_idx worker_tests
+            worker_idx=$(echo "$line" | cut -d' ' -f1)
+            worker_tests=$(echo "$line" | cut -d' ' -f2-)
+            launch_worker "shared" "$gpu_id" "$worker_idx" "$worker_tests"
+        done < <(python - "$SCHEDULE_JSON" "$gpu_id" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+schedule = data["phases"][1]["schedule"]
+for w_idx, tests in enumerate(schedule.get(sys.argv[2], [])):
+    print(f'{w_idx} {" ".join(tests)}')
+PY
+)
+    }
+
+    local -a exclusive_gpu_ids=()
+    while IFS= read -r line; do
+        GPU_ID=$(echo "$line" | cut -d' ' -f1)
+        WORKER_IDX=$(echo "$line" | cut -d' ' -f2)
+        WORKER_TESTS=$(echo "$line" | cut -d' ' -f3-)
+        exclusive_gpu_ids+=("$GPU_ID")
+        launch_worker "exclusive_gpu" "$GPU_ID" "$WORKER_IDX" "$WORKER_TESTS"
+    done < <(python - "$SCHEDULE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+schedule = data["phases"][0]["schedule"]
+for gpu_id in sorted(schedule, key=int):
+    for w_idx, tests in enumerate(schedule[gpu_id]):
+        print(f'{gpu_id} {w_idx} {" ".join(tests)}')
+PY
+)
+
+    while IFS= read -r GPU_ID; do
+        local has_exclusive=0
+        for exclusive_gpu_id in "${exclusive_gpu_ids[@]}"; do
+            if [ "$exclusive_gpu_id" = "$GPU_ID" ]; then
+                has_exclusive=1
+                break
+            fi
+        done
+        if [ "$has_exclusive" -eq 0 ]; then
+            launch_shared_for_gpu "$GPU_ID"
+        fi
+    done < <(python - "$SCHEDULE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+for gpu_id in sorted(data["phases"][1]["schedule"], key=int):
+    print(gpu_id)
+PY
+)
+
+    if [ "${#pids[@]}" -eq 0 ]; then
+        echo "No workers in pipelined E2E schedule"
+        return 0
+    fi
+
+    echo ""
+    echo "Workers planned: $planned_workers"
+    echo "Initial workers launched: ${#pids[@]} (PIDs: ${pids[*]})"
+    echo "Logs: $RESULT_DIR/console-gpu*-w*.log"
+    echo "  (live output suppressed to avoid interleaving; tail -f a log to watch)"
+    echo "Waiting for pipelined workers..."
+    echo ""
+
+    local pipeline_failures=0
+    local workers_done=0
+    local last_progress_ts=0
+    local i pid rc running_now now_ts log summary
+
+    while [ "$workers_done" -lt "$planned_workers" ]; do
+        running_now=0
+        for i in "${!pids[@]}"; do
+            if [ "${worker_finished[$i]}" -eq 1 ]; then
+                continue
+            fi
+
+            pid="${pids[$i]}"
+            if kill -0 "$pid" 2>/dev/null; then
+                running_now=$((running_now + 1))
+                continue
+            fi
+
+            if wait "$pid"; then
+                rc=0
+            else
+                rc=$?
+            fi
+
+            worker_finished[$i]=1
+            workers_done=$((workers_done + 1))
+            if [ "$rc" -ne 0 ]; then
+                pipeline_failures=$((pipeline_failures + 1))
+                FAILURES=$((FAILURES + 1))
+                echo "  ${worker_labels[$i]}: FAILED (exit code $rc)"
+            else
+                echo "  ${worker_labels[$i]}: OK"
+            fi
+
+            log="$RESULT_DIR/console-${worker_labels[$i]}.log"
+            summary=$(grep -E "^=+ .* in .* =+$" "$log" | tail -1 || true)
+            [ -n "$summary" ] && echo "    $summary"
+
+            if [ "${worker_phase_names[$i]}" = "exclusive_gpu" ]; then
+                launch_shared_for_gpu "${worker_gpu_ids[$i]}"
+            fi
+        done
+
+        now_ts=$(date +%s)
+        if [ "$last_progress_ts" -eq 0 ] || [ $(( now_ts - last_progress_ts )) -ge "$PROGRESS_INTERVAL" ] || [ "$running_now" -eq 0 ]; then
+            print_progress "$workers_done" "$running_now"
+            last_progress_ts="$now_ts"
+        fi
+
+        [ "$workers_done" -lt "$planned_workers" ] && sleep 5
+    done
+
+    echo ""
+    echo "=== Pipelined exclusive/shared schedule finished ==="
+
+    return "$pipeline_failures"
+}
+
+# --- Launch workers and collect exit codes ------------------------------------
+
+START_TIME=$(date +%s)
+declare -a ALL_WORKER_LABELS=()
+FAILURES=0
+TOTAL_WORKERS=0
+CURRENT_PHASE="startup"
+
+PHASE_COUNT=$(python - "$SCHEDULE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+print(len(data["phases"]))
+PY
+)
+
+if python - "$SCHEDULE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+names = [phase["name"] for phase in data["phases"]]
+raise SystemExit(0 if names == ["exclusive_gpu", "shared"] else 1)
+PY
+then
+    if ! run_pipelined_exclusive_shared; then
+        echo "Stopping after failed pipelined E2E schedule"
+    fi
+else
+    for ((phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++)); do
+        if ! run_schedule_phase "$phase_idx"; then
+            echo "Stopping after failed E2E phase: $CURRENT_PHASE"
+            break
+        fi
+    done
+fi
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
@@ -396,7 +673,7 @@ MINUTES=$(( ELAPSED / 60 ))
 SECONDS_REM=$(( ELAPSED % 60 ))
 
 echo ""
-echo "=== All $TOTAL_WORKERS workers finished in ${MINUTES}m ${SECONDS_REM}s ==="
+echo "=== All E2E phases finished in ${MINUTES}m ${SECONDS_REM}s ==="
 
 # --- Merge JUnit XMLs --------------------------------------------------------
 
@@ -419,6 +696,86 @@ print(f'Merged {len(files)} files -> $RESULT_DIR/junit.xml')
 print(f'Total: {t} tests')
 " 2>/dev/null || echo "(install junitparser to auto-merge: pip install junitparser)"
 
+python3 - "$RESULT_DIR/artifacts" <<'PY' || true
+import json
+import sys
+from pathlib import Path
+
+artifacts_dir = Path(sys.argv[1])
+if not artifacts_dir.is_dir():
+    raise SystemExit(0)
+
+rows = []
+aggregate = {
+    "bundle_build_s": 0.0,
+    "trt_compile_s": 0.0,
+    "trt_load_deserialization_s": 0.0,
+    "reference_s": 0.0,
+    "inference_s": 0.0,
+    "comparison_s": 0.0,
+}
+for result_path in sorted(artifacts_dir.glob("*/result.json")):
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        continue
+    timing = result.get("timing") or {}
+    detailed = result.get("detailed_timing") or {}
+    row = {
+        "case": result.get("case_name") or result_path.parent.name,
+        "status": result.get("status") or "",
+        "bundle_build_s": float(timing.get("bundle_build_s") or 0.0),
+        "trt_compile_s": float(detailed.get("trt_compile_s") or 0.0),
+        "trt_load_deserialization_s": float(
+            detailed.get("trt_load_deserialization_s") or 0.0),
+        "reference_s": float(detailed.get("reference_s") or 0.0),
+        "inference_s": float(detailed.get("inference_s") or 0.0),
+        "comparison_s": float(detailed.get("comparison_s") or 0.0),
+    }
+    row["accounted_s"] = (
+        row["bundle_build_s"]
+        + row["trt_load_deserialization_s"]
+        + row["reference_s"]
+        + row["inference_s"]
+        + row["comparison_s"]
+    )
+    rows.append(row)
+    for key in aggregate:
+        aggregate[key] += row[key]
+
+if not rows:
+    raise SystemExit(0)
+
+summary_path = artifacts_dir.parent / "timing-summary.json"
+summary_path.write_text(
+    json.dumps({"aggregate_s": aggregate, "cases": rows}, indent=2, sort_keys=True),
+    encoding="utf-8",
+)
+
+print("")
+print("--- E2E timing bottlenecks ---")
+print("Aggregate accounted time:")
+for key, value in sorted(aggregate.items(), key=lambda item: -item[1]):
+    print(f"  {key}: {value:.1f}s ({value / 60:.1f}m)")
+print("Top cases by accounted time:")
+for row in sorted(rows, key=lambda item: -item["accounted_s"])[:20]:
+    print(
+        "  {case:36s} {status:5s} total={total:7.1f}s "
+        "build={build:7.1f}s compile={compile:7.1f}s "
+        "load={load:6.1f}s ref={ref:6.1f}s infer={infer:5.1f}s".format(
+            case=row["case"][:36],
+            status=row["status"],
+            total=row["accounted_s"],
+            build=row["bundle_build_s"],
+            compile=row["trt_compile_s"],
+            load=row["trt_load_deserialization_s"],
+            ref=row["reference_s"],
+            infer=row["inference_s"],
+        )
+    )
+print(f"Timing summary: {summary_path}")
+PY
+
 # --- Summary ------------------------------------------------------------------
 
 echo ""
@@ -426,12 +783,13 @@ echo "Output files:"
 echo "  Schedule:      $RESULT_DIR/schedule.json"
 echo "  Console logs:  $RESULT_DIR/console-gpu*-w*.log"
 echo "  JUnit XML:     $RESULT_DIR/junit-gpu*-w*.xml (merged: $RESULT_DIR/junit.xml)"
+echo "  Timing JSON:   $RESULT_DIR/timing-summary.json"
 echo "  Artifacts:     $RESULT_DIR/artifacts/"
 echo ""
 
 # Per-test results from each worker
 echo "--- Per-test results ---"
-for LABEL in "${WORKER_LABELS[@]}"; do
+for LABEL in "${ALL_WORKER_LABELS[@]}"; do
     LOG="$RESULT_DIR/console-${LABEL}.log"
     [ -f "$LOG" ] || continue
     echo ""
@@ -447,7 +805,7 @@ done
 if [ "$FAILURES" -gt 0 ]; then
     echo ""
     echo "--- Failure details ---"
-    for LABEL in "${WORKER_LABELS[@]}"; do
+    for LABEL in "${ALL_WORKER_LABELS[@]}"; do
         LOG="$RESULT_DIR/console-${LABEL}.log"
         [ -f "$LOG" ] || continue
         python -c "
