@@ -3,7 +3,6 @@
 # Platform-specific: GB300/model-name  XFAIL  (reason)
 
 albert-base               XFAIL  (encoder representation parity below minimum contract floor; threshold override no longer counts as green validation)
-bart-base                 XFAIL  (seq2seq-base weak contract produced empty TRT continuation against non-empty HF output)
 dpr-ctx-encoder           XFAIL  (DPR embedding cosine below minimum contract floor; old negative threshold masked the parity gap)
 fnet-base                 XFAIL  (encoder representation parity below minimum contract floor; DFT approximation gap needs validation follow-up)
 gemma-2-2b               SKIP   (gated model, needs HF_TOKEN)
