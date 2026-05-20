@@ -38,7 +38,7 @@ The system operates in two strictly separated phases:
 
 | Phase | Language | Entry Point | Input | Output |
 |-------|----------|-------------|-------|--------|
-| **Build** | Python | `trtmc-build build` / `tensorrt_model_connect.build()` | HF repo ID or local directory | `.trtfb` bundle |
+| **Build** | Python | `./build/trtmc build` / `tensorrt_model_connect.build()` | HF repo ID or local directory | `.trtfb` bundle |
 | **Run** | C++ | `trtmc run` / `trtmc::load()` / C ABI | `.trtfb` bundle | Task-specific results |
 
 The bundle is the sole interface between the two phases. The C++ runtime never reads HuggingFace model directories directly. All model-specific architectural decisions (attention type, normalization, activation functions, weight layout) are baked into the TRT engine plan at build time.
@@ -68,7 +68,7 @@ The Python builder is a fully plugin-based system. Adding a new model family req
 ### 3.1 Package Structure
 
 - **Package root**: `tensorrt_model_connect/tensorrt_model_connect/`
-- **Entry points**: `cli.py` (CLI), `__init__.py` (Python API), `__main__.py`
+- **Entry points**: `build_cli.py` (builder CLI), `__init__.py` (Python API), `__main__.py`
 
 ### 3.2 Orchestration Flow
 
@@ -560,7 +560,7 @@ All paths below are relative to the repository root and have been verified to ex
 | `tensorrt_model_connect/tensorrt_model_connect/schedulers/` | Python diffusion schedulers (flow_match_euler) |
 | `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` | Plugin auto-discovery |
 | `tensorrt_model_connect/tensorrt_model_connect/families/base.py` | FamilyPlugin protocol |
-| `tensorrt_model_connect/tensorrt_model_connect/cli.py` | CLI entry point |
+| `tensorrt_model_connect/tensorrt_model_connect/build_cli.py` | Python builder CLI entry point |
 
 ### C++ Runtime -- Public API
 | Path | Purpose |

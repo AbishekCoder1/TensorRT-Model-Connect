@@ -39,6 +39,22 @@ def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
     assert "-e TRTMC_E2E_DEPRIORITIZE_GPU0" in text
 
 
+def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    for name in (
+        "TRTMC_PACKAGE_PYTHON_TAGS",
+        "TRTMC_PACKAGE_WHEEL_ARCH",
+        "TRTMC_PACKAGE_BUILD_ROOT",
+        "TRTMC_WHEEL_QWEN_MODEL_ID",
+        "TRTMC_WHEEL_QWEN_MAX_CACHE",
+        "TRTMC_WHEEL_QWEN_MAX_NEW_TOKENS",
+        "TRTMC_WHEEL_QWEN_OPTIMIZATION_LEVEL",
+        "TRTMC_WHEEL_QWEN_BUILD_TIMEOUT",
+        "TRTMC_WHEEL_QWEN_RUN_TIMEOUT",
+    ):
+        assert f"-e {name}" in text
+
+
 def test_github_stage_wrapper_does_not_export_diffusion_vlm_waives_file() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     assert "DIFFUSION_VLM_WAIVES_FILE" not in text
@@ -106,6 +122,87 @@ def test_github_workflows_write_e2e_markdown_summary() -> None:
         assert "Write CI summary" in text
         assert "scripts/generate_ci_summary.py" in text
         assert ">> \"$GITHUB_STEP_SUMMARY\"" in text
+
+
+def test_nightly_runs_wheel_qwen_smoke_before_upload_and_release() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    package_index = text.index("Build trtmc pip package")
+    smoke_index = text.index("Qwen smoke test from trtmc pip package")
+    upload_index = text.index("Upload trtmc pip package artifact")
+    publish_index = text.index("Publish trtmc pip package to GitHub Release")
+    assert package_index < smoke_index < upload_index < publish_index
+    assert "run-gha-stage.sh wheel-qwen-smoke" in text
+
+
+def test_nightly_uses_manylinux_package_image_for_release_wheels() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    assert "TRTMC_PACKAGE_CI_IMAGE:" in text
+    assert "trtmc-dev-gb300:manylinux_2_35" in text
+    assert 'docker build -t "$TRTMC_PACKAGE_CI_IMAGE" -f Dockerfile .' in text
+    assert "package image glibc=" in text
+    assert "TRTMC_CI_IMAGE: ${{ env.TRTMC_PACKAGE_CI_IMAGE }}" in text
+
+
+def test_package_stage_builds_py310_and_py312_wheels() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312" in text
+    assert 'WHEEL_PYVER="$tag"' in text
+    assert "python -m build --wheel --outdir \"$PWD/dist\"" in text
+    assert 'build-dir=$package_build_root/$tag' in text
+    assert "manylinux_2_35_aarch64" in text
+    assert "wheel-qwen-smoke)" in text
+    assert "Qwen smoke test from trtmc pip package" in text
+
+
+def test_package_stage_requires_manylinux_aarch64_wheels() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert 'TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_35_aarch64' in text
+    assert 'EXPECTED_PLATFORM = os.environ.get("TRTMC_PACKAGE_WHEEL_ARCH"' in text
+    assert 'native wheel must not contain .data/purelib entries' in text
+    assert ".data/scripts/trtmc" in text
+    assert "native trtmc must be installed directly, not via console_scripts" in text
+    assert '"auditwheel>=6.2"' in text
+    assert 'sys.executable, "-m", "auditwheel", "show", wheel' in text
+    assert "*-${py_tag}-none-manylinux_2_35_aarch64.whl" in text
+    assert "validate_manylinux_build_environment" in text
+    assert "build_glibc=" in text
+
+
+def test_package_stage_uses_conan_py_build_inputs() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "CONAN_PY_BUILD_PROFILE_AUTODETECT=1" in text
+    assert 'TRTMC_TRT_INCLUDE_DIR="$trt_include"' in text
+    assert 'TRTMC_TRT_LIBRARY="$trt_library"' in text
+    assert 'TRTMC_CUDA_INCLUDE_DIR="$cuda_include"' in text
+    assert 'TRTMC_CUDART_LIBRARY="$cudart_library"' in text
+
+
+def test_release_wheel_build_disables_libtorch_linkage() -> None:
+    text = (REPO_ROOT / "conanfile.py").read_text()
+    assert 'toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False' in text
+
+
+def test_root_pyproject_configures_conan_py_build_wheel() -> None:
+    text = (REPO_ROOT / "pyproject.toml").read_text()
+    assert 'requires = ["conan-py-build==0.4.3"]' in text
+    assert 'build-backend = "conan_py_build.build"' in text
+    assert 'packages = ["tensorrt_model_connect/tensorrt_model_connect"]' in text
+    assert "[project.scripts]" not in text
+
+
+def test_wheel_qwen_smoke_checks_py312_wheel_only() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    smoke_block = text.split("run_wheel_qwen_smoke() {", maxsplit=1)[1].split(
+        "\n}",
+        maxsplit=1,
+    )[0]
+    assert "select_wheel_by_tag py312 dist" in smoke_block
+    assert "sys.version_info[:2] != (3, 12)" in smoke_block
+    assert "TRTMC_WHEEL_QWEN_PYTHON" not in smoke_block
+    assert "select_compatible_wheel" not in smoke_block
+    assert 'PATH="$smoke_venv/bin:$PATH"' not in smoke_block
+    assert '"$smoke_venv/bin/trtmc" build "$model_id"' in smoke_block
+    assert 'b"\\x7fELF"' in smoke_block
 
 
 def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> None:

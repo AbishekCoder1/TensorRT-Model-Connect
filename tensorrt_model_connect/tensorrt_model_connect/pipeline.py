@@ -12,9 +12,33 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+from importlib import resources
 from pathlib import Path
+from typing import Iterable
+
+
+def _existing_executable(candidates: Iterable[Path]) -> Path | None:
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _native_binary_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    try:
+        candidates.append(
+            Path(resources.files("tensorrt_model_connect").joinpath("bin", "trtmc"))
+        )
+    except (FileNotFoundError, ModuleNotFoundError):
+        pass
+
+    package_file = Path(__file__).resolve()
+    candidates.append(package_file.parents[2] / "build" / "trtmc")
+    return candidates
 
 
 class Pipeline:
@@ -85,15 +109,9 @@ class Pipeline:
     @staticmethod
     def _find_binary() -> str:
         """Auto-detect the trtmc binary location."""
-        # Check common locations
-        candidates = [
-            "./build/trtmc",
-            "trtmc",
-        ]
-        for candidate in candidates:
-            path = Path(candidate)
-            if path.exists() and path.is_file():
-                return str(path)
+        native = _existing_executable(_native_binary_candidates())
+        if native is not None:
+            return str(native)
 
         # Check PATH
         found = shutil.which("trtmc")

@@ -11,9 +11,9 @@ catch_all .dockerignore # tracked path has no precise impact rule yet; catch-all
 catch_all CODEOWNERS # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all Dockerfile # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all Dockerfile.gb300 # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all conanfile.py # release wheel native packaging recipe; catch-all stays conservative
 catch_all conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all docker-compose.yml # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all examples/trtmc_cli.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all examples/trtmc_dataset_benchmark.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all hf_links_wave1.txt # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all models/hf/Qwen__Qwen3-0.6B/.gitattributes # tracked path has no precise impact rule yet; catch-all stays conservative
@@ -183,9 +183,9 @@ shared_builder_module tensorrt_model_connect/pyproject.toml # shared Python buil
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/__main__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/build_timing.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/build_cli.py # shared Python builder CLI surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module tensorrt_model_connect/tensorrt_model_connect/cli.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/config.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/debug_runner.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py # shared Python builder surface; broad builder impact is intentional
@@ -234,3 +234,4 @@ shared_builder_module tensorrt_model_connect/tensorrt_model_connect/schedulers/f
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/triattention_export.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/triattention_runtime.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module tensorrt_model_connect/tensorrt_model_connect/trt_compat.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module tensorrt_model_connect/tensorrt_model_connect/native_cli.py # removed packaged console wrapper; broad builder impact is intentional

@@ -18,6 +18,9 @@ include(GNUInstallDirs)
 
 option(TRTMC_ENABLE_TRT "Enable TensorRT backend DSO integration" ON)
 option(TRTMC_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
+option(TRTMC_BUILD_TESTS "Build C++ unit test executables" ON)
+option(TRTMC_BUILD_BENCHMARKS "Build benchmark executables" ON)
+option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial sampler" ON)
 set(TRTMC_TRT_BACKEND_ABI "" CACHE STRING
   "TensorRT ABI suffix for the standard backend DSO, e.g. 10_15. Empty means auto-detect from headers.")
 
@@ -116,15 +119,23 @@ if(TRTMC_ENABLE_TRT AND TRTMC_TRT_INCLUDE_DIR AND TRTMC_TRT_LIBRARY)
 endif()
 
 # --- nlohmann/json for BPE tokenizer JSON parsing ---
-include(FetchContent)
-set(JSON_Install OFF CACHE INTERNAL "")
-FetchContent_Declare(
-  nlohmann_json
-  GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG v3.11.3
-  GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(nlohmann_json)
+find_package(nlohmann_json CONFIG QUIET)
+if(TARGET nlohmann_json::nlohmann_json)
+  get_target_property(_trtmc_nlohmann_json_include
+    nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
+  message(STATUS "nlohmann/json: using package config")
+else()
+  include(FetchContent)
+  set(JSON_Install OFF CACHE INTERNAL "")
+  FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_MakeAvailable(nlohmann_json)
+  set(_trtmc_nlohmann_json_include "${nlohmann_json_SOURCE_DIR}/include")
+endif()
 
 # --- Bundle-only runtime library ---
 # PIC needed because trtmc_core is linked into backend DSOs (shared libs).
@@ -260,7 +271,7 @@ target_compile_options(trtmc_core
 
 # nlohmann/json: use include-only (header-only lib) to avoid export-set issues
 target_include_directories(trtmc_core SYSTEM PRIVATE
-  ${nlohmann_json_SOURCE_DIR}/include
+  ${_trtmc_nlohmann_json_include}
 )
 
 target_link_libraries(trtmc_core PRIVATE ${CMAKE_DL_LIBS})
@@ -281,49 +292,52 @@ else()
 endif()
 
 # --- libtorch multinomial bridge (optional) ---
-set(_trtmc_torch_roots
-  /opt/venv/lib/python3.12/site-packages/torch
-  ${PROJECT_SOURCE_DIR}/.venv/lib/python3.12/site-packages/torch
-)
-if(DEFINED ENV{TRTMC_TORCH_ROOT})
-  list(INSERT _trtmc_torch_roots 0 "$ENV{TRTMC_TORCH_ROOT}")
+if(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL)
+  set(_trtmc_torch_roots
+    /opt/venv/lib/python3.12/site-packages/torch
+    ${PROJECT_SOURCE_DIR}/.venv/lib/python3.12/site-packages/torch
+  )
+  if(DEFINED ENV{TRTMC_TORCH_ROOT})
+    list(INSERT _trtmc_torch_roots 0 "$ENV{TRTMC_TORCH_ROOT}")
+  endif()
+
+  find_path(TRTMC_TORCH_INCLUDE_DIR ATen/ATen.h
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES include
+  )
+  find_path(TRTMC_TORCH_API_INCLUDE_DIR torch/torch.h
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES include/torch/csrc/api/include
+  )
+  find_library(TRTMC_TORCH_LIBRARY
+    NAMES torch libtorch.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_TORCH_CPU_LIBRARY
+    NAMES torch_cpu libtorch_cpu.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_TORCH_CUDA_LIBRARY
+    NAMES torch_cuda libtorch_cuda.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_C10_LIBRARY
+    NAMES c10 libc10.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
+  find_library(TRTMC_C10_CUDA_LIBRARY
+    NAMES c10_cuda libc10_cuda.so
+    PATHS ${_trtmc_torch_roots}
+    PATH_SUFFIXES lib
+  )
 endif()
 
-find_path(TRTMC_TORCH_INCLUDE_DIR ATen/ATen.h
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES include
-)
-find_path(TRTMC_TORCH_API_INCLUDE_DIR torch/torch.h
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES include/torch/csrc/api/include
-)
-find_library(TRTMC_TORCH_LIBRARY
-  NAMES torch libtorch.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_TORCH_CPU_LIBRARY
-  NAMES torch_cpu libtorch_cpu.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_TORCH_CUDA_LIBRARY
-  NAMES torch_cuda libtorch_cuda.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_C10_LIBRARY
-  NAMES c10 libc10.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-find_library(TRTMC_C10_CUDA_LIBRARY
-  NAMES c10_cuda libc10_cuda.so
-  PATHS ${_trtmc_torch_roots}
-  PATH_SUFFIXES lib
-)
-
-if(TRTMC_TORCH_INCLUDE_DIR AND TRTMC_TORCH_API_INCLUDE_DIR
+if(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL
+   AND TRTMC_TORCH_INCLUDE_DIR AND TRTMC_TORCH_API_INCLUDE_DIR
    AND TRTMC_TORCH_LIBRARY AND TRTMC_TORCH_CPU_LIBRARY
    AND TRTMC_TORCH_CUDA_LIBRARY AND TRTMC_C10_LIBRARY AND TRTMC_C10_CUDA_LIBRARY)
   get_filename_component(TRTMC_TORCH_LIBRARY_DIR ${TRTMC_TORCH_LIBRARY} DIRECTORY)
@@ -437,6 +451,8 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   )
   set_target_properties(trtmc_backend_trt PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    SKIP_BUILD_RPATH TRUE
+    INSTALL_RPATH ""
   )
   if(TRTMC_TRT_BACKEND_ABI)
     add_custom_command(TARGET trtmc_backend_trt POST_BUILD
@@ -448,7 +464,7 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
   endif()
   # Also add nlohmann_json include for trt_module_impl (uses DType from tensor.h)
   target_include_directories(trtmc_backend_trt SYSTEM PRIVATE
-    ${nlohmann_json_SOURCE_DIR}/include
+    ${_trtmc_nlohmann_json_include}
   )
   message(STATUS "TRT backend DSO: enabled (libtrtmc_backend_trt.so)")
   if(TRTMC_TRT_BACKEND_ABI)
@@ -500,7 +516,7 @@ if(TRTMC_BUILD_BACKEND_RTX)
       LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     target_include_directories(trtmc_backend_rtx SYSTEM PRIVATE
-      ${nlohmann_json_SOURCE_DIR}/include
+      ${_trtmc_nlohmann_json_include}
     )
     message(STATUS "TRT-RTX backend DSO: enabled (libtrtmc_backend_trt_rtx.so)")
   else()
@@ -508,16 +524,22 @@ if(TRTMC_BUILD_BACKEND_RTX)
   endif()
 endif()
 
-add_executable(trtmc examples/trtmc_cli.cpp)
+add_executable(trtmc
+  src/cli/args.cpp
+  src/cli/main.cpp
+)
 target_link_libraries(trtmc PRIVATE trtmc_core)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb ${PROJECT_SOURCE_DIR}/src)
 
-add_executable(trtmc_dataset_benchmark examples/trtmc_dataset_benchmark.cpp)
-target_link_libraries(trtmc_dataset_benchmark PRIVATE trtmc_core)
-target_include_directories(trtmc_dataset_benchmark PRIVATE
-  ${PROJECT_SOURCE_DIR}/third_party/stb
-)
+if(TRTMC_BUILD_BENCHMARKS)
+  add_executable(trtmc_dataset_benchmark examples/trtmc_dataset_benchmark.cpp)
+  target_link_libraries(trtmc_dataset_benchmark PRIVATE trtmc_core)
+  target_include_directories(trtmc_dataset_benchmark PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+endif()
 
+if(TRTMC_BUILD_TESTS)
 enable_testing()
 
 # --- Test helper function ---
@@ -568,7 +590,8 @@ trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE)
 trtmc_add_test(test_text_parsers)
 trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
-trtmc_add_test(test_cli_args            NO_SRC_INCLUDE)
+trtmc_add_test(test_cli_args)
+target_sources(test_cli_args PRIVATE src/cli/args.cpp)
 trtmc_add_test(test_chat_template)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
@@ -728,6 +751,7 @@ endif()
 if(TARGET test_tvm_ffi_plugin_v2 AND _trtmc_has_tvm_ffi)
   target_include_directories(test_tvm_ffi_plugin_v2 SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
   target_link_libraries(test_tvm_ffi_plugin_v2 PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
+endif()
 endif()
 
 # --- Install ---

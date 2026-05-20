@@ -163,7 +163,7 @@ check_family_coverage() {
 
 check_cyclomatic_complexity() {
   lizard --version
-  python tools/check_cyclomatic_complexity.py src --max-ccn "${CCM_MAX_CCN:-10}" --top 20
+  python tools/check_cyclomatic_complexity.py src --exclude src/cli --max-ccn "${CCM_MAX_CCN:-10}" --top 20
 }
 
 lint_changed_files() {
@@ -480,6 +480,317 @@ generate_coverage_map() {
   python -c "import json; d=json.load(open('coverage_map.json')); m=d['meta']; print('Python tests: %s, C++ tests: %s, Source files: %d' % (m['python_tests'], m['cpp_tests'], len(d['source_to_tests'])))"
 }
 
+current_python_wheel_tag() {
+  python - <<'PY'
+import sys
+print(f"py{sys.version_info.major}{sys.version_info.minor}")
+PY
+}
+
+select_compatible_wheel() {
+  local wheel_dir="${1:-dist}"
+  local py_tag
+  py_tag="$(current_python_wheel_tag)"
+  mapfile -t candidates < <(
+    find "$wheel_dir" -maxdepth 1 -type f \( \
+      -name "*-${py_tag}-none-manylinux_2_35_aarch64.whl" -o \
+      -name "*-py3-none-manylinux_2_35_aarch64.whl" -o \
+      -name "*-${py_tag}-none-linux_aarch64.whl" -o \
+      -name "*-py3-none-linux_aarch64.whl" \
+    \) | sort
+  )
+  if [ "${#candidates[@]}" -ne 1 ]; then
+    printf 'ERROR: expected exactly one %s-compatible Linux aarch64 wheel under %s, found %d\n' \
+      "$py_tag" "$wheel_dir" "${#candidates[@]}" >&2
+    printf '  %s\n' "${candidates[@]:-}" >&2
+    exit 1
+  fi
+  printf '%s\n' "${candidates[0]}"
+}
+
+select_wheel_by_tag() {
+  local py_tag="$1"
+  local wheel_dir="${2:-dist}"
+  mapfile -t candidates < <(
+    find "$wheel_dir" -maxdepth 1 -type f \( \
+      -name "*-${py_tag}-none-manylinux_2_35_aarch64.whl" -o \
+      -name "*-${py_tag}-none-linux_aarch64.whl" \
+    \) | sort
+  )
+  if [ "${#candidates[@]}" -ne 1 ]; then
+    printf 'ERROR: expected exactly one %s Linux aarch64 wheel under %s, found %d\n' \
+      "$py_tag" "$wheel_dir" "${#candidates[@]}" >&2
+    printf '  %s\n' "${candidates[@]:-}" >&2
+    exit 1
+  fi
+  printf '%s\n' "${candidates[0]}"
+}
+
+validate_manylinux_build_environment() {
+  local wheel_arch="$1"
+  if [[ "$wheel_arch" =~ ^manylinux_2_([0-9]+)_aarch64$ ]]; then
+    local max_glibc_minor="${BASH_REMATCH[1]}"
+    local glibc_version
+    glibc_version="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
+    local glibc_major="${glibc_version%%.*}"
+    local glibc_minor="${glibc_version#*.}"
+    glibc_minor="${glibc_minor%%.*}"
+
+    if ! [[ "$glibc_major" =~ ^[0-9]+$ && "$glibc_minor" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: could not parse build image glibc version: ${glibc_version}" >&2
+      exit 1
+    fi
+    if [ "$glibc_major" -gt 2 ] || \
+      { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -gt "$max_glibc_minor" ]; }; then
+      echo "ERROR: ${wheel_arch} requires building on glibc 2.${max_glibc_minor} or older; this image has glibc ${glibc_version}." >&2
+      echo "Use TRTMC_PACKAGE_CI_IMAGE built from the repository Dockerfile, or another Ubuntu 22.04/glibc 2.35 aarch64 image." >&2
+      exit 1
+    fi
+    echo "manylinux build target=${wheel_arch} build_glibc=${glibc_version}"
+  fi
+
+  if ! command -v patchelf >/dev/null 2>&1; then
+    echo "ERROR: patchelf is required in the release wheel build image" >&2
+    exit 1
+  fi
+}
+
+build_pip_package() {
+  local trt_include="${TRTMC_TRT_INCLUDE_DIR:-${TRT_INC_DIR:-}}"
+  local trt_library="${TRTMC_TRT_LIBRARY:-}"
+  if [ -z "$trt_library" ] && [ -n "${TRT_LIB_DIR:-}" ]; then
+    trt_library="${TRT_LIB_DIR%/}/libnvinfer.so"
+  fi
+  if [ -z "$trt_library" ]; then
+    for candidate in \
+      /opt/venv/lib/python*/site-packages/tensorrt_libs/libnvinfer.so \
+      /usr/lib/aarch64-linux-gnu/libnvinfer.so \
+      /usr/lib/x86_64-linux-gnu/libnvinfer.so \
+      /usr/local/tensorrt/lib/libnvinfer.so; do
+      if [ -f "$candidate" ]; then
+        trt_library="$candidate"
+        break
+      fi
+    done
+  fi
+  if [ -z "$trt_include" ]; then
+    for candidate in /usr/local/tensorrt/include /usr/include/aarch64-linux-gnu /usr/include/x86_64-linux-gnu /usr/include; do
+      if [ -f "$candidate/NvInfer.h" ]; then
+        trt_include="$candidate"
+        break
+      fi
+    done
+  fi
+
+  local cuda_include="${TRTMC_CUDA_INCLUDE_DIR:-/usr/local/cuda/include}"
+  local cudart_library="${TRTMC_CUDART_LIBRARY:-/usr/local/cuda/lib64/libcudart.so}"
+
+  : "${trt_include:?TensorRT include directory was not found}"
+  : "${trt_library:?TensorRT libnvinfer.so was not found}"
+  : "${cuda_include:?CUDA include directory was not found}"
+  : "${cudart_library:?CUDA runtime library was not found}"
+
+  python -m pip install --disable-pip-version-check --quiet "auditwheel>=6.2" "build>=1.2"
+  local package_build_root="${TRTMC_PACKAGE_BUILD_ROOT:-/tmp/trtmc-conan-py-wheel-${GITHUB_RUN_ID:-local}}"
+  rm -rf dist "$package_build_root" tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
+  find tensorrt_model_connect/tensorrt_model_connect -type d -name __pycache__ -prune -exec rm -rf {} +
+  mkdir -p dist
+
+  local python_tags="${TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312}"
+  local wheel_arch="${TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_35_aarch64}"
+  validate_manylinux_build_environment "$wheel_arch"
+  local expected_wheels=0
+  local tag
+  for tag in $python_tags; do
+    expected_wheels=$((expected_wheels + 1))
+    rm -rf "$package_build_root/$tag" tensorrt_model_connect/build tensorrt_model_connect/*.egg-info
+    env \
+      CONAN_PY_BUILD_PROFILE_AUTODETECT=1 \
+      TRTMC_TRT_INCLUDE_DIR="$trt_include" \
+      TRTMC_TRT_LIBRARY="$trt_library" \
+      TRTMC_CUDA_INCLUDE_DIR="$cuda_include" \
+      TRTMC_CUDART_LIBRARY="$cudart_library" \
+      WHEEL_PYVER="$tag" \
+      WHEEL_ABI=none \
+      WHEEL_ARCH="$wheel_arch" \
+      python -m build --wheel --outdir "$PWD/dist" \
+        -C "build-dir=$package_build_root/$tag" \
+        .
+  done
+
+  mapfile -t wheels < <(find dist -maxdepth 1 -type f -name '*.whl' | sort)
+  if [ "${#wheels[@]}" -ne "$expected_wheels" ]; then
+    printf 'ERROR: expected %d wheels, found %d\n' "$expected_wheels" "${#wheels[@]}" >&2
+    printf '  %s\n' "${wheels[@]:-}" >&2
+    exit 1
+  fi
+
+  TRTMC_PACKAGE_WHEEL_ARCH="$wheel_arch" python - "${wheels[@]}" <<'PY'
+import os
+import re
+import subprocess
+import sys
+import zipfile
+
+EXPECTED_PLATFORM = os.environ.get("TRTMC_PACKAGE_WHEEL_ARCH", "manylinux_2_35_aarch64")
+platform_match = re.fullmatch(r"manylinux_2_([0-9]+)_aarch64", EXPECTED_PLATFORM)
+if not platform_match:
+    raise SystemExit(f"expected a manylinux aarch64 platform tag, got {EXPECTED_PLATFORM}")
+MAX_GLIBC_MINOR = int(platform_match.group(1))
+
+for wheel in sys.argv[1:]:
+    if not wheel.endswith(f"-{EXPECTED_PLATFORM}.whl"):
+        raise SystemExit(f"{wheel}: expected platform tag {EXPECTED_PLATFORM}")
+    with zipfile.ZipFile(wheel) as zf:
+        names = set(zf.namelist())
+        if any(name.startswith(".data/purelib/") for name in names):
+            raise SystemExit(f"{wheel}: native wheel must not contain .data/purelib entries")
+        if any(".data/purelib/" in name for name in names):
+            raise SystemExit(f"{wheel}: native wheel must not install package files via purelib")
+        bin_entries = [name for name in names if name.endswith("/bin/trtmc")]
+        script_entries = [name for name in names if name.endswith(".data/scripts/trtmc")]
+        backend_entries = [
+            name for name in names if "/bin/libtrtmc_backend" in name and name.endswith(".so")
+        ]
+        metadata = zf.read(
+            next(name for name in names if name.endswith(".dist-info/METADATA"))
+        ).decode()
+        wheel_metadata = zf.read(
+            next(name for name in names if name.endswith(".dist-info/WHEEL"))
+        ).decode()
+    if len(bin_entries) != 1:
+        raise SystemExit(f"{wheel}: expected one packaged trtmc executable")
+    if len(script_entries) != 1:
+        raise SystemExit(f"{wheel}: expected one native trtmc script executable")
+    if any(name.endswith(".dist-info/entry_points.txt") for name in names):
+        raise SystemExit(f"{wheel}: native trtmc must be installed directly, not via console_scripts")
+    if not backend_entries:
+        raise SystemExit(f"{wheel}: packaged native TensorRT backend DSO is missing")
+    if "Requires-Dist: tensorrt>=10.16" not in metadata:
+        raise SystemExit(f"{wheel}: TensorRT dependency metadata is missing")
+    if f"-{EXPECTED_PLATFORM}" not in wheel_metadata:
+        raise SystemExit(f"{wheel}: WHEEL metadata is missing {EXPECTED_PLATFORM}")
+    audit = subprocess.run(
+        [sys.executable, "-m", "auditwheel", "show", wheel],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    ).stdout
+    print(audit, end="")
+    manylinux_minors = [
+        int(match)
+        for line in audit.splitlines()
+        if "platform tag" in line
+        for match in re.findall(r"manylinux_2_([0-9]+)_aarch64", line)
+    ]
+    if not manylinux_minors or max(manylinux_minors) > MAX_GLIBC_MINOR:
+        raise SystemExit(
+            f"{wheel}: auditwheel did not confirm compatibility with "
+            f"manylinux_2_{MAX_GLIBC_MINOR}_aarch64 or older"
+        )
+    print(f"validated wheel={wheel}")
+    for entry in sorted([*bin_entries, *script_entries, *backend_entries]):
+        print(f"  {entry}")
+PY
+
+  local install_wheel
+  install_wheel="$(select_compatible_wheel dist)"
+  local smoke_venv="/tmp/trtmc-wheel-smoke-${GITHUB_RUN_ID:-local}"
+  rm -rf "$smoke_venv"
+  python -m venv "$smoke_venv"
+  "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
+  "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$install_wheel"
+  "$smoke_venv/bin/python" - "$smoke_venv/bin/trtmc" <<'PY'
+from pathlib import Path
+import sys
+
+trtmc = Path(sys.argv[1])
+if trtmc.read_bytes()[:4] != b"\x7fELF":
+    raise SystemExit(f"{trtmc} is not the native ELF trtmc executable")
+PY
+  "$smoke_venv/bin/trtmc" version
+  "$smoke_venv/bin/trtmc" --help >/tmp/trtmc-help.txt
+  "$smoke_venv/bin/trtmc" build --help >/tmp/trtmc-build-help.txt
+  "$smoke_venv/bin/python" - <<'PY'
+import importlib.metadata as metadata
+import importlib.resources as resources
+from pathlib import Path
+
+dist = metadata.distribution("tensorrt-model-connect")
+native_dir = Path(resources.files("tensorrt_model_connect").joinpath("bin"))
+native = native_dir / "trtmc"
+backends = sorted(native_dir.glob("libtrtmc_backend*.so*"))
+print(f"wheel={dist.metadata['Name']} {dist.version}")
+print(f"native_trtmc={native}")
+if not native.is_file():
+    raise SystemExit("packaged native trtmc executable is missing")
+if not backends:
+    raise SystemExit("packaged native TensorRT backend DSO is missing")
+for backend in backends:
+    print(f"native_backend={backend}")
+PY
+}
+
+run_wheel_qwen_smoke() {
+  local wheel
+  wheel="$(select_wheel_by_tag py312 dist)"
+
+  python - <<'PY'
+import sys
+
+if sys.version_info[:2] != (3, 12):
+    raise SystemExit(
+        "Python 3.12 is required for the py312 wheel Qwen smoke test; "
+        f"got {sys.version.split()[0]} from {sys.executable}"
+    )
+PY
+
+  local smoke_root="/tmp/trtmc-wheel-qwen-smoke-${GITHUB_RUN_ID:-local}"
+  local smoke_venv="${smoke_root}/venv"
+  local bundle="${smoke_root}/qwen3-0.6b.trtfb"
+  local timing_cache="${smoke_root}/qwen3-0.6b.timing.cache"
+  local model_id="${TRTMC_WHEEL_QWEN_MODEL_ID:-Qwen/Qwen3-0.6B}"
+  local max_cache="${TRTMC_WHEEL_QWEN_MAX_CACHE:-64}"
+  local max_new_tokens="${TRTMC_WHEEL_QWEN_MAX_NEW_TOKENS:-8}"
+
+  rm -rf "$smoke_root"
+  mkdir -p "$smoke_root"
+  python -m venv "$smoke_venv"
+  "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
+  "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
+  "$smoke_venv/bin/python" -m pip check
+  "$smoke_venv/bin/python" - "$smoke_venv/bin/trtmc" <<'PY'
+from pathlib import Path
+import sys
+
+trtmc = Path(sys.argv[1])
+if trtmc.read_bytes()[:4] != b"\x7fELF":
+    raise SystemExit(f"{trtmc} is not the native ELF trtmc executable")
+PY
+  env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+    "$smoke_venv/bin/trtmc" version
+
+  run_with_timeout "${TRTMC_WHEEL_QWEN_BUILD_TIMEOUT:-45m}" \
+    env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+      TRTMC_TRT_TIMING_CACHE_PATH="$timing_cache" \
+      TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_WHEEL_QWEN_OPTIMIZATION_LEVEL:-1}" \
+      "$smoke_venv/bin/trtmc" build "$model_id" \
+        -o "$bundle" \
+        --max-cache-length "$max_cache" \
+        --precision fp16
+
+  env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+    "$smoke_venv/bin/trtmc" inspect --list-engines "$bundle"
+
+  run_with_timeout "${TRTMC_WHEEL_QWEN_RUN_TIMEOUT:-10m}" \
+    env -u VIRTUAL_ENV -u CONDA_PREFIX -u TRTMC_TRT_LIBRARY_DIR -u LD_LIBRARY_PATH \
+      "$smoke_venv/bin/trtmc" run "$bundle" \
+        --prompt "The capital of France is" \
+        --max-new-tokens "$max_new_tokens" \
+        --greedy
+}
+
 run_stage() {
   local stage="$1"
   case "$stage" in
@@ -534,6 +845,14 @@ run_stage() {
       run_step "Setup TensorRT-Model-Connect" setup_environment
       run_step "Generate coverage map" generate_coverage_map
       ;;
+    package)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Build trtmc pip package" build_pip_package
+      ;;
+    wheel-qwen-smoke)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Qwen smoke test from trtmc pip package" run_wheel_qwen_smoke
+      ;;
     *)
       echo "ERROR: Unknown CI stage: $stage" >&2
       exit 2
@@ -559,3 +878,5 @@ run_step "Graph-op GPU tests" run_graph_op_tests
 run_step "Selective E2E tests" run_selective_e2e
 run_step "Full E2E tests" run_full_e2e
 run_step "Generate coverage map" generate_coverage_map
+run_step "Build trtmc pip package" build_pip_package
+run_step "Qwen smoke test from trtmc pip package" run_wheel_qwen_smoke
