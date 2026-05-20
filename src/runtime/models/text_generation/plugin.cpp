@@ -6,6 +6,7 @@
 #include "runtime/models/text_generation/pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtmc/config/config_bundle.h"
+#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/triattention_kv_cache.h"
 #include "utils/json_helpers.h"
@@ -17,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 namespace trtmc {
@@ -29,6 +31,16 @@ struct KvCacheRuntimeSizing {
     std::uint64_t cache_bytes{0};
     bool override_applied{false};
     bool clamped_to_bundle_max{false};
+};
+
+struct TensorParallelRuntimeConfig {
+    bool enabled{false};
+    int32_t tp_size{1};
+};
+
+struct TensorParallelRuntime {
+    TensorParallelRuntimeConfig config;
+    DistributedRuntimeGroup group;
 };
 
 struct DecoderProfileInfo {
@@ -86,6 +98,18 @@ bool cache_input_supports_runtime_rows(const TrtModule& module, const std::strin
             return true;
     }
     return false;
+}
+
+TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
+    TensorParallelRuntimeConfig cfg;
+    cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
+    const auto mode = extract_json_string(config_json, "tensor_parallel_mode", "single");
+    cfg.enabled = (mode == "tensor_parallel" && cfg.tp_size > 1);
+    return cfg;
+}
+
+std::string tp_engine_section_name(int32_t rank) {
+    return "engine_plan_tp_rank" + std::to_string(rank);
 }
 
 int32_t profile_token_max_length(const TrtModule& module, const std::string& token_id_name,
@@ -236,7 +260,16 @@ class DecoderPlugin final : public IPipelinePlugin {
         TriAttentionConfig tri_cfg = parse_triattention_bundle_config(
             ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
 
-        auto profile_modules = load_decoder_profile_modules(ctx, "engine_plan", nullptr);
+        TensorParallelRuntime tp_runtime;
+        tp_runtime.config = parse_tensor_parallel_runtime_config(ctx.config_json);
+        if (tp_runtime.config.enabled)
+            tp_runtime.group = initialize_tensor_parallel_group(tp_runtime.config.tp_size);
+
+        const std::string engine_section = tp_runtime.config.enabled
+                                               ? tp_engine_section_name(tp_runtime.group.rank)
+                                               : std::string("engine_plan");
+        auto profile_modules =
+            load_decoder_profile_modules(ctx, engine_section, nullptr, &tp_runtime);
         if (profile_modules.modules.empty())
             throw std::runtime_error("No decoder engine profiles were loaded");
         TrtModule& metadata_module = *profile_modules.modules.front().module;
@@ -256,9 +289,10 @@ class DecoderPlugin final : public IPipelinePlugin {
         int32_t prefill_profile_idx = decode_profile_roles.prefill_profile_idx;
         int32_t prefill_max_length = decode_profile_roles.prefill_max_length;
         std::string prefill_log_label;
-        if (find_section(ctx.bundle, "prefill_engine_plan") != nullptr) {
+        if (!tp_runtime.config.enabled &&
+            find_section(ctx.bundle, "prefill_engine_plan") != nullptr) {
             auto split_prefill_modules =
-                load_decoder_profile_modules(ctx, "prefill_engine_plan", stream);
+                load_decoder_profile_modules(ctx, "prefill_engine_plan", stream, nullptr);
             if (!split_prefill_modules.modules.empty()) {
                 const auto prefill_roles = detect_decoder_profile_roles(
                     *split_prefill_modules.modules.front().module, io.token_id,
@@ -292,7 +326,7 @@ class DecoderPlugin final : public IPipelinePlugin {
 
         return std::make_unique<TextGenerationPipeline>(
             std::move(decoders), std::move(state), tgc, stream, std::move(tokenizer),
-            ctx.bundle.info.model_id, nullptr, std::move(prefill_module));
+            ctx.bundle.info.model_id, nullptr, std::move(prefill_module), tp_runtime.group.owner);
     }
 
   private:
@@ -310,12 +344,12 @@ class DecoderPlugin final : public IPipelinePlugin {
         }
     }
 
-    static BackendProfileModules load_decoder_profile_modules(const PipelineContext& ctx,
-                                                              const char* section_name,
-                                                              cudaStream_t stream) {
+    static BackendProfileModules
+    load_decoder_profile_modules(const PipelineContext& ctx, const std::string& section_name,
+                                 cudaStream_t stream, const TensorParallelRuntime* tp_runtime) {
         auto* plan = find_section(ctx.bundle, section_name);
         if (plan == nullptr || plan->empty())
-            throw std::runtime_error(std::string(section_name) + " section is missing");
+            throw std::runtime_error(section_name + " section is missing");
         if (ctx.backend == nullptr)
             throw std::runtime_error("No backend loaded");
 
@@ -331,16 +365,20 @@ class DecoderPlugin final : public IPipelinePlugin {
         opts.stream = stream;
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
+        if (tp_runtime != nullptr && tp_runtime->config.enabled) {
+            opts.distributed_communicator = tp_runtime->group.communicator;
+            opts.distributed_owner = tp_runtime->group.owner;
+        }
 
         const auto t0 = std::chrono::steady_clock::now();
         auto modules =
             ctx.backend->create_profile_modules(plan->data(), plan->size(), opts, profile_indices);
         const auto t1 = std::chrono::steady_clock::now();
         const double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        log_trt_load_timing(section_name, load_ms, plan->size());
+        log_trt_load_timing(section_name.c_str(), load_ms, plan->size());
         for (auto& entry : modules.modules) {
-            entry.module->set_timing_label(std::string(section_name) +
-                                           (entry.profile_idx == 0 ? ":profile0" : ":decode"));
+            entry.module->set_timing_label(entry.profile_idx == 0 ? section_name + ":profile0"
+                                                                  : section_name + ":decode");
         }
         return modules;
     }

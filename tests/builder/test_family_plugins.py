@@ -132,6 +132,54 @@ class TestQwenPlugin:
         # w_out original [vocab, hidden] transposed to [hidden, vocab]
         assert weights["w_out"].shape == (self.HIDDEN, self.VOCAB)
 
+    def test_tensor_parallel_shards_qwen_projection_weights(self, tmp_path):
+        """TP shards attention/MLP inner dims and leaves replicated weights intact."""
+        from tensorrt_model_connect.families.qwen import plugin
+        from tensorrt_model_connect.parallel_config import (
+            ParallelConfig,
+            shard_standard_decoder_weights,
+        )
+
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": 1,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+        }
+        tensors = self._make_tensors(
+            self.VOCAB, self.HIDDEN, 1, self.HEADS, self.KV_HEADS, self.MLP)
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg)
+        tp_size = 4
+        rank = 3
+        hidden_start = rank * self.HIDDEN // tp_size
+        hidden_end = (rank + 1) * self.HIDDEN // tp_size
+        mlp_start = rank * self.MLP // tp_size
+        mlp_end = (rank + 1) * self.MLP // tp_size
+        shard = shard_standard_decoder_weights(
+            cfg, weights,
+            ParallelConfig(mode="tensor_parallel", tp_size=tp_size, rank=rank))
+
+        np.testing.assert_allclose(
+            shard["layer.0.w_q"], weights["layer.0.w_q"][:, hidden_start:hidden_end])
+        np.testing.assert_allclose(
+            shard["layer.0.w_k"], weights["layer.0.w_k"][:, hidden_start:hidden_end])
+        np.testing.assert_allclose(
+            shard["layer.0.w_o"], weights["layer.0.w_o"][hidden_start:hidden_end, :])
+        np.testing.assert_allclose(
+            shard["layer.0.w_gate"], weights["layer.0.w_gate"][:, mlp_start:mlp_end])
+        np.testing.assert_allclose(
+            shard["layer.0.w_down"], weights["layer.0.w_down"][mlp_start:mlp_end, :])
+        np.testing.assert_allclose(shard["w_out"], weights["w_out"])
+        assert shard["_attention_size"] == self.HIDDEN // tp_size
+        assert shard["_kv_attention_size"] == self.HIDDEN // tp_size
+        assert shard["_mlp_size"] == self.MLP // tp_size
+
 
 # =========================================================================
 # 2. Gemma — gamma +1.0 offset, embedding scaling

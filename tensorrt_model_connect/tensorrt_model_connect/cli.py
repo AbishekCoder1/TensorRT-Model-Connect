@@ -125,6 +125,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
     save_fp8_scales = getattr(args, 'save_fp8_scales', None)
     quantize = canonicalize_quant_format(getattr(args, "quantize", None))
 
+    from .parallel_config import ParallelConfig
+
+    tp_size = int(getattr(args, "tensor_parallel_size", 1) or 1)
+    parallel_config = (
+        ParallelConfig(mode="tensor_parallel", tp_size=tp_size)
+        if tp_size > 1
+        else None
+    )
+
     # Resolve the registry-backed build-time config up front (before build),
     # so build-time namespaces can feed kwargs directly. Importing
     # runtime_config triggers registration of any schema modules declared
@@ -178,6 +187,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_disable_mlr=getattr(args, "triattention_disable_mlr", False),
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
             audio_magpie_max_source_positions=audio_magpie_max_source_positions,
+            parallel_config=parallel_config,
             build_timing_path=getattr(args, "build_timing_json", None),
             diffusion_overrides={
                 key: value
@@ -401,7 +411,8 @@ def list_engine_sections(bundle_path: str) -> list[dict]:
 
     engines = []
     for name, meta in sections.items():
-        if not name.endswith("_plan") and name != "engine_plan":
+        is_tp_rank_plan = name.startswith("engine_plan_tp_rank")
+        if not name.endswith("_plan") and name != "engine_plan" and not is_tp_rank_plan:
             continue
         size_bytes = meta.get("size", 0)
 
@@ -410,6 +421,8 @@ def list_engine_sections(bundle_path: str) -> list[dict]:
             role = "decode" if "prefill_engine_plan" in sections else "primary"
         elif name == "prefill_engine_plan":
             role = "prefill"
+        elif is_tp_rank_plan:
+            role = name.replace("engine_plan_", "")
         elif "vision" in name:
             role = "vision"
         elif "text_encoder" in name:
@@ -557,6 +570,15 @@ def main() -> None:
     )
     build_p.add_argument("--dynamic-kv-cache", action="store_true",
                          help="Build decoder bundles with runtime-resizable KV cache support")
+    # TP is a narrow build-only path, not a generic runtime-config namespace.
+    build_p.add_argument(
+        "--tensor-parallel-size",
+        "--tp-size",
+        dest="tensor_parallel_size",
+        type=int,
+        choices=[1, 2, 4, 8],
+        default=1,
+        help="Build a tensor-parallel decoder bundle with this TP size")
     build_p.add_argument(
         "--dynamic-kv-profile-rows",
         type=_parse_profile_rows,

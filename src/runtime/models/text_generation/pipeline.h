@@ -66,13 +66,15 @@ class TextGenerationPipeline final : public IPipeline {
                            std::unique_ptr<IInferenceState> state, TextGenConfig config,
                            cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
                            std::string model_id_str = "",
-                           std::unique_ptr<ISampler> sampler = nullptr);
+                           std::unique_ptr<ISampler> sampler = nullptr,
+                           std::shared_ptr<void> distributed_owner = nullptr);
     TextGenerationPipeline(std::vector<DecoderContext> decoders,
                            std::unique_ptr<IInferenceState> state, TextGenConfig config,
                            cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
                            std::string model_id_str = "",
                            std::unique_ptr<ISampler> sampler = nullptr,
-                           std::unique_ptr<TrtModule> prefill = nullptr);
+                           std::unique_ptr<TrtModule> prefill = nullptr,
+                           std::shared_ptr<void> distributed_owner = nullptr);
 
     // Public API: takes raw text, returns typed result.
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
@@ -90,6 +92,8 @@ class TextGenerationPipeline final : public IPipeline {
     static int32_t argmax(const std::vector<float>& logits);
 
   private:
+    // Kept before TRT modules so TP communicators outlive contexts/engines.
+    std::shared_ptr<void> distributed_owner_;
     std::vector<DecoderContext> decoders_;
     std::unique_ptr<TrtModule> prefill_;
     std::unique_ptr<IInferenceState> state_;
