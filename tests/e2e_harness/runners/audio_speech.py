@@ -268,13 +268,19 @@ class TextToAudioRunner:
         ld_path = _build_ld_library_path(ctx)
 
         with tempfile.TemporaryDirectory(prefix="trtmc_audio_") as tmpdir:
-            wav_path = os.path.join(tmpdir, "output.wav")
+            distributed_runtime = _distributed_runtime_config(case)
+            output_root = os.path.join(tmpdir, "rank_outputs")
+            wav_path = (
+                os.path.join(output_root, "rank_0", "output.wav")
+                if distributed_runtime else os.path.join(tmpdir, "output.wav")
+            )
 
             cmd = [
                 binary, "generate-audio", bundle_path,
                 "--prompt", prompt,
-                "--output", wav_path,
             ]
+            if not distributed_runtime:
+                cmd.extend(["--output", wav_path])
             runtime_cli_python = ctx.runtime_cli_hf_python()
             if runtime_cli_python:
                 cmd.extend(["--hf-python", runtime_cli_python])
@@ -296,9 +302,23 @@ class TextToAudioRunner:
                     bark_seed = int(seed)
                     cmd.extend(["--set", f"audio_bark.seed={int(seed)}"])
             # Dump intermediate tokens for diversity/degeneration checks.
-            bark_dump_prefix = os.path.join(tmpdir, "bark_dump")
+            bark_dump_prefix = (
+                os.path.join(output_root, "rank_0", "bark_dump")
+                if distributed_runtime else os.path.join(tmpdir, "bark_dump")
+            )
             if case.family == "bark":
-                cmd.extend(["--set", f"audio_bark.dump_path={bark_dump_prefix}"])
+                if distributed_runtime:
+                    wrapper = (
+                        'rank="${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${PMIX_RANK:-${RANK:-0}}}}"; '
+                        'out="$1/rank_${rank}"; mkdir -p "$out"; shift; '
+                        'exec "$@" --output "$out/output.wav" '
+                        '--set "audio_bark.dump_path=$out/bark_dump"'
+                    )
+                    cmd = ["bash", "-lc", wrapper, "trtmc_rank_audio", output_root] + cmd
+                else:
+                    cmd.extend(["--set", f"audio_bark.dump_path={bark_dump_prefix}"])
+
+            cmd = _wrap_distributed_command(cmd, case)
 
             t0 = time.monotonic()
             result = subprocess.run(
@@ -310,8 +330,8 @@ class TextToAudioRunner:
                 "text_to_audio", case.name)
             data: dict = {
                 "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": stderr_truncated,
+                "stdout": _strip_mpirun_tags(result.stdout),
+                "stderr": _strip_mpirun_tags(stderr_truncated),
             }
             if case.family == "bark" and bark_seed is not None:
                 data["trt_seed"] = str(bark_seed)
