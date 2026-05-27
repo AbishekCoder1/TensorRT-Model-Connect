@@ -256,23 +256,35 @@ class PromptedSegmentationRunner:
         is_foreground = case.inputs.get("is_foreground", True)
         num_expected_masks = case.inputs.get("num_expected_masks", 4)
 
-        output_dir = os.path.join(
-            _case_artifact_dir(ctx.artifacts_dir or "/tmp/claude", case.name),
-            "masks",
+        _model_dir = _case_artifact_dir(ctx.artifacts_dir or "/tmp/claude", case.name)
+        distributed_runtime = _distributed_runtime_config(case)
+        output_root = os.path.join(_model_dir, "rank_outputs")
+        output_dir = (
+            os.path.join(output_root, "rank_0", "masks")
+            if distributed_runtime else os.path.join(_model_dir, "masks")
         )
 
         cmd = [
             str(ctx.binary_path), "segment-sam", str(bundle_path),
             "--image", str(image_path),
-            "--output", str(output_dir),
             "--point-x", str(point_x),
             "--point-y", str(point_y),
         ]
         if not is_foreground:
             cmd.append("--background")
+        if distributed_runtime:
+            wrapper = (
+                'rank="${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${PMIX_RANK:-${RANK:-0}}}}"; '
+                'out="$1/rank_${rank}/masks"; mkdir -p "$out"; shift; '
+                'exec "$@" --output "$out"'
+            )
+            cmd = ["bash", "-lc", wrapper, "trtmc_rank_sam", output_root] + cmd
+        else:
+            cmd.extend(["--output", str(output_dir)])
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:
             cmd.extend(["--hf-python", str(runtime_cli_python)])
+        cmd = _wrap_distributed_command(cmd, case)
 
         env = dict(os.environ)
         if ctx.ld_library_path:
@@ -308,8 +320,8 @@ class PromptedSegmentationRunner:
         pseg_meta: dict = {
             "command": cmd,
             "returncode": result.returncode,
-            "stdout": result.stdout[-2000:] if result.stdout else "",
-            "stderr": stderr_truncated,
+            "stdout": _strip_mpirun_tags(result.stdout)[-2000:] if result.stdout else "",
+            "stderr": _strip_mpirun_tags(stderr_truncated),
         }
         if stderr_log:
             pseg_meta["stderr_log"] = stderr_log
