@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
 import numpy as np
+import pytest
 
 from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.parallel_config import (
@@ -56,8 +56,10 @@ def test_standard_decoder_weight_sharding_slices_gelu_fc_bias() -> None:
     out = shard_standard_decoder_weights(
         cfg, weights, ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2))
 
-    np.testing.assert_array_equal(out["layer.0.fc1_bias"], weights["layer.0.fc1_bias"][16:24])
-    np.testing.assert_array_equal(out["layer.0.fc2_bias"], weights["layer.0.fc2_bias"])
+    np.testing.assert_array_equal(
+        out["layer.0.fc1_bias"], weights["layer.0.fc1_bias"][16:24])
+    np.testing.assert_array_equal(
+        out["layer.0.fc2_bias"], weights["layer.0.fc2_bias"])
     assert out["_mlp_size"] == 8
 
 
