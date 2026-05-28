@@ -754,7 +754,8 @@ class BpeTokenizer final : public ITokenizer {
             out += (c == ' ') ? sp : std::string(1, c);
         }
         // Metaspace prepend_scheme=first: prepend if not already starting with ▁
-        if (!mSentencePiecePrependAlways && (out.empty() || out.compare(0, sp.size(), sp) != 0)) {
+        if (!mSentencePiecePrependAlways && mSentencePiecePrependIfMissing &&
+            (out.empty() || out.compare(0, sp.size(), sp) != 0)) {
             out = sp + out;
         }
         return out;
@@ -1171,6 +1172,14 @@ class BpeTokenizer final : public ITokenizer {
         return pretok::Variant::kGpt2;
     }
 
+    static bool is_space_split_pre_tokenizer(const nlohmann::json& pt, const std::string& pt_type) {
+        if (pt_type != "Split")
+            return false;
+        if (!pt.contains("pattern") || !pt["pattern"].contains("String"))
+            return false;
+        return pt["pattern"]["String"].get<std::string>() == " ";
+    }
+
     void detect_pre_tokenizer(const nlohmann::json& j) {
         mUsePreTokenizer = true;
         mPreTokenizerVariant = pretok::Variant::kGpt2;
@@ -1186,6 +1195,10 @@ class BpeTokenizer final : public ITokenizer {
             int digit_group = 0;
             mPreTokenizerVariant = detect_split_variant(pt, digit_group);
             mPreTokenizerDigitGroup = digit_group;
+        } else if (is_space_split_pre_tokenizer(pt, pt_type)) {
+            // Gemma SentencePiece-BPE tokenizers use a direct Split(" ")
+            // pre-tokenizer with spaces already normalized to U+2581.
+            mUsePreTokenizer = false;
         } else if (pt_type == "Metaspace") {
             mIsMetaspace = true;
             mUsePreTokenizer = false;
@@ -1285,17 +1298,40 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     // Detect normalizer: check for Prepend (always prepend ▁) vs none
+    static bool normalizer_sequence_prepends(const nlohmann::json& norm,
+                                             const std::string& norm_type) {
+        if (norm_type != "Sequence" || !norm.contains("normalizers"))
+            return false;
+        for (auto& sub : norm["normalizers"]) {
+            if (sub.value("type", "") == "Prepend")
+                return true;
+        }
+        return false;
+    }
+
+    static bool normalizer_replaces_space_with_sentence_piece(const nlohmann::json& norm,
+                                                              const std::string& norm_type) {
+        if (norm_type != "Replace")
+            return false;
+        if (!norm.contains("pattern") || !norm["pattern"].contains("String"))
+            return false;
+        if (norm["pattern"]["String"].get<std::string>() != " ")
+            return false;
+        return norm.value("content", "") == "\xe2\x96\x81";
+    }
+
     void detect_normalizer(const nlohmann::json& j) {
         if (!j.contains("normalizer") || j["normalizer"].is_null())
             return;
         auto& norm = j["normalizer"];
         std::string norm_type = norm.value("type", "");
-        if (norm_type == "Sequence" && norm.contains("normalizers")) {
-            for (auto& sub : norm["normalizers"]) {
-                if (sub.value("type", "") == "Prepend") {
-                    mSentencePiecePrependAlways = true;
-                }
-            }
+        if (normalizer_sequence_prepends(norm, norm_type)) {
+            mSentencePiecePrependAlways = true;
+        } else if (normalizer_replaces_space_with_sentence_piece(norm, norm_type)) {
+            // Gemma replaces spaces with ▁ but does not prepend ▁ to the
+            // first token. Preserve the old prepend-if-missing behavior for
+            // Metaspace-style SentencePiece models.
+            mSentencePiecePrependIfMissing = false;
         }
     }
 
@@ -1398,6 +1434,7 @@ class BpeTokenizer final : public ITokenizer {
     bool mIsSentencePiece = false;
     bool mSentencePiecePrependAlways =
         false; // true for Normalizer Prepend, false for Metaspace first
+    bool mSentencePiecePrependIfMissing = true;
     bool mByteFallback = false;
 
     // Post-processor: BOS/EOS token IDs to add when add_special_tokens=true
