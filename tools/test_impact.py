@@ -176,6 +176,7 @@ COMPARATOR_TASK_STRATEGIES: Dict[str, List[str]] = {
 
 # E2E contract plugin filename (stem) -> task_strategies
 PLUGIN_TASK_STRATEGIES: Dict[str, List[str]] = {
+    "asr": ["speech_to_text"],
     "diffusion": ["diffusion_media_generation"],
     "vl_qa": ["vision_language_generation"],
     "multimodal_chat": ["omni_multimodal"],
@@ -1413,6 +1414,16 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_in_impact_map(lambda imap: imap.e2e_data_file_to_models),
             resolver=_match_result("e2e_data_file", _e2e_data_file_models),
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
+        ),
+        ClassificationRule(
+            priority=475,
+            name="asr_probe_data",
+            matcher=_regex_rule(r"tests/e2e/data/asr_probes/.+$"),
+            resolver=_match_result(
+                "asr_probe_data",
+                _task_strategy_models(["speech_to_text"]),
+            ),
+            covered_by=("TestE2EDataFiles.test_asr_probe_support_files_select_asr",),
         ),
         ClassificationRule(
             priority=480,
