@@ -1322,8 +1322,10 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
-            "tests/test_flashinfer_plugin_e2e.py",
-            "tests/test_flashinfer_trt_attention.py",
+            "tests/e2e/models/decoder_family/run_decoder_fi.py",
+            "tests/e2e/models/decoder_family/test_flashinfer_plugin.py",
+            "tests/e2e/models/decoder_family/test_flashinfer_trt_attention.py",
+            "tests/e2e/models/decoder_family/test_decoder_flashinfer.py",
             "tests/test_tvm_ffi_e2e.py",
         ],
     )
