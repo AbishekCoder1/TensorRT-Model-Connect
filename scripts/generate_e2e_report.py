@@ -12,6 +12,7 @@ Usage:
     python scripts/generate_e2e_report.py \\
       --artifacts-dir /tmp/e2e_artifacts/artifacts \\
       -o /tmp/e2e_artifacts/e2e_report.html \\
+      [--manifest-dir tests/e2e/models] \\
       [--project-dir .] \\
       [--title "E2E Report"]
 """
@@ -28,7 +29,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
-from reporting.vlm_assessment import render_diffusion_vlm_assessment as _render_diffusion_vlm_assessment
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib
+
+from reporting.vlm_assessment import (
+    render_diffusion_vlm_assessment as _render_diffusion_vlm_assessment,
+)
 
 # Maximum file size to embed inline (10 MB).
 _MAX_EMBED_BYTES = 10 * 1024 * 1024
@@ -68,7 +76,6 @@ _PYTEST_TO_RESULT_STATUS = {
     "SKIPPED": "skip",
     "XFAIL": "skip",
 }
-_BUNDLE_GROUP_PREFIX = "bundle:"
 
 # ---------------------------------------------------------------------------
 # Modality classification
@@ -123,6 +130,84 @@ def load_all_results(artifacts_dir: Path) -> List[Dict[str, Any]]:
     return results
 
 
+def _indexed_manifest_paths(models_dir: Path) -> List[Path]:
+    """Return JSON manifests declared by per-family MODEL.toml indexes."""
+    paths: List[Path] = []
+    for index_path in sorted(models_dir.glob("*/MODEL.toml")):
+        try:
+            with index_path.open("rb") as index_file:
+                index = tomllib.load(index_file)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            print(f"WARNING: skipping {index_path}: {exc}", file=sys.stderr)
+            continue
+        entries = index.get("test_manifests", [])
+        if not isinstance(entries, list):
+            print(
+                f"WARNING: skipping {index_path}: test_manifests is not a list",
+                file=sys.stderr,
+            )
+            continue
+        for entry in entries:
+            if not isinstance(entry, str):
+                continue
+            manifest_path = index_path.parent / entry
+            if manifest_path.is_file():
+                paths.append(manifest_path)
+            else:
+                print(
+                    f"WARNING: {index_path} references missing manifest {entry!r}",
+                    file=sys.stderr,
+                )
+    return paths
+
+
+def load_model_manifests(models_dir: Optional[Path]) -> List[Dict[str, Any]]:
+    """Load every model and its declared testcase inventory."""
+    if models_dir is None or not models_dir.is_dir():
+        return []
+
+    models: List[Dict[str, Any]] = []
+    for manifest_path in _indexed_manifest_paths(models_dir):
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"WARNING: skipping {manifest_path}: {exc}", file=sys.stderr)
+            continue
+        testcases = raw.get("testcases", []) if isinstance(raw, dict) else []
+        if not isinstance(testcases, list) or not testcases:
+            continue
+
+        model_name = str(raw.get("name") or manifest_path.stem)
+        family = str(raw.get("family") or "")
+        task_strategy = str(raw.get("task_strategy") or "")
+        cases: List[Dict[str, str]] = []
+        for testcase in testcases:
+            if not isinstance(testcase, dict) or not testcase.get("name"):
+                continue
+            cases.append(
+                {
+                    "name": str(testcase["name"]),
+                    "ci_tier": str(
+                        testcase.get("ci_tier") or raw.get("ci_tier") or "default"
+                    ),
+                    "task_strategy": str(
+                        testcase.get("task_strategy") or task_strategy
+                    ),
+                }
+            )
+        if not cases:
+            continue
+        models.append(
+            {
+                "name": model_name,
+                "family": family,
+                "bundle": str(raw.get("bundle") or ""),
+                "testcases": cases,
+            }
+        )
+    return sorted(models, key=lambda model: str(model["name"]))
+
+
 def _e2e_root_from_artifacts_dir(artifacts_dir: Path) -> Path:
     if artifacts_dir.name == "artifacts":
         return artifacts_dir.parent
@@ -134,30 +219,18 @@ def _extract_case_name(text: str) -> str:
     return match.group(1) if match else ""
 
 
-def _case_names_from_param(case_name: str) -> List[str]:
-    if case_name.startswith(_BUNDLE_GROUP_PREFIX):
-        payload = case_name[len(_BUNDLE_GROUP_PREFIX):]
-        return [part for part in payload.split("+") if part]
-    return [case_name] if case_name else []
-
-
 def _record_pytest_outcome(
     outcomes: Dict[str, Dict[str, str]],
     case_name: str,
     outcome: Dict[str, str],
 ) -> None:
-    member_names = _case_names_from_param(case_name)
-    if len(member_names) <= 1:
-        outcomes[case_name] = outcome
-        return
+    outcomes[case_name] = outcome
 
-    grouped = {
-        **outcome,
-        "pytest_group": case_name,
-        "pytest_group_members": ",".join(member_names),
-    }
-    for member_name in member_names:
-        outcomes[member_name] = grouped
+
+def _result_model_name(result: Dict[str, Any]) -> str:
+    case_config = result.get("case_config", {}) or {}
+    metadata = case_config.get("metadata", {}) or {}
+    return str(metadata.get("model_name") or result.get("case_name") or "")
 
 
 def _clean_pytest_reason(reason: str) -> str:
@@ -186,8 +259,7 @@ def _load_pytest_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
             continue
         for testcase in root.iter("testcase"):
             case_name = _extract_case_name(
-                " ".join(str(testcase.attrib.get(key, ""))
-                         for key in ("classname", "name"))
+                " ".join(str(testcase.attrib.get(key, "")) for key in ("classname", "name"))
             )
             if not case_name:
                 continue
@@ -206,11 +278,15 @@ def _load_pytest_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
                 skip_type = skipped.attrib.get("type", "")
                 status = "XFAIL" if skip_type == "pytest.xfail" else "SKIPPED"
                 reason = skipped.attrib.get("message", "") or (skipped.text or "")
-            _record_pytest_outcome(outcomes, case_name, {
-                "pytest_status": status,
-                "reason": _clean_pytest_reason(reason),
-                "source": xml_path.name,
-            })
+            _record_pytest_outcome(
+                outcomes,
+                case_name,
+                {
+                    "pytest_status": status,
+                    "reason": _clean_pytest_reason(reason),
+                    "source": xml_path.name,
+                },
+            )
 
     for log_path in sorted(e2e_root.glob("console-*.log")):
         try:
@@ -225,11 +301,15 @@ def _load_pytest_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
             case_name, status, rest = match.groups()
             if status not in {"XFAIL", "XPASS"} and case_name not in outcomes:
                 continue
-            _record_pytest_outcome(outcomes, case_name, {
-                "pytest_status": status,
-                "reason": _clean_pytest_reason(rest.split("[", 1)[0]),
-                "source": log_path.name,
-            })
+            _record_pytest_outcome(
+                outcomes,
+                case_name,
+                {
+                    "pytest_status": status,
+                    "reason": _clean_pytest_reason(rest.split("[", 1)[0]),
+                    "source": log_path.name,
+                },
+            )
 
     return outcomes
 
@@ -257,25 +337,25 @@ def _merge_pytest_outcomes(
     for case_name, outcome in sorted(outcomes.items()):
         if case_name in seen:
             continue
-        status = _PYTEST_TO_RESULT_STATUS.get(
-            outcome.get("pytest_status", ""), "error")
-        merged.append({
-            "case_name": case_name,
-            "status": status,
-            "failure_type": "pytest_failed"
-            if status in {"fail", "error"} else None,
-            "case_config": {},
-            "stages": {
-                "pytest": {
-                    "status": status,
-                    "message": outcome.get("reason", ""),
-                    "metrics": {},
-                }
-            },
-            "timing": {},
-            "_summary_only": True,
-            "_pytest_outcome": outcome,
-        })
+        status = _PYTEST_TO_RESULT_STATUS.get(outcome.get("pytest_status", ""), "error")
+        merged.append(
+            {
+                "case_name": case_name,
+                "status": status,
+                "failure_type": "pytest_failed" if status in {"fail", "error"} else None,
+                "case_config": {},
+                "stages": {
+                    "pytest": {
+                        "status": status,
+                        "message": outcome.get("reason", ""),
+                        "metrics": {},
+                    }
+                },
+                "timing": {},
+                "_summary_only": True,
+                "_pytest_outcome": outcome,
+            }
+        )
     return merged
 
 
@@ -366,12 +446,14 @@ _STATUS_COLORS = {
 }
 
 
+def _status_label(status: str) -> str:
+    return status.replace("_", " ").upper()
+
+
 def _badge(status: str) -> str:
     color = _STATUS_COLORS.get(status, "#6b7280")
-    return (
-        f'<span class="badge" style="background:{color}">'
-        f"{html.escape(status.upper())}</span>"
-    )
+    label = _status_label(status)
+    return f'<span class="badge" style="background:{color}">{html.escape(label)}</span>'
 
 
 def _esc(text: Any) -> str:
@@ -493,9 +575,7 @@ def _render_metrics_table(stages: Dict[str, Any]) -> str:
         "<thead><tr>"
         "<th>Stage</th><th>Metric</th><th>Value</th>"
         "<th>Threshold</th><th>Op</th><th>Pass</th><th>Note</th>"
-        "</tr></thead><tbody>"
-        + "\n".join(rows)
-        + "</tbody></table>"
+        "</tr></thead><tbody>" + "\n".join(rows) + "</tbody></table>"
     )
 
 
@@ -561,11 +641,13 @@ def _read_stage_log(ref: Any, art_dir: Path) -> str:
     raw_path = Path(ref)
     candidates = [raw_path]
     if not raw_path.is_absolute():
-        candidates.extend([
-            art_dir / raw_path,
-            art_dir / raw_path.name,
-            art_dir.parent / raw_path.name,
-        ])
+        candidates.extend(
+            [
+                art_dir / raw_path,
+                art_dir / raw_path.name,
+                art_dir.parent / raw_path.name,
+            ]
+        )
     for path in candidates:
         if path.is_file():
             try:
@@ -911,8 +993,7 @@ def _format_load_component_label(component: str, stats: Dict[str, Tuple[int, int
 
 def _has_extra_compile_breakdown(details: Dict[str, float]) -> bool:
     return any(
-        key.startswith("trt_compile_extra_")
-        and key != "trt_compile_extra_engines_s"
+        key.startswith("trt_compile_extra_") and key != "trt_compile_extra_engines_s"
         for key in details
     )
 
@@ -945,9 +1026,7 @@ def _render_timing_breakdown(
     return (
         '<details class="timing-expand">'
         f"<summary>{_esc(label)}</summary>"
-        '<div class="timing-breakdown">'
-        + "\n".join(rows)
-        + "</div></details>"
+        '<div class="timing-breakdown">' + "\n".join(rows) + "</div></details>"
     )
 
 
@@ -990,8 +1069,7 @@ def _render_detailed_timing_table(result: Dict[str, Any]) -> str:
             "engine execution: " + label,
             value,
         )
-        for label, value in _aggregate_component_timings(
-            details, "trt_component_engine_")
+        for label, value in _aggregate_component_timings(details, "trt_component_engine_")
     ]
     if not engine_component_children and "inference_s" in details:
         engine_component_children = [("TRT engine execution", details.get("inference_s"))]
@@ -1001,8 +1079,7 @@ def _render_detailed_timing_table(result: Dict[str, Any]) -> str:
             "load/deserialization: " + _format_load_component_label(label, load_component_stats),
             value,
         )
-        for label, value in _aggregate_component_timings(
-            details, "trt_component_load_deserialize_")
+        for label, value in _aggregate_component_timings(details, "trt_component_load_deserialize_")
     ]
     if not load_component_children and "trt_load_deserialization_s" in details:
         load_component_children = [
@@ -1084,9 +1161,7 @@ def _render_repro_commands(repro: Dict[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _render_text_comparison(
-    trt_text: Optional[str], ref_text: Optional[str]
-) -> str:
+def _render_text_comparison(trt_text: Optional[str], ref_text: Optional[str]) -> str:
     if trt_text is None and ref_text is None:
         return ""
     return (
@@ -1162,7 +1237,7 @@ def _format_feature_output(feature: Optional[Tuple[str, Any]]) -> Optional[str]:
     if total <= 0:
         return f"{name}: (no numeric values)"
 
-    norm = sumsq ** 0.5
+    norm = sumsq**0.5
     suffix = " ..." if total > len(preview) else ""
     preview_text = ", ".join(f"{x:.6g}" for x in preview)
     return (
@@ -1209,8 +1284,7 @@ def render_vl_model(result: Dict[str, Any], project_dir: Optional[Path]) -> str:
         uri = encode_file_base64(img_path, _mime_for_ext(img_path.suffix))
         if uri:
             parts.append(
-                f'<p><strong>Input Image:</strong></p>'
-                f'<img src="{uri}" class="preview-img" />'
+                f'<p><strong>Input Image:</strong></p><img src="{uri}" class="preview-img" />'
             )
         else:
             parts.append(f"<p><em>Image not found: {_esc(image_rel)}</em></p>")
@@ -1258,14 +1332,16 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
             parts.append('<div class="frame-pair-images">')
             if trt_uri:
                 parts.append(
-                    '<figure><figcaption>TRT</figcaption>'
-                    f'<img src="{trt_uri}" class="frame-img" /></figure>')
+                    "<figure><figcaption>TRT</figcaption>"
+                    f'<img src="{trt_uri}" class="frame-img" /></figure>'
+                )
             else:
                 parts.append("<span class='missing'>TRT frame too large</span>")
             if ref_uri:
                 parts.append(
-                    '<figure><figcaption>Reference</figcaption>'
-                    f'<img src="{ref_uri}" class="frame-img" /></figure>')
+                    "<figure><figcaption>Reference</figcaption>"
+                    f'<img src="{ref_uri}" class="frame-img" /></figure>'
+                )
             else:
                 parts.append("<span class='missing'>Reference frame too large</span>")
             parts.append("</div></div>")
@@ -1311,12 +1387,14 @@ def _stage_output_error_excerpt(stage: Dict[str, Any]) -> str:
     metadata = stage.get("metadata", {})
     candidates: List[Any] = []
     if isinstance(data, dict):
-        candidates.extend([
-            data.get("error"),
-            data.get("parse_error"),
-            data.get("stderr_truncated"),
-            data.get("stderr"),
-        ])
+        candidates.extend(
+            [
+                data.get("error"),
+                data.get("parse_error"),
+                data.get("stderr_truncated"),
+                data.get("stderr"),
+            ]
+        )
     for candidate in candidates:
         if candidate:
             raw = str(candidate)
@@ -1412,9 +1490,7 @@ def render_audio_model(result: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def render_segmentation_model(
-    result: Dict[str, Any], project_dir: Optional[Path]
-) -> str:
+def render_segmentation_model(result: Dict[str, Any], project_dir: Optional[Path]) -> str:
     """Render detail section for a segmentation model."""
     art_dir = Path(result.get("_artifact_dir", ""))
     artifacts = result.get("artifacts", {})
@@ -1431,8 +1507,7 @@ def render_segmentation_model(
         uri = encode_file_base64(img_path, _mime_for_ext(img_path.suffix))
         if uri:
             parts.append(
-                f'<p><strong>Input Image:</strong></p>'
-                f'<img src="{uri}" class="preview-img" />'
+                f'<p><strong>Input Image:</strong></p><img src="{uri}" class="preview-img" />'
             )
 
     if prompt:
@@ -1484,10 +1559,8 @@ def render_generic_model(result: Dict[str, Any]) -> str:
     stage_outputs = result.get("stage_outputs", {})
     trt_text = _get_stage_text(stage_outputs, "trt_")
     ref_text = _get_stage_text(stage_outputs, "ref_")
-    trt_feature = _format_feature_output(
-        _get_stage_feature_output(stage_outputs, "trt_"))
-    ref_feature = _format_feature_output(
-        _get_stage_feature_output(stage_outputs, "ref_"))
+    trt_feature = _format_feature_output(_get_stage_feature_output(stage_outputs, "trt_"))
+    ref_feature = _format_feature_output(_get_stage_feature_output(stage_outputs, "ref_"))
 
     parts = []
     if prompt:
@@ -1522,10 +1595,7 @@ def render_model_section(
     modality = classify_modality(result)
     badge = _badge(status)
 
-    header = (
-        f'<details id="model-{_esc(name)}">'
-        f"<summary>{badge} <strong>{_esc(name)}</strong>"
-    )
+    header = f'<details id="model-{_esc(name)}"><summary>{badge} <strong>{_esc(name)}</strong>'
     if family or task_strategy:
         header += f" &mdash; {_esc(family)} / {_esc(task_strategy)}"
     elif result.get("_summary_only"):
@@ -1555,8 +1625,7 @@ def render_model_section(
     failure_type = result.get("failure_type")
     if failure_type and pytest_status != "XFAIL":
         body_parts.append(
-            f'<p class="failure-info">Failure type: '
-            f"<strong>{_esc(failure_type)}</strong></p>"
+            f'<p class="failure-info">Failure type: <strong>{_esc(failure_type)}</strong></p>'
         )
 
     # Dispatch to modality renderer
@@ -1642,50 +1711,82 @@ def _total_time_sort_key(result: Dict[str, Any]) -> float:
     return total if total is not None else -1.0
 
 
-def _bundle_group_key(result: Dict[str, Any]) -> str:
-    outcome = result.get("_pytest_outcome")
-    if isinstance(outcome, dict):
-        group_name = str(outcome.get("pytest_group") or "")
-        if group_name:
-            return group_name
-    case_config = result.get("case_config", {}) or {}
-    bundle = str(case_config.get("bundle", "") or "").strip()
-    if bundle:
-        return bundle
-    return ""
+def _model_group_key(result: Dict[str, Any]) -> str:
+    return _result_model_name(result)
 
 
-def _bundle_group_label(group_key: str) -> str:
-    if group_key.startswith(_BUNDLE_GROUP_PREFIX):
-        member_names = _case_names_from_param(group_key)
-        return "pytest group: " + ", ".join(member_names)
+def _model_group_label(group_key: str) -> str:
     return group_key
 
 
-def _bundle_group_sort_key(group_key: str, result: Dict[str, Any]) -> Tuple[int, str]:
+def _model_group_sort_key(group_key: str, result: Dict[str, Any]) -> Tuple[int, str]:
     name = str(result.get("case_name", ""))
-    if group_key.startswith(_BUNDLE_GROUP_PREFIX):
-        member_names = _case_names_from_param(group_key)
-        try:
-            return (member_names.index(name), name)
-        except ValueError:
-            return (len(member_names), name)
-    bundle_stem = Path(group_key).stem if group_key else ""
-    return (0 if name == bundle_stem else 1, name)
+    return (0 if name == group_key else 1, name)
 
 
-def _grouped_bundle_results(results: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+def _grouped_model_results(results: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for result in results:
-        group_key = _bundle_group_key(result)
+        group_key = _model_group_key(result)
         if not group_key:
             continue
         groups.setdefault(group_key, []).append(result)
     return {
-        key: sorted(items, key=lambda item: _bundle_group_sort_key(key, item))
+        key: sorted(items, key=lambda item: _model_group_sort_key(key, item))
         for key, items in sorted(groups.items())
-        if len(items) > 1
     }
+
+
+def _result_by_case_name(results: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    return {
+        str(result.get("case_name")): result
+        for result in results
+        if result.get("case_name")
+    }
+
+
+def _with_declared_testcases(
+    results: List[Dict[str, Any]],
+    model_manifests: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Add manifest-only rows and parent metadata without changing result totals."""
+    by_name = _result_by_case_name(results)
+    declared_names = {
+        str(case["name"])
+        for model in model_manifests
+        for case in model["testcases"]
+    }
+    display_results = [
+        result for result in results if str(result.get("case_name") or "") not in declared_names
+    ]
+
+    for model in model_manifests:
+        model_name = str(model["name"])
+        family = str(model.get("family") or "")
+        for case in model["testcases"]:
+            case_name = str(case["name"])
+            existing = by_name.get(case_name)
+            item = (
+                dict(existing)
+                if existing is not None
+                else {
+                    "case_name": case_name,
+                    "status": "not_run",
+                    "stages": {},
+                    "timing": {},
+                    "_manifest_only": True,
+                }
+            )
+            case_config = dict(item.get("case_config") or {})
+            metadata = dict(case_config.get("metadata") or {})
+            metadata.setdefault("model_name", model_name)
+            metadata.setdefault("ci_tier", str(case.get("ci_tier") or "default"))
+            case_config["metadata"] = metadata
+            case_config.setdefault("family", family)
+            case_config.setdefault("task_strategy", str(case.get("task_strategy") or ""))
+            item["case_config"] = case_config
+            display_results.append(item)
+    return display_results
 
 
 def _status_counts(results: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -1702,14 +1803,17 @@ def _status_summary(results: List[Dict[str, Any]]) -> str:
         status = next(iter(counts))
         return _badge(status)
     return " ".join(
-        f'<span class="bundle-status">{_esc(status)}: {count}</span>'
+        f'<span class="status-count">{_esc(_status_label(status))}: {count}</span>'
         for status, count in sorted(counts.items())
     )
 
 
-def _bundle_representative(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _model_representative(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     for item in items:
-        if not item.get("_summary_only"):
+        if not item.get("_summary_only") and not item.get("_manifest_only"):
+            return item
+    for item in items:
+        if not item.get("_manifest_only"):
             return item
     return items[0]
 
@@ -1722,24 +1826,12 @@ def _summary_sort_key(item: Tuple[Dict[str, Any], List[Dict[str, Any]]]) -> floa
 def _summary_dashboard_items(
     results: List[Dict[str, Any]],
 ) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
-    groups = _grouped_bundle_results(results)
-    grouped_names = {
-        str(result.get("case_name") or "")
-        for items in groups.values()
-        for result in items
-    }
-    dashboard_items = [
-        (_bundle_representative(items), items)
-        for items in groups.values()
-    ]
-    for result in results:
-        if str(result.get("case_name") or "") in grouped_names:
-            continue
-        dashboard_items.append((result, [result]))
+    groups = _grouped_model_results(results)
+    dashboard_items = [(_model_representative(items), items) for items in groups.values()]
     return sorted(dashboard_items, key=_summary_sort_key, reverse=True)
 
 
-def _render_summary_bundle_details(
+def _render_summary_model_details(
     group_key: str,
     representative: Dict[str, Any],
     items: List[Dict[str, Any]],
@@ -1748,7 +1840,8 @@ def _render_summary_bundle_details(
     key_metric: str,
     total_time: str,
 ) -> str:
-    title = str(representative.get("case_name") or _bundle_group_label(group_key))
+    title = _model_group_label(group_key)
+    testcase_label = "testcase" if len(items) == 1 else "testcases"
     rows = []
     for item in items:
         name = str(item.get("case_name", "unknown"))
@@ -1757,10 +1850,18 @@ def _render_summary_bundle_details(
         child_task_strategy = case_config.get("task_strategy", "")
         status = str(item.get("status", "error"))
         summary_only = " pytest-only" if item.get("_summary_only") else ""
+        manifest_only = " manifest-only" if item.get("_manifest_only") else ""
+        metadata = case_config.get("metadata", {}) or {}
+        ci_tier = str(metadata.get("ci_tier") or "default")
+        if item.get("_manifest_only"):
+            testcase_cell = _esc(name)
+        else:
+            testcase_cell = f'<a href="#model-{_esc(name)}">{_esc(name)}</a>'
         rows.append(
-            f'<tr class="summary-bundle-member{summary_only}">'
-            f'<td><a href="#model-{_esc(name)}">{_esc(name)}</a></td>'
+            f'<tr class="summary-testcase-row{summary_only}{manifest_only}">'
+            f"<td>{testcase_cell}</td>"
             f"<td>{_badge(status)}</td>"
+            f"<td>{_esc(ci_tier)}</td>"
             f"<td>{_esc(child_family) or '&mdash;'}</td>"
             f"<td>{_esc(child_task_strategy) or '&mdash;'}</td>"
             f"<td>{_esc(_key_metric(item)) or '&mdash;'}</td>"
@@ -1768,11 +1869,11 @@ def _render_summary_bundle_details(
             f"</tr>"
         )
     return (
-        '<details class="summary-bundle-details">'
-        '<summary class="summary-bundle-summary">'
-        '<span class="summary-bundle-main">'
-        f'<span class="summary-bundle-title">{_esc(title)}</span>'
-        f'<span class="bundle-count">{len(items)} testcases</span>'
+        '<details class="summary-model-details">'
+        '<summary class="summary-model-summary">'
+        '<span class="summary-model-main">'
+        f'<span class="summary-model-title">{_esc(title)}</span>'
+        f'<span class="testcase-count">{len(items)} {testcase_label}</span>'
         "</span>"
         f"<span>{_esc(family) or '&mdash;'}</span>"
         f"<span>{_esc(task_strategy) or '&mdash;'}</span>"
@@ -1783,17 +1884,11 @@ def _render_summary_bundle_details(
         '<div class="summary-subtest-wrap">'
         '<table class="summary-subtest-table">'
         "<thead><tr>"
-        "<th>Testcase</th><th>Status</th><th>Family</th><th>Task Strategy</th>"
+        "<th>Testcase</th><th>Status</th><th>CI Tier</th><th>Family</th>"
+        "<th>Task Strategy</th>"
         "<th>Key Metric</th><th>Time</th>"
-        "</tr></thead><tbody>"
-        + "\n".join(rows)
-        + "</tbody></table></div></details>"
+        "</tr></thead><tbody>" + "\n".join(rows) + "</tbody></table></div></details>"
     )
-
-
-def _render_summary_model_cell(result: Dict[str, Any]) -> str:
-    name = str(result.get("case_name", "unknown"))
-    return f'<a href="#model-{_esc(name)}">{_esc(name)}</a>'
 
 
 def _summary_data_status(members: List[Dict[str, Any]]) -> str:
@@ -1802,27 +1897,40 @@ def _summary_data_status(members: List[Dict[str, Any]]) -> str:
 
 def _summary_data_name(members: List[Dict[str, Any]]) -> str:
     return " ".join(
-        str(member.get("case_name", "")).lower()
-        for member in members
-        if member.get("case_name")
+        str(member.get("case_name", "")).lower() for member in members if member.get("case_name")
     )
 
 
-def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
+def render_summary_dashboard(
+    results: List[Dict[str, Any]],
+    model_manifests: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Render the top-of-page summary table with counters and filters."""
+    model_manifests = model_manifests or []
+    display_results = _with_declared_testcases(results, model_manifests)
+    grouped_results = _grouped_model_results(display_results)
     counts: Dict[str, int] = {"pass": 0, "fail": 0, "skip": 0, "error": 0}
     for r in results:
         s = r.get("status", "error")
         counts[s] = counts.get(s, 0) + 1
 
+    inventory_counters = ""
+    if grouped_results:
+        testcase_count = sum(len(testcases) for testcases in grouped_results.values())
+        model_label = "Model" if len(grouped_results) == 1 else "Models"
+        testcase_label = "Testcase" if testcase_count == 1 else "Testcases"
+        inventory_counters = (
+            f'<span class="counter model-counter">{len(grouped_results)} {model_label}</span>'
+            f'<span class="counter testcase-counter">{testcase_count} {testcase_label}</span>'
+        )
     counters = (
         f'<div class="counters">'
         f'<span class="counter pass-counter">{counts["pass"]} Passed</span>'
         f'<span class="counter fail-counter">{counts["fail"]} Failed</span>'
         f'<span class="counter skip-counter">{counts["skip"]} Skipped</span>'
         f'<span class="counter error-counter">{counts["error"]} Error</span>'
-        f'<span class="counter total-counter">{len(results)} Total</span>'
-        f"</div>"
+        f'<span class="counter total-counter">{len(results)} Results</span>'
+        f"{inventory_counters}</div>"
     )
 
     filters = (
@@ -1840,7 +1948,7 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
     )
 
     rows: List[str] = []
-    for r, members in _summary_dashboard_items(results):
+    for r, members in _summary_dashboard_items(display_results):
         cc = r.get("case_config", {})
         family = cc.get("family", "")
         task_strategy = cc.get("task_strategy", "")
@@ -1850,31 +1958,19 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
             f'class="summary-row" data-status="{_esc(_summary_data_status(members))}" '
             f'data-name="{_esc(_summary_data_name(members))}"'
         )
-        if len(members) > 1:
-            rows.append(
-                f"<tr {row_attrs}>"
-                '<td class="summary-bundle-cell" colspan="6">'
-                + _render_summary_bundle_details(
-                    _bundle_group_key(r),
-                    r,
-                    members,
-                    str(family),
-                    str(task_strategy),
-                    km,
-                    tt,
-                )
-                + "</td></tr>"
-            )
-            continue
         rows.append(
             f"<tr {row_attrs}>"
-            f'<td class="summary-model-cell">{_render_summary_model_cell(r)}</td>'
-            f"<td>{_esc(family)}</td>"
-            f"<td>{_esc(task_strategy)}</td>"
-            f"<td>{_status_summary(members)}</td>"
-            f"<td>{km}</td>"
-            f"<td>{tt}</td>"
-            f"</tr>"
+        '<td class="summary-model-cell" colspan="6">'
+            + _render_summary_model_details(
+                _model_group_key(r),
+                r,
+                members,
+                str(family),
+                str(task_strategy),
+                km,
+                tt,
+            )
+            + "</td></tr>"
         )
 
     table = (
@@ -1882,9 +1978,7 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
         "<thead><tr>"
         "<th>Model</th><th>Family</th><th>Task Strategy</th>"
         "<th>Status</th><th>Key Metric</th><th>Time</th>"
-        "</tr></thead><tbody>"
-        + "\n".join(rows)
-        + "</tbody></table>"
+        "</tr></thead><tbody>" + "\n".join(rows) + "</tbody></table>"
     )
 
     return f'<section class="dashboard">{counters}\n{filters}\n{table}</section>'
@@ -1944,6 +2038,7 @@ def render_report(
     results: List[Dict[str, Any]],
     title: str = "E2E Test Report",
     project_dir: Optional[Path] = None,
+    model_manifests: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Assemble the full self-contained HTML report."""
     # Reset command counter for deterministic output.
@@ -1954,9 +2049,7 @@ def render_report(
     parts.append("<!DOCTYPE html>")
     parts.append('<html lang="en"><head>')
     parts.append('<meta charset="utf-8" />')
-    parts.append(
-        '<meta name="viewport" content="width=device-width, initial-scale=1" />'
-    )
+    parts.append('<meta name="viewport" content="width=device-width, initial-scale=1" />')
     parts.append(f"<title>{_esc(title)}</title>")
     parts.append(f"<style>{_load_report_css()}</style>")
     parts.append("</head><body>")
@@ -1973,7 +2066,7 @@ def render_report(
 
     # Summary dashboard
     parts.append("<h2>Summary</h2>")
-    parts.append(render_summary_dashboard(results))
+    parts.append(render_summary_dashboard(results, model_manifests))
 
     # Per-model details
     parts.append("<h2>Model Details</h2>")
@@ -2008,6 +2101,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Output HTML file path.",
     )
     parser.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=None,
+        help="Indexed E2E model manifests used to show declared testcases.",
+    )
+    parser.add_argument(
         "--project-dir",
         type=Path,
         default=None,
@@ -2026,6 +2125,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
 
     results = load_all_results(args.artifacts_dir)
+    model_manifests = load_model_manifests(args.manifest_dir)
     if not results:
         print(
             f"WARNING: No result.json files found in {args.artifacts_dir}",
@@ -2036,14 +2136,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         results,
         title=args.title,
         project_dir=args.project_dir,
+        model_manifests=model_manifests,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(html_content, encoding="utf-8")
     size_kb = args.output.stat().st_size / 1024
     print(
-        f"Report written to {args.output} ({size_kb:.0f} KB, "
-        f"{len(results)} models)",
+        f"Report written to {args.output} ({size_kb:.0f} KB, {len(results)} results)",
         file=sys.stderr,
     )
     return 0
