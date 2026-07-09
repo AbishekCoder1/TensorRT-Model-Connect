@@ -13,11 +13,15 @@
     {
       "name": "qwen3-omni-30b-a3b-instruct",
       "trace_id": "IT-E2E-QWEN3-OMNI-01",
-      "reference_backend": "invariant_only",
+      "reference_backend": "torch_reference",
       "oracle_level": "L4_invariants",
+      "golden_snapshot_path": "data/qwen3_omni_hf_reference.json",
       "user_contract": "tts_audio",
       "prompt": "Please say hello from Qwen3 Omni in one short sentence.",
       "max_new_tokens": 16,
+      "seed": 42,
+      "reference_speaker": "Ethan",
+      "reference_talker_max_new_tokens": 32,
       "stages": [
         {
           "name": "talker_decode",

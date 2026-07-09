@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -180,6 +181,107 @@ def _make_ctx(tmp_path: Path, case: E2ECase) -> RunContext:
     )
 
 
+def test_ci_engine_build_guard_passes_manifest_identity_to_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("unit-build")
+    case.metadata.update(
+        {
+            "model_name": "unit-model-config",
+            "manifest_path": "/src/tests/e2e/models/unit/manifests/unit.json",
+        }
+    )
+    ctx = _make_ctx(tmp_path, case)
+    guard_dir = tmp_path / "engine-builds"
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_GUARD_DIR", str(guard_dir))
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "abc123")
+    build_environments: list[dict[str, str]] = []
+
+    def fake_run(cmd, **kwargs):
+        build_environments.append(kwargs["env"])
+        bundle_path = Path(cmd[cmd.index("-o") + 1])
+        bundle_path.write_bytes(b"bundle")
+        timing_path = Path(cmd[cmd.index("--build-timing-json") + 1])
+        timing_path.write_text('{"total_s": 1.0}\n', encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout="built", stderr="")
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+    result = orchestrator._resolve_bundle(case, ctx)
+
+    assert result[0] == str(Path(ctx.engine_dir) / case.bundle)
+    assert result[2] == ""
+    assert len(build_environments) == 1
+    build_env = build_environments[0]
+    assert build_env["TRTMC_ENGINE_BUILD_IDENTITY"] == "unit-model-config"
+    assert build_env["TRTMC_ENGINE_BUILD_REVISION"] == "abc123"
+    command = json.loads(build_env["TRTMC_ENGINE_BUILD_COMMAND_JSON"])
+    assert command[command.index("-o") + 1] == str(Path(ctx.engine_dir) / case.bundle)
+
+
+def test_hf_auth_preflight_accepts_a_warmed_offline_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("gated-offline")
+    ctx = _make_ctx(tmp_path, case)
+    snapshot = tmp_path / "hf-cache" / "snapshots" / "revision"
+    snapshot.mkdir(parents=True)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    def resolve_offline(hf_id: str, *, local_files_only: bool) -> str:
+        assert hf_id == case.hf_id
+        assert local_files_only is True
+        return str(snapshot)
+
+    huggingface_hub = types.ModuleType("huggingface_hub")
+    huggingface_hub.snapshot_download = resolve_offline
+    monkeypatch.setitem(sys.modules, "huggingface_hub", huggingface_hub)
+
+    passed, message = orchestrator._check_hf_auth(
+        ctx,
+        PreflightRequirement(
+            kind="hf_auth_token_present",
+            args={"hf_id": case.hf_id},
+        ),
+    )
+
+    assert passed is True
+    assert message == f"HF snapshot available offline: {case.hf_id}"
+
+
+def test_hf_auth_preflight_rejects_a_missing_offline_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("gated-missing")
+    ctx = _make_ctx(tmp_path, case)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    def missing(*_args, **_kwargs):
+        raise RuntimeError("not cached")
+
+    huggingface_hub = types.ModuleType("huggingface_hub")
+    huggingface_hub.snapshot_download = missing
+    monkeypatch.setitem(sys.modules, "huggingface_hub", huggingface_hub)
+
+    passed, message = orchestrator._check_hf_auth(
+        ctx,
+        PreflightRequirement(
+            kind="hf_auth_token_present",
+            args={"hf_id": case.hf_id},
+        ),
+    )
+
+    assert passed is False
+    assert "snapshot is unavailable offline" in message
+
+
 def _patch_bundle_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -210,6 +312,45 @@ def _patch_plugins(
 def _read_result_json(ctx: RunContext, case: E2ECase) -> dict[str, Any]:
     path = Path(ctx.artifacts_dir) / case.name / "result.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_auto_register_artifacts_includes_reference_visuals_and_metadata_audio(
+    tmp_path: Path,
+) -> None:
+    class Sink:
+        base_dir = tmp_path
+
+        def __init__(self) -> None:
+            self.artifacts: dict[str, str] = {}
+
+        def register_artifact(self, key: str, rel_path: str) -> None:
+            self.artifacts[key] = rel_path
+
+    sink = Sink()
+    visual = tmp_path / "hf_seg_viz.png"
+    audio = tmp_path / "talker_decode.wav"
+    visual.write_bytes(b"png")
+    audio.write_bytes(b"wav")
+    output = StageOutput(
+        stage_name="full_inference",
+        data={"viz_path": str(visual)},
+        metadata={"audio_output_path": str(audio)},
+    )
+
+    orchestrator._auto_register_artifacts(sink, output, "ref")
+
+    assert sink.artifacts == {
+        "ref_segmentation_map": "hf_seg_viz.png",
+        "ref_wav": "talker_decode.wav",
+    }
+
+    sibling_prefix = Path(f"{tmp_path}-sibling") / "outside.wav"
+    outside = StageOutput(
+        stage_name="full_inference",
+        data={"wav_path": str(sibling_prefix)},
+    )
+    orchestrator._auto_register_artifacts(sink, outside, "trt")
+    assert sink.artifacts["trt_wav"] == str(sibling_prefix)
 
 
 def test_run_returns_preflight_skip_without_resolving_bundle(

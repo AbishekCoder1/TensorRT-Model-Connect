@@ -11,6 +11,8 @@ import json
 import pathlib
 from pathlib import Path
 
+import pytest
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
@@ -22,12 +24,15 @@ WARM_HF_CACHE = REPO_ROOT / "scripts" / "warm_hf_cache.py"
 FAMILIES = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
 HELPER_FUNCTIONS = {
     "_component_has_weight",
+    "_cache_repository_manifest",
     "_diffusers_missing_weight_components",
     "_is_hf_file_cached",
     "_is_diffusers_component_enabled",
     "_is_cached",
     "_manifest_has_eligible_testcase",
     "_snapshot_has_required_files",
+    "_warm_exit_code",
+    "_warm_snapshot",
 }
 
 
@@ -41,6 +46,31 @@ def _family_metadata_values(field: str) -> list[str]:
             parts = [part for part in spec.split("|")[1:] if part]
             values.extend(parts)
     return values
+
+
+def _family_metadata_specs(field: str) -> list[str]:
+    specs: list[str] = []
+    for model_toml in sorted(FAMILIES.glob("*/MODEL.toml")):
+        data = tomllib.loads(model_toml.read_text(encoding="utf-8"))
+        specs.extend(
+            spec for spec in data.get(field, []) if isinstance(spec, str)
+        )
+    return specs
+
+
+def _literal_string_list(name: str) -> set[str]:
+    tree = ast.parse(WARM_HF_CACHE.read_text())
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            continue
+        value = ast.literal_eval(node.value)
+        return {item for item in value if isinstance(item, str)}
+    raise AssertionError(f"Missing literal string list {name}")
 
 
 def _load_cache_helpers() -> dict:
@@ -64,8 +94,21 @@ def _load_cache_helpers() -> dict:
                 "linear_spec_lora/adapter_model.safetensors",
             ],
         },
-        "_ENTRYPOINT_PATTERNS": ["config.json", "model_index.json", "*/config.json"],
-        "_WEIGHT_PATTERNS": ["*.safetensors", "*.bin", "*.nemo"],
+        "_ENTRYPOINT_PATTERNS": [
+            "config.json",
+            "model_index.json",
+            "*.yml",
+            "*.yaml",
+            "*/config.json",
+        ],
+        "_WEIGHT_PATTERNS": [
+            "*.safetensors",
+            "*.bin",
+            "*.nemo",
+            "model.npz",
+            "elf_params.npz",
+            "checkpoint_*/manifest.ocdbt",
+        ],
         "_HF_ALLOW_PATTERNS": ["config.json", "model.safetensors"],
         "_HF_FAMILY_ALLOW_PATTERNS": ["nested/**"],
         "_HF_EXTRA_ALLOW_PATTERNS": ["*.nemo"],
@@ -75,6 +118,15 @@ def _load_cache_helpers() -> dict:
             "nested/**",
             "*.nemo",
         ],
+        "_TOKENIZER_DOWNLOAD_PATTERNS": [
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ],
+        "HfHubHTTPError": RuntimeError,
+        "repo_folder_name": (
+            lambda *, repo_id, repo_type: f"{repo_type}s--{repo_id.replace('/', '--')}"
+        ),
     }
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in HELPER_FUNCTIONS:
@@ -112,8 +164,25 @@ def test_family_file_assets_are_metadata_driven() -> None:
     assert "_family_hf_warm_files" in text
     assert "family_hf_warm_files" in text
     assert "Warming family file assets" in text
-    for value in _family_metadata_values("hf_warm_files"):
-        assert value not in text
+    global_allow_patterns = _literal_string_list("_HF_ALLOW_PATTERNS")
+    for spec in _family_metadata_specs("hf_warm_files"):
+        asset_name, hf_id, filename = spec.split("|", 2)
+        assert spec not in text
+        assert asset_name not in text
+        assert hf_id not in text
+        # Generic filenames may already be part of the global snapshot schema;
+        # only family-unique filenames prove model-specific hard-coding here.
+        if filename not in global_allow_patterns:
+            assert filename not in text
+
+
+def test_family_file_asset_guard_allows_global_filename_collisions() -> None:
+    """A generic weight name is not itself family-specific hard-coding."""
+    assert "pytorch_model.bin" in _literal_string_list("_HF_ALLOW_PATTERNS")
+    assert any(
+        spec.endswith("|pytorch_model.bin")
+        for spec in _family_metadata_specs("hf_warm_files")
+    )
 
 
 def test_nemo_archives_count_as_complete_snapshots() -> None:
@@ -122,6 +191,34 @@ def test_nemo_archives_count_as_complete_snapshots() -> None:
         'if any(fnmatch.fnmatch(name, "*.nemo") for name in files):\n'
         "        return True"
     ) in text
+
+
+def test_orbax_checkpoint_counts_as_complete_snapshot(tmp_path: Path) -> None:
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    checkpoint = snapshot / "checkpoint_0"
+    checkpoint.mkdir(parents=True)
+    (snapshot / "ELF-B-de-en.yml").write_text("model: elf\n")
+    (checkpoint / "manifest.ocdbt").write_bytes(b"checkpoint")
+
+    assert helpers["_snapshot_has_required_files"](snapshot)
+
+
+def test_tokenizer_dependency_does_not_require_model_weights(tmp_path: Path) -> None:
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "tokenizer_config.json").write_text("{}")
+
+    assert helpers["_snapshot_has_required_files"](
+        snapshot,
+        require_weights=False,
+    )
+    assert not helpers["_snapshot_has_required_files"](
+        snapshot,
+        require_weights=True,
+    )
 
 
 def test_diffusers_snapshot_requires_component_weights(tmp_path: Path) -> None:
@@ -243,6 +340,133 @@ def test_cache_skip_rejects_unresolved_snapshots_parent(tmp_path: Path) -> None:
     helpers["snapshot_download"] = lambda *args, **kwargs: str(snapshots)
 
     assert not helpers["_is_cached"]("org/model")
+
+
+def test_selective_warm_of_cached_snapshot_makes_no_network_download() -> None:
+    helpers = _load_cache_helpers()
+    downloads: list[str] = []
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: True
+    helpers["snapshot_download"] = lambda hf_id, **_kwargs: downloads.append(hf_id)
+
+    status, detail = helpers["_warm_snapshot"](
+        "org/model",
+        gated=True,
+        token_available=False,
+        selective=True,
+        local_only=False,
+    )
+
+    assert (status, detail) == ("cached", "")
+    assert downloads == []
+
+
+def test_uncached_gated_snapshot_without_token_fails_before_download() -> None:
+    helpers = _load_cache_helpers()
+    downloads: list[str] = []
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: False
+    helpers["snapshot_download"] = lambda hf_id, **_kwargs: downloads.append(hf_id)
+
+    status, detail = helpers["_warm_snapshot"](
+        "org/gated-model",
+        gated=True,
+        token_available=False,
+        selective=True,
+        local_only=False,
+    )
+
+    assert status == "failed"
+    assert "no HF token" in detail
+    assert downloads == []
+
+
+def test_local_only_uncached_snapshot_never_downloads() -> None:
+    helpers = _load_cache_helpers()
+    downloads: list[str] = []
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: False
+    helpers["snapshot_download"] = lambda hf_id, **_kwargs: downloads.append(hf_id)
+
+    status, detail = helpers["_warm_snapshot"](
+        "org/model",
+        gated=False,
+        token_available=False,
+        selective=True,
+        local_only=True,
+    )
+
+    assert status == "failed"
+    assert "not available in the local cache" in detail
+    assert downloads == []
+
+
+def test_strict_warm_failure_returns_nonzero() -> None:
+    exit_code = _load_cache_helpers()["_warm_exit_code"]
+    text = WARM_HF_CACHE.read_text(encoding="utf-8")
+
+    assert exit_code(True, ["org/missing"]) == 1
+    assert exit_code(True, []) == 0
+    assert exit_code(False, ["org/missing"]) == 0
+    assert (
+        "strict_exit_code = _warm_exit_code(args.strict or bool(args.emit_cache_repos), warned)"
+        in text
+    )
+    assert "if strict_exit_code:\n    sys.exit(strict_exit_code)" in text
+
+
+def test_selected_cache_repository_manifest_is_unique_and_canonical(
+    tmp_path: Path,
+) -> None:
+    manifest = _load_cache_helpers()["_cache_repository_manifest"]
+    hub = tmp_path / "hub"
+    for folder in ("models--org--one", "models--org--two"):
+        (hub / folder).mkdir(parents=True)
+
+    payload = manifest(
+        ["org/one", "org/one", "org/two"],
+        hub_cache=hub,
+    )
+
+    assert payload == {
+        "schema_version": 1,
+        "hub_cache": str(hub.resolve()),
+        "repositories": [
+            {
+                "repo_id": "org/one",
+                "repo_type": "model",
+                "cache_folder": "models--org--one",
+                "cache_path": str((hub / "models--org--one").resolve()),
+            },
+            {
+                "repo_id": "org/two",
+                "repo_type": "model",
+                "cache_folder": "models--org--two",
+                "cache_path": str((hub / "models--org--two").resolve()),
+            },
+        ],
+    }
+
+
+def test_selected_cache_repository_manifest_rejects_missing_or_linked_repo(
+    tmp_path: Path,
+) -> None:
+    manifest = _load_cache_helpers()["_cache_repository_manifest"]
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (hub / "models--org--linked").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="missing or not a directory"):
+        manifest(["org/missing"], hub_cache=hub)
+    with pytest.raises(RuntimeError, match="missing or not a directory"):
+        manifest(["org/linked"], hub_cache=hub)
+
+
+def test_cache_repository_evidence_cli_is_fail_closed() -> None:
+    text = WARM_HF_CACHE.read_text(encoding="utf-8")
+
+    assert '"--emit-cache-repos"' in text
+    assert "if args.emit_cache_repos and not warned:" in text
+    assert 'warned.append("cache-repository-evidence")' in text
 
 
 def test_hf_file_cache_skip_uses_hf_local_resolution() -> None:

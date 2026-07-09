@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 
@@ -24,14 +27,26 @@ def _single_default_model_config(filename: str) -> tuple[Path, dict]:
 
 
 def test_workflows_define_shared_hf_cache_env() -> None:
-    for workflow in ("nightly.yml", "trtmc-ci.yml"):
-        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
-        assert "TRTMC_STORAGE_ROOT:" in text
-        assert "HF_HOME:" in text
-        assert "HF_HUB_CACHE:" in text
-        assert "HUGGINGFACE_HUB_CACHE:" in text
-        assert "HF_MODULES_CACHE:" in text
-        assert "/workspace/users/yifeif/tensorrt-model-connect/hf-cache" in text
+    nightly = (REPO_ROOT / ".github/workflows/nightly.yml").read_text()
+    for name in (
+        "TRTMC_STORAGE_ROOT",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "HF_MODULES_CACHE",
+    ):
+        assert f"{name}:" in nightly
+
+    proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
+    assert (
+        "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || "
+        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}"
+    ) in proof
+    assert "TRTMC_HF_HUB_CACHE:" not in proof and "TRTMC_HF_MODULES_CACHE:" not in proof
+    runner = (REPO_ROOT / ".github/scripts/run-model-proof.sh").read_text()
+    assert "$HOME/.cache/huggingface" in runner
+    assert "${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}" in runner
+    assert "-e HF_MODULES_CACHE=/work/hf-modules" in runner
 
 
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
@@ -99,7 +114,7 @@ def test_diffusion_vlm_pair_count_uses_helper() -> None:
         maxsplit=1,
     )[0]
     assert "tools/count_diffusion_frame_pairs.py e2e_artifacts/artifacts" in vlm_block
-    assert "--config \"$vlm_config\"" in vlm_block
+    assert '--config "$vlm_config"' in vlm_block
     assert "python3 -c" not in vlm_block
 
 
@@ -180,70 +195,290 @@ def test_qwen_flashinfer_scripts_skip_pytest_collection() -> None:
 
 
 def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> None:
-    premerge = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
+    proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
     nightly = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    assert "name: trtmc-ci-${{ github.run_id }}" in premerge
-    assert "retention-days: 1" in premerge
+    assert (
+        "name: model-proof-${{ inputs.model }}-${{ inputs.revision }}-${{ github.run_attempt }}"
+    ) in proof
+    assert "retention-days: 7" in proof
+    assert "${{ inputs.model }}/artifacts/" in proof
     assert "name: trtmc-nightly-${{ github.run_id }}" in nightly
     assert "retention-days: 14" in nightly
 
 
-def test_github_workflows_keep_html_report_in_full_artifacts() -> None:
-    expectations = {
-        "trtmc-ci.yml": ("trtmc-ci-html-report-${{ github.run_id }}", "retention-days: 1"),
-        "nightly.yml": (
-            "trtmc-nightly-html-report-${{ github.run_id }}",
-            "retention-days: 14",
-        ),
-    }
-    for workflow, (artifact_name, retention) in expectations.items():
-        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
-        assert "Upload E2E HTML report" in text
-        assert artifact_name in text
-        assert "path: e2e_artifacts/e2e_report.html" in text
-        assert retention in text
-        assert "e2e_artifacts/" in text
-        assert "!e2e_artifacts/e2e_report.html" not in text
+def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> None:
+    nightly = (REPO_ROOT / ".github/workflows/nightly.yml").read_text()
+    assert "Upload E2E HTML report" in nightly
+    assert "trtmc-nightly-html-report-${{ github.run_id }}" in nightly
+    assert "path: e2e_artifacts/e2e_report.html" in nightly
+    assert "retention-days: 14" in nightly
+    assert "e2e_artifacts/" in nightly
+    assert "!e2e_artifacts/e2e_report.html" not in nightly
+
+    proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
+    assert "Upload isolated model proof artifact" in proof
+    assert "model-proof-${{ inputs.model }}-${{ inputs.revision }}" in proof
+    assert "model-proof-report.html" in proof
+    assert "if-no-files-found: error" in proof
+    assert "retention-days: 7" in proof
+
+    premerge = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    assert "model-proof.yml" in premerge
+    assert "4 / Combined HTML report" in premerge
+    assert "Download isolated model proof artifacts" in premerge
+    assert "merge-multiple: false" in premerge
+    assert (
+        "pattern: model-proof-*-${{ needs.legal.outputs.tested_sha || github.sha }}-*" in premerge
+    )
+    assert "scripts/generate_model_proof_report.py" in premerge
+    assert '--upstream-result "legal=$LEGAL_RESULT"' in premerge
+    assert '--upstream-result "impact=$IMPACT_RESULT"' in premerge
+    assert "Upload combined model proof HTML report" in premerge
+    assert "model-proof-html-${{ needs.legal.outputs.tested_sha || github.sha }}" in premerge
 
 
-def test_premerge_ci_runs_from_manual_dispatch_or_trigger_labels() -> None:
+def test_premerge_ci_is_triggered_only_by_one_shot_label_events() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
     trigger_block = text.split("permissions:", maxsplit=1)[0]
     assert "pull_request:" in trigger_block
-    assert "types:" in trigger_block
+    assert "- main" in trigger_block
+    assert "CI-improvement" not in trigger_block
+    types_block = trigger_block.split("types:", maxsplit=1)[1]
     assert "- labeled" in trigger_block
-    assert "workflow_dispatch:" in trigger_block
+    for unwanted_type in (
+        "opened",
+        "reopened",
+        "synchronize",
+        "ready_for_review",
+        "unlabeled",
+    ):
+        assert unwanted_type not in types_block
+    assert "paths-ignore:" not in trigger_block
+    assert "paths:" not in trigger_block
+    assert "workflow_dispatch:" not in trigger_block
     assert "push:" not in trigger_block
-    assert "issues: write" not in text
-    assert "pull-requests: read" not in text
-    assert "github.event_name == 'workflow_dispatch'" in text
+    assert "inputs." not in text
+    assert "contains(github.event.pull_request.labels.*.name" not in text
     assert "github.event.label.name == 'run-ci'" in text
+    assert "permissions: {}" in text
+    assert "pull-requests: read" not in text
     assert "run-e2e" not in text
     assert "run-full-ci" not in text
-    assert "Remove trigger label" not in text
     assert "actions/github-script" not in text
-    assert "github.rest.issues.removeLabel" not in text
+
+
+def test_legal_job_pins_snapshot_rejects_forks_and_consumes_run_ci() -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
+
+    assert "'Legal compliance' || 'Ignored label / Legal compliance'" in legal
+    assert "pull-requests: write" in legal
+    assert "contents: read" in legal
+    assert text.count("pull-requests: write") == 1
+    assert "issues: write" not in text
+    for output in ("authorized", "tested_sha", "base_sha", "head_sha"):
+        assert f"{output}: ${{{{ steps.authorize.outputs.{output} }}}}" in legal
+
+    assert "TESTED_SHA: ${{ github.sha }}" in legal
+    assert "BASE_SHA: ${{ github.event.pull_request.base.sha }}" in legal
+    assert "HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in legal
+    assert "HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}" in legal
+    assert 'if [ "$TRIGGER_LABEL" != "run-ci" ]; then' in legal
+    assert 'echo "authorized=false" >> "$GITHUB_OUTPUT"' in legal
+    assert 'if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then' in legal
+
+    capture_index = legal.index('echo "tested_sha=$TESTED_SHA"')
+    delete_index = legal.index("gh api --silent")
+    authorize_index = legal.index('echo "authorized=true"')
+    assert capture_index < delete_index < authorize_index
+    assert "--method DELETE" in legal
+    assert 'issues/$PR_NUMBER/labels/run-ci"' in legal
+    assert "|| true" not in legal
+
+    assert "Check out pinned merge snapshot" in legal
+    assert "ref: ${{ steps.authorize.outputs.tested_sha }}" in legal
+    assert "persist-credentials: false" in legal
+    assert "steps.authorize.outputs.authorized == 'true'" in legal
+
+
+def test_unrelated_label_cannot_emit_or_satisfy_required_contexts() -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
+    impact = text.split("\n  impact:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    required = text.split("\n  required:", maxsplit=1)[1]
+
+    # Both ruleset contexts exist only on the run-ci event. Unrelated labels
+    # take distinct dynamic names and succeed cheaply instead of producing a
+    # skipped required check, which GitHub would otherwise treat as success.
+    assert "'Legal compliance' || 'Ignored label / Legal compliance'" in legal
+    assert "'Premerge CI' || 'Ignored label / Premerge CI'" in required
+    assert "if: ${{ always() }}" in required
+    assert 'if [ "$TRIGGER_LABEL" != "run-ci" ]; then' in required
+    ignored_index = required.index("Ignored unrelated label")
+    validation_index = required.index('test "$LEGAL_RESULT" = "success"')
+    assert ignored_index < validation_index
+    assert "needs.legal.outputs.authorized == 'true'" in impact
+
+
+def test_premerge_concurrency_separates_authorized_and_ignored_labels() -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    concurrency = text.split("concurrency:", maxsplit=1)[1].split("\njobs:", maxsplit=1)[0]
+    assert "github.event.pull_request.number" in concurrency
+    assert "github.event.label.name == 'run-ci' && 'authorized' || github.run_id" in concurrency
+    assert "cancel-in-progress: ${{ github.event.label.name == 'run-ci' }}" in concurrency
+
+
+def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+
+    legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
+    impact = text.split("\n  impact:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  no-model:", maxsplit=1)[
+        0
+    ]
+    no_model = text.split("\n  no-model:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
+    report = text.split("\n  report:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
+    required = text.split("\n  required:", maxsplit=1)[1]
+
+    assert "'Legal compliance' || 'Ignored label / Legal compliance'" in legal
+    assert "python tools/legal_headers.py --check" in legal
+    assert "needs: legal" in impact
+    assert "needs.legal.outputs.authorized == 'true'" in impact
+    assert "python3 tools/model_ci.py validate" in impact
+    assert "python3 tools/model_ci.py impact" in impact
+    assert "--platform-change-policy all" in impact
+    assert "matrix: ${{ steps.impact.outputs.matrix }}" in impact
+
+    assert "- legal" in model_proof
+    assert "- impact" in model_proof
+    assert "needs.legal.outputs.authorized == 'true'" in model_proof
+    assert "needs.impact.outputs.has_models == 'true'" in model_proof
+    assert "uses: ./.github/workflows/model-proof.yml" in model_proof
+    assert "name: 3 / Model / ${{ matrix.model }}" in model_proof
+    assert "fail-fast: false" in model_proof
+    assert "max-parallel: 16" in model_proof
+    assert "matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}" in model_proof
+    assert "model: ${{ matrix.model }}" in model_proof
+    assert "models: ${{ needs.impact.outputs.affected_models }}" not in model_proof
+    assert "expected_count:" not in model_proof
+
+    assert "- legal" in no_model
+    assert "- impact" in no_model
+    assert "needs.legal.outputs.authorized == 'true'" in no_model
+    assert "needs.impact.outputs.has_models == 'false'" in no_model
+    assert 'test "$IMPACT_MODE" = "none"' in no_model
+
+    for dependency in ("legal", "impact", "model-proof", "no-model"):
+        assert f"- {dependency}" in report
+    assert "4 / Combined HTML report" in report
+    assert "always()" in report
+    assert "github.event.label.name == 'run-ci'" in report
+    assert "needs.legal.outputs.authorized == 'true'" not in report
+    assert '"upstream_results": upstream_results' in report
+    assert "The combined report did not complete." in report
+    assert "actions/download-artifact@v4" in report
+    assert "merge-multiple: false" in report
+    assert "needs.legal.outputs.tested_sha || github.sha" in report
+    assert '--upstream-result "legal=$LEGAL_RESULT"' in report
+    assert '--upstream-result "impact=$IMPACT_RESULT"' in report
+    assert '--upstream-result "model-proof=$MODEL_RESULT"' in report
+    assert '--upstream-result "no-model=$NO_MODEL_RESULT"' in report
+    assert "scripts/generate_model_proof_report.py" in report
+    assert "if python3 scripts/generate_model_proof_report.py" in report
+    assert "compose_rc=$?" in report
+    assert 'echo "exit_code=$compose_rc" >> "$GITHUB_OUTPUT"' in report
+    assert "Upload combined model proof HTML report" in report
+    assert "Enforce combined report certification" in report
+
+    for dependency in ("legal", "impact", "model-proof", "no-model", "report"):
+        assert f"- {dependency}" in required
+    assert "'Premerge CI' || 'Ignored label / Premerge CI'" in required
+    assert "always()" in required
+    assert 'test "$MODEL_RESULT" = "success"' in required
+    assert 'test "$REPORT_RESULT" = "success"' in required
+
+
+def test_premerge_report_bootstrap_names_upstream_failure_before_checkout(
+    tmp_path: Path,
+) -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    block = text.split("- name: Bootstrap combined HTML before checkout", maxsplit=1)[1].split(
+        "- name: Check out pinned merge snapshot for report tooling", maxsplit=1
+    )[0]
+    program = textwrap.dedent(
+        block.split("<<'PY'\n", maxsplit=1)[1].split("\n          PY", maxsplit=1)[0]
+    )
+    output = tmp_path / "report"
+    output.mkdir()
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-",
+            str(output),
+            "",
+            "a" * 40,
+            "premerge",
+            "",
+            "failure",
+            "skipped",
+            "skipped",
+            "skipped",
+        ],
+        input=program,
+        text=True,
+        check=True,
+    )
+
+    status = json.loads((output / "model-proof-report-status.json").read_text(encoding="utf-8"))
+    assert status["outcome"] == "failed"
+    assert status["upstream_results"]["legal"] == "failure"
+    assert status["upstream_results"]["impact"] == "skipped"
+    assert any("legal" in issue and "failure" in issue for issue in status["issues"])
+    report = (output / "model-proof-report.html").read_text(encoding="utf-8")
+    assert "legal" in report
+    assert "failure" in report
+
+
+def test_premerge_ci_preserves_the_main_ruleset_context_names() -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
+    required = text.split("\n  required:", maxsplit=1)[1]
+
+    assert "github.event.label.name == 'run-ci'" in legal
+    assert "'Legal compliance' || 'Ignored label / Legal compliance'" in legal
+    assert "uses: ./.github/workflows/legal.yml" not in legal
+    assert "github.event.label.name == 'run-ci'" in required
+    assert "'Premerge CI' || 'Ignored label / Premerge CI'" in required
 
 
 def test_premerge_ci_compares_the_checked_out_merge_snapshot() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
-    base_block = text.split("- name: Resolve comparison base", maxsplit=1)[1].split(
-        "- name: Report CI mode", maxsplit=1
+    base_block = text.split("- name: Resolve comparison refs", maxsplit=1)[1].split(
+        "- name: Validate ownership manifests", maxsplit=1
     )[0]
 
-    assert "git rev-parse --verify HEAD^2" in base_block
-    assert 'base="$(git rev-parse HEAD^1)"' in base_block
-    assert "github.event.pull_request.base.sha" not in base_block
+    assert "CAPTURED_BASE_SHA: ${{ needs.legal.outputs.base_sha }}" in base_block
+    assert "CAPTURED_TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}" in base_block
+    assert "CAPTURED_HEAD_SHA: ${{ needs.legal.outputs.head_sha }}" in base_block
+    assert 'base_tip_sha="$(git rev-parse "${CAPTURED_BASE_SHA}^{commit}")"' in base_block
+    assert 'base_sha="$(git merge-base "$base_tip_sha" "$tested_sha")"' in base_block
+    assert 'tested_sha="$(git rev-parse "${CAPTURED_TESTED_SHA}^{commit}")"' in base_block
+    assert '--head "$TESTED_SHA"' in text
 
 
 def test_label_triggered_premerge_ci_uses_pr_merge_ref_checkout() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
-    checkout_block = text.split("- name: Check out source", maxsplit=1)[1].split(
-        "\n\n",
-        maxsplit=1,
-    )[0]
-    assert "uses: actions/checkout@v4" in checkout_block
-    assert "ref:" not in checkout_block
+    legal_block = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
+    impact_block = text.split("\n  impact:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    model_block = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  no-model:", maxsplit=1)[
+        0
+    ]
+
+    assert "TESTED_SHA: ${{ github.sha }}" in legal_block
+    assert "ref: ${{ steps.authorize.outputs.tested_sha }}" in legal_block
+    assert "ref: ${{ needs.legal.outputs.tested_sha }}" in impact_block
+    assert "revision: ${{ needs.legal.outputs.tested_sha }}" in model_block
 
 
 def test_nightly_workflow_dispatch_can_validate_requested_ref() -> None:
@@ -280,11 +515,16 @@ def test_nightly_attempts_all_test_stages_after_failures() -> None:
 
 
 def test_github_workflows_write_e2e_markdown_summary() -> None:
-    for workflow in ("trtmc-ci.yml", "nightly.yml"):
-        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
-        assert "Write CI summary" in text
-        assert "scripts/generate_ci_summary.py" in text
-        assert ">> \"$GITHUB_STEP_SUMMARY\"" in text
+    nightly = (REPO_ROOT / ".github/workflows/nightly.yml").read_text()
+    assert "Write CI summary" in nightly
+    assert "scripts/generate_ci_summary.py" in nightly
+    assert '>> "$GITHUB_STEP_SUMMARY"' in nightly
+
+    premerge = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    assert "Summarize selection" in premerge
+    assert "### Model impact" in premerge
+    assert "All required premerge checks passed for" in premerge
+    assert '>> "$GITHUB_STEP_SUMMARY"' in premerge
 
 
 def test_nightly_runs_wheel_model_smoke_before_upload_and_release() -> None:
@@ -297,27 +537,88 @@ def test_nightly_runs_wheel_model_smoke_before_upload_and_release() -> None:
     assert "run-gha-stage.sh wheel-model-smoke" in text
 
 
-def test_github_ci_uses_manylinux_image_and_builds_wheel_first() -> None:
-    for workflow in ("trtmc-ci.yml", "nightly.yml"):
-        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
-        assert "TRTMC_CI_IMAGE:" in text
-        assert "vars.TRTMC_MANYLINUX_CI_IMAGE" in text
-        assert "vars.TRTMC_CI_IMAGE" not in text
-        assert "trtmc-dev-gb300:manylinux_2_39" in text
-        assert "TRTMC_PACKAGE_WHEEL_ARCH:" in text
-        assert "manylinux_2_39_aarch64" in text
-        assert "TRTMC_PACKAGE_CI_IMAGE" not in text
-        assert text.index("Start CI container") < text.index("Build trtmc pip package")
-        assert text.index("Build trtmc pip package") < text.index("Impact analysis")
-        assert "Setup TensorRT-Model-Connect" not in text
+def test_nightly_uses_manylinux_image_and_builds_wheel_first() -> None:
+    text = (REPO_ROOT / ".github/workflows/nightly.yml").read_text()
+    assert "TRTMC_CI_IMAGE:" in text
+    assert "vars.TRTMC_MANYLINUX_CI_IMAGE" in text
+    assert "vars.TRTMC_CI_IMAGE" not in text
+    assert "trtmc-dev-gb300:manylinux_2_39" in text
+    assert "TRTMC_PACKAGE_WHEEL_ARCH:" in text
+    assert "manylinux_2_39_aarch64" in text
+    assert "TRTMC_PACKAGE_CI_IMAGE" not in text
+    assert text.index("Start CI container") < text.index("Build trtmc pip package")
+    assert text.index("Build trtmc pip package") < text.index("Impact analysis")
+    assert "Setup TensorRT-Model-Connect" not in text
+
+
+def test_premerge_delegates_only_model_owned_work_to_the_proof() -> None:
+    premerge = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    for obsolete_global_stage in (
+        "Build trtmc pip package",
+        "Build C++ test executables",
+        "C++ unit tests",
+        "Python builder and tools tests",
+        "C++ coverage",
+        "Graph-op GPU tests",
+        "Selective E2E tests",
+    ):
+        assert obsolete_global_stage not in premerge
+    assert "run-gha-stage.sh" not in premerge
+    assert "uses: ./.github/workflows/model-proof.yml" in premerge
+
+
+def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> None:
+    proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
+    runner = (REPO_ROOT / ".github/scripts/run-model-proof.sh").read_text()
+
+    assert "TRTMC_CI_IMAGE:" in proof
+    assert "vars.TRTMC_MANYLINUX_CI_IMAGE" in proof
+    assert "trtmc-dev-gb300:manylinux_2_39" in proof
+    assert (
+        "TRTMC_CI_IMAGE_LOCK_FILE: ${{ vars.TRTMC_CI_IMAGE_LOCK_FILE || "
+        "'/tmp/trtmc-ci-docker-image.lock' }}"
+    ) in proof
+    assert "Ensure CI Docker image" in proof
+    assert "bash .github/scripts/ensure-ci-docker-image.sh" in proof
+    assert proof.count("actions/checkout@v4") == 1
+    assert proof.count("bash .github/scripts/ensure-ci-docker-image.sh") == 1
+    assert "TRTMC_HF_CACHE:" in proof
+    assert "TRTMC_HF_HUB_CACHE:" not in proof
+    assert "TRTMC_HF_MODULES_CACHE:" not in proof
+    assert "TRTMC_MODEL_PROOF_BUILD_JOBS: ${{ vars.TRTMC_MODEL_PROOF_BUILD_JOBS || '2' }}" in proof
+    assert "TRTMC_MODEL_PROOF_SLOTS_PER_GPU:" in proof
+    assert "vars.TRTMC_MODEL_PROOF_SLOTS_PER_GPU || '4'" in proof
+    assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR:" in proof
+    assert "/tmp/trtmc-model-proof-gpu-locks" in proof
+    assert "bash .github/scripts/run-model-proof.sh" in proof
+    assert "run-model-proof-batch.sh" not in proof
+    assert "env -u TRTMC_GPU_ID bash .github/scripts/run-model-proof.sh" in proof
+    assert '--model "$MODEL"' in proof
+    assert '--revision "$REVISION"' in proof
+    assert '--suite "$SUITE"' in proof
+    assert "Upload isolated model proof artifact" in proof
+    assert "model-proof-${{ inputs.model }}-${{ inputs.revision }}" in proof
+    assert "${{ github.run_attempt }}" in proof
+    assert "model-proof-report.html" in proof
+    assert "if-no-files-found: error" in proof
+    assert "retention-days: 7" in proof
+    assert "${{ inputs.model }}/artifacts/" in proof
+
+    assert "dst=/src,readonly" in runner
+    assert "dst=/hf-cache/hub,readonly" in runner
+    assert "dst=/hf-cache/modules" not in runner
+    assert "-e HF_MODULES_CACHE=/work/hf-modules" in runner
+    assert "--network none" in runner
+    assert "--read-only" in runner
+    assert "proof.json" in runner
 
 
 def test_package_stage_builds_py310_and_py312_wheels() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
     assert "TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312" in text
     assert 'WHEEL_PYVER="$tag"' in text
-    assert "python -m build --wheel --outdir \"$PWD/dist\"" in text
-    assert 'build-dir=$package_build_root/$tag' in text
+    assert 'python -m build --wheel --outdir "$PWD/dist"' in text
+    assert "build-dir=$package_build_root/$tag" in text
     assert "manylinux_2_39_aarch64" in text
     assert "wheel-model-smoke)" in text
     assert "Model smoke test from trtmc pip package" in text
@@ -356,17 +657,17 @@ def test_package_smoke_ci_surface_has_no_model_owned_names() -> None:
     model_prefix = model_name.split("-", maxsplit=1)[0]
     family_tokens = {family, model_prefix}
     forbidden = {
-        str(data[key])
-        for key in ("model_id", "name", "bundle", "timing_cache")
-        if data.get(key)
+        str(data[key]) for key in ("model_id", "name", "bundle", "timing_cache") if data.get(key)
     }
     for token in family_tokens:
-        forbidden.update({
-            f"TRTMC_WHEEL_{token.upper()}",
-            f"wheel-{token}-smoke",
-            f"{token.title()} smoke test from trtmc pip package",
-            f"trtmc-wheel-{token}-smoke",
-        })
+        forbidden.update(
+            {
+                f"TRTMC_WHEEL_{token.upper()}",
+                f"wheel-{token}-smoke",
+                f"{token.title()} smoke test from trtmc pip package",
+                f"trtmc-wheel-{token}-smoke",
+            }
+        )
     violations = [
         (path, needle)
         for path in shared_paths
@@ -378,9 +679,9 @@ def test_package_smoke_ci_surface_has_no_model_owned_names() -> None:
 
 def test_package_stage_requires_manylinux_aarch64_wheels() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert 'TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_39_aarch64' in text
+    assert "TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_39_aarch64" in text
     assert 'EXPECTED_PLATFORM = os.environ.get("TRTMC_PACKAGE_WHEEL_ARCH"' in text
-    assert 'native wheel must not contain .data/purelib entries' in text
+    assert "native wheel must not contain .data/purelib entries" in text
     assert ".data/scripts/trtmc" in text
     assert "native trtmc must be installed directly, not via console_scripts" in text
     assert '"auditwheel>=6.2"' in text
@@ -425,9 +726,7 @@ def test_release_wheel_build_disables_libtorch_linkage() -> None:
 def test_model_plugins_are_staged_for_installed_trtmc() -> None:
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
     conanfile = (REPO_ROOT / "conanfile.py").read_text()
-    loader = (
-        REPO_ROOT / "src" / "runtime" / "registry" / "pipeline_plugin_loader.cpp"
-    ).read_text()
+    loader = (REPO_ROOT / "src" / "runtime" / "registry" / "pipeline_plugin_loader.cpp").read_text()
 
     assert "install(TARGETS trtmc_model_${_trtmc_model}" in cmake
     assert "${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}" in cmake
@@ -446,7 +745,9 @@ def test_ci_source_build_defaults_to_packaged_libtorch_mode() -> None:
     wrapper = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     coverage = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
     assert 'toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False' in conanfile
-    assert 'TRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF}"' in coverage
+    assert (
+        'TRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF}"' in coverage
+    )
     assert '-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL}"' in coverage
     assert "-e TRTMC_ENABLE_LIBTORCH_MULTINOMIAL" in wrapper
 
@@ -475,12 +776,12 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert "impact-models" in selective
     assert "e2e_isolation_models.txt" in selective
     assert './scripts/run_e2e_parallel.sh "${standard_args[@]}"' in selective
-    assert '--exclude-ci-tier nightly_only' in selective
-    assert '--exclude-ci-tier multi_device' in selective
+    assert "--exclude-ci-tier nightly_only" in selective
+    assert "--exclude-ci-tier multi_device" in selective
     assert 'if [ "$standard_rc" -ne 0 ]; then' in selective
     assert "Skipping strict model-owned isolation" in selective
     assert 'prepare_model_plugin_dir "$full_model_plugin_dir"' in selective
-    assert 'schedule_args=(' in group_runner
+    assert "schedule_args=(" in group_runner
     assert "run_isolated_gpu_queue" in group_runner
     assert "queue_pids" in group_runner
     assert "tools/model_plugin_isolation.py stage-source" in group_runner
@@ -496,8 +797,8 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert 'CUDA_VISIBLE_DEVICES="$gpu_id"' in group_runner
     assert '--rootdir "$source_dir"' in group_runner
     assert '--e2e-models-file "$models_file"' in group_runner
-    assert '--e2e-exclude-ci-tier nightly_only' in group_runner
-    assert '${SELECTIVE_E2E_GROUP_TIMEOUT:-90m}' in group_runner
+    assert "--e2e-exclude-ci-tier nightly_only" in group_runner
+    assert "${SELECTIVE_E2E_GROUP_TIMEOUT:-90m}" in group_runner
     assert '"${model_filter_args[@]}"' in group_runner
     assert "scripts/run_e2e_parallel.sh" not in group_runner
     assert "verify-results" in group_runner
@@ -527,7 +828,7 @@ def test_root_pyproject_configures_conan_py_build_wheel() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text()
     backend_text = (REPO_ROOT / "_pyproject_backend.py").read_text()
     assert 'build-backend = "_pyproject_backend"' in text
-    assert 'return [_CONAN_PY_BUILD_REQUIREMENT]' in backend_text
+    assert "return [_CONAN_PY_BUILD_REQUIREMENT]" in backend_text
     assert "conan_build.build_wheel" in backend_text
     assert "conan_build.build_sdist" in backend_text
     assert "_py_only_enabled" in backend_text

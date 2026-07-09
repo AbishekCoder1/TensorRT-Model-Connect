@@ -124,14 +124,27 @@ def _check_gpu_memory(ctx: RunContext, req: PreflightRequirement) -> tuple[bool,
 
 
 def _check_hf_auth(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, str]:
-    """Check that HF auth token is present."""
+    """Check for HF auth, or resolve a warmed snapshot without networking."""
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if token:
         return True, "HF auth token found"
     hf_token_path = Path.home() / ".huggingface" / "token"
     if hf_token_path.is_file():
         return True, "HF auth token found in ~/.huggingface/token"
-    return False, "HF auth token not found (set HF_TOKEN or login with huggingface-cli)"
+    hf_id = str(req.args.get("hf_id") or ctx.case.hf_id or "").strip()
+    if hf_id:
+        try:
+            from huggingface_hub import snapshot_download
+
+            snapshot = Path(snapshot_download(hf_id, local_files_only=True))
+            if snapshot.is_dir():
+                return True, f"HF snapshot available offline: {hf_id}"
+        except Exception:
+            pass
+    return False, (
+        "HF auth token not found and model snapshot is unavailable offline "
+        f"for {hf_id or 'unspecified model'}"
+    )
 
 
 def _check_asset_exists(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, str]:
@@ -383,6 +396,22 @@ def _resolve_bundle(
         build_timing_path = Path(ctx.engine_dir) / f"{case.name}.build_timing.json"
     build_timing_path.parent.mkdir(parents=True, exist_ok=True)
     cmd.extend(["--build-timing-json", str(build_timing_path)])
+    if env.get("TRTMC_ENGINE_BUILD_GUARD_DIR"):
+        build_identity = str(case.metadata.get("model_name") or "").strip()
+        if not build_identity:
+            return (
+                None,
+                None,
+                "guarded full bundle build requires manifest model_name metadata",
+                {
+                    "command": cmd,
+                    "returncode": -1,
+                    "stdout": "",
+                    "stderr": "missing manifest model_name metadata",
+                },
+            )
+        env["TRTMC_ENGINE_BUILD_IDENTITY"] = build_identity
+        env["TRTMC_ENGINE_BUILD_COMMAND_JSON"] = json.dumps(cmd)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
         elapsed = time.monotonic() - t0
@@ -527,22 +556,30 @@ def _auto_register_artifacts(sink: Any, output: StageOutput, prefix: str) -> Non
     """Scan StageOutput.data for known artifact keys and register on sink."""
     _ARTIFACT_KEYS = {
         "wav_path": "wav",
+        "audio_output_path": "wav",
         "frames_dir": "frames",
         "logits_path": "logits",
         "features_path": "features",
         "output_path": "output",
         "segmentation_map_path": "segmentation_map",
         "segmented_image_path": "segmented_image",
+        "viz_path": "segmentation_map",
     }
-    for data_key, artifact_key in _ARTIFACT_KEYS.items():
-        value = output.data.get(data_key)
-        if value and isinstance(value, str):
-            # Store relative to artifacts dir if possible
-            base = str(sink.base_dir)
-            rel = value
-            if value.startswith(base):
-                rel = value[len(base) :].lstrip("/")
-            sink.register_artifact(f"{prefix}_{artifact_key}", rel)
+    for source in (output.data, output.metadata):
+        if not isinstance(source, dict):
+            continue
+        for data_key, artifact_key in _ARTIFACT_KEYS.items():
+            value = source.get(data_key)
+            if value and isinstance(value, str):
+                # Store relative to artifacts dir if possible.
+                rel = value
+                try:
+                    rel = Path(value).resolve().relative_to(
+                        Path(sink.base_dir).resolve()
+                    ).as_posix()
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                sink.register_artifact(f"{prefix}_{artifact_key}", rel)
 
 
 def _collect_runtime_guard_payloads(value: Any) -> list[tuple[list[str], list[str], int | None]]:
