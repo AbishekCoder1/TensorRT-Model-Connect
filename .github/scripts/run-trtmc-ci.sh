@@ -172,6 +172,22 @@ for backend in backends:
 PY
 }
 
+install_tensorrt_sdk_wheel() {
+  local target_python="$1"
+  local trt_version
+  local python_tag
+  local trt_wheel
+
+  trt_version="$(python -c 'import tensorrt; print(tensorrt.__version__)')"
+  python_tag="$("$target_python" -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
+  trt_wheel="/opt/tensorrt/python/tensorrt-${trt_version}-${python_tag}-none-linux_aarch64.whl"
+  if [ ! -f "$trt_wheel" ]; then
+    echo "ERROR: TensorRT SDK wheel not found: $trt_wheel" >&2
+    return 1
+  fi
+  "$target_python" -m pip install --disable-pip-version-check "$trt_wheel"
+}
+
 install_built_wheel_once() {
   ensure_ci_state_dir
   local sentinel
@@ -1517,12 +1533,11 @@ for wheel in sys.argv[1:]:
         raise SystemExit(f"{wheel}: native trtmc must be installed directly, not via console_scripts")
     if not backend_entries:
         raise SystemExit(f"{wheel}: packaged native TensorRT backend DSO is missing")
-    trt_dep_variants = (
-        "Requires-Dist: tensorrt<11.1,>=11.0.0.114",
-        "Requires-Dist: tensorrt>=11.0.0.114,<11.1",
-    )
-    if not any(dep in metadata for dep in trt_dep_variants):
-        raise SystemExit(f"{wheel}: TensorRT 11 dependency metadata is missing")
+    trt_dependency = "Requires-Dist: tensorrt==11.2.0.113"
+    if trt_dependency not in metadata:
+        raise SystemExit(
+            f"{wheel}: pinned TensorRT 11.2.0.113 dependency metadata is missing"
+        )
     if f"-{EXPECTED_PLATFORM}" not in wheel_metadata:
         raise SystemExit(f"{wheel}: WHEEL metadata is missing {EXPECTED_PLATFORM}")
     audit = subprocess.run(
@@ -1567,6 +1582,7 @@ PY
   rm -rf "$smoke_venv"
   python -m venv "$smoke_venv"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
+  install_tensorrt_sdk_wheel "$smoke_venv/bin/python"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$install_wheel"
   "$smoke_venv/bin/python" - "$smoke_venv/bin/trtmc" <<'PY'
 from pathlib import Path
@@ -1736,6 +1752,7 @@ PY
   mkdir -p "$smoke_root"
   python -m venv "$smoke_venv"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
+  install_tensorrt_sdk_wheel "$smoke_venv/bin/python"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
   "$smoke_venv/bin/python" -m pip check
   "$smoke_venv/bin/python" - "$smoke_venv/bin/trtmc" <<'PY'

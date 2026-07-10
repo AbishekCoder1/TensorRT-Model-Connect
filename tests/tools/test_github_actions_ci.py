@@ -49,6 +49,46 @@ def test_workflows_define_shared_hf_cache_env() -> None:
     assert "-e HF_MODULES_CACHE=/work/hf-modules" in runner
 
 
+def test_workflows_pull_tensorrt_sdk_from_ghcr_without_artifactory_secrets() -> None:
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+    assert "ghcr.io/nvidia/tensorrt-model-connect/tensorrt-sdk:11.2.0.113@sha256:" in dockerfile
+    assert "ENV TRT_ROOT=" not in dockerfile
+    assert "ENV PIP_FIND_LINKS=" not in dockerfile
+    assert "ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs" in dockerfile
+    assert "ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu" in dockerfile
+
+    ci_script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    install_call = 'install_tensorrt_sdk_wheel "$smoke_venv/bin/python"'
+    assert ci_script.count(install_call) == 2
+
+    for workflow in ("nightly.yml", "model-proof.yml"):
+        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
+        assert "packages: read" in text
+        assert "GHCR_TOKEN: ${{ github.token }}" in text
+        assert "DOCKER_CONFIG=$docker_config" in text
+        assert "TRTMC_ARTIFACTORY_USERNAME" not in text
+        assert "TRTMC_ARTIFACTORY_PASSWORD" not in text
+
+    premerge = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
+    assert "uses: ./.github/workflows/model-proof.yml" in premerge
+    assert "packages: read" in premerge
+    assert "TRTMC_ARTIFACTORY_USERNAME" not in premerge
+    assert "TRTMC_ARTIFACTORY_PASSWORD" not in premerge
+
+
+def test_tensorrt_sdk_publisher_is_temporary_and_self_contained() -> None:
+    scripts = REPO_ROOT / "scripts"
+    assert not (scripts / "load_artifactory_credentials.sh").exists()
+    assert not (scripts / "fetch_tensorrt_sdk.sh").exists()
+
+    publisher = (scripts / "publish_tensorrt_sdk.sh").read_text()
+    assert "TEMPORARY:" in publisher
+    assert "when TensorRT 11.2" in publisher
+    assert "is publicly released" in publisher
+    assert "load_artifactory_credentials()" in publisher
+    assert "stage_tensorrt_sdk()" in publisher
+
+
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
     stage_text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
