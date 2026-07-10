@@ -197,6 +197,8 @@ def test_qwen_flashinfer_scripts_skip_pytest_collection() -> None:
 def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> None:
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
     nightly = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    assert "    name: ${{ inputs.model }}\n" in proof
+    assert "Build + reference test" not in proof
     assert (
         "name: model-proof-${{ inputs.model }}-${{ inputs.revision }}-${{ github.run_attempt }}"
     ) in proof
@@ -355,7 +357,7 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "needs.impact.outputs.has_models == 'true'" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
     assert "name: 3 / Model / ${{ matrix.model }}" in model_proof
-    assert "fail-fast: false" in model_proof
+    assert "fail-fast: true" in model_proof
     assert "max-parallel: 16" in model_proof
     assert "matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}" in model_proof
     assert "model: ${{ matrix.model }}" in model_proof
