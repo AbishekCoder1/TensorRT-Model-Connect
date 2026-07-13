@@ -1728,6 +1728,7 @@ def test_four_shared_proofs_use_unique_slots_on_one_gpu(
             {
                 "TRTMC_MODEL_PROOF_GPU_IDS": "2",
                 "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+                "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "180",
                 "FAKE_PROOF_RELEASE_FILE": str(release_file),
             }
         )
@@ -1793,6 +1794,7 @@ def test_shared_slot_allocator_spreads_across_gpus_before_using_second_slots(
             {
                 "TRTMC_MODEL_PROOF_GPU_IDS": "2,3",
                 "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
+                "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "180",
                 "FAKE_PROOF_RELEASE_FILE": str(release_file),
             }
         )
@@ -2243,14 +2245,16 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
     tmp_path: Path,
 ) -> None:
     lock_dir = tmp_path / "gpu-locks"
+    coordination_timeout_s = 90
     common_env = {
         "TRTMC_GPU_ID": "6",
         "TRTMC_MODEL_PROOF_GPU_IDS": "6",
         "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "1",
         # This test deliberately holds several waiters while it observes their
-        # ordering.  The lease timeout must outlive the coordinated setup;
-        # otherwise an older ticket can expire before the last waiter starts.
-        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "180",
+        # ordering.  The lease timeout must outlive the coordinated setup on
+        # loaded CI hosts; otherwise an older ticket can expire before the last
+        # waiter starts.
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
     }
 
     def start_case(
@@ -2291,7 +2295,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
     younger_shared: subprocess.Popen[str] | None = None
     younger_exclusive: subprocess.Popen[str] | None = None
     try:
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + coordination_timeout_s
         while (
             time.monotonic() < deadline
             and not (first_output / "artifacts" / "gpu-lease.json").is_file()
@@ -2300,7 +2304,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         assert (first_output / "artifacts" / "gpu-lease.json").is_file()
 
         oldest, _, oldest_output = start_case("oldest-shared", "m2m_100", oldest_release)
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + coordination_timeout_s
         while time.monotonic() < deadline and not list(
             lock_dir.glob("admission-global-*.lock")
         ):
@@ -2313,7 +2317,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         younger_exclusive, _, younger_exclusive_output = start_case(
             "younger-exclusive", "bark", younger_exclusive_release
         )
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + coordination_timeout_s
         while time.monotonic() < deadline:
             admission_tickets = sorted(lock_dir.glob("admission-global-*.lock"))
             if len(admission_tickets) == 2 and all(
@@ -2330,7 +2334,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         younger_shared, _, younger_shared_output = start_case(
             "younger-shared", "convbert", younger_shared_release
         )
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + coordination_timeout_s
         while time.monotonic() < deadline:
             admission_tickets = sorted(lock_dir.glob("admission-global-*.lock"))
             if len(admission_tickets) == 3 and all(
@@ -2346,7 +2350,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         ] == ["m2m_100", "bark", "convbert"]
 
         first_release.touch()
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + coordination_timeout_s
         while (
             time.monotonic() < deadline
             and not (oldest_output / "artifacts" / "gpu-lease.json").is_file()
@@ -2365,7 +2369,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         assert _gpu_lease(oldest_output)["resource_class"] == "shared"
 
         oldest_release.touch()
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + coordination_timeout_s
         while (
             time.monotonic() < deadline
             and not (younger_exclusive_output / "artifacts" / "gpu-lease.json").is_file()
@@ -2376,7 +2380,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         assert _gpu_lease(younger_exclusive_output)["resource_class"] == "exclusive_gpu"
 
         younger_exclusive_release.touch()
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + coordination_timeout_s
         while (
             time.monotonic() < deadline
             and not (younger_shared_output / "artifacts" / "gpu-lease.json").is_file()
