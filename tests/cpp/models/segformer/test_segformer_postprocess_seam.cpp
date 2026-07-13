@@ -128,7 +128,6 @@ int main() {
     test_segformer_postprocess_tie_selects_first_class();
     test_segformer_postprocess_invalid_shape();
     test_segformer_postprocess_logits_size_mismatch();
-
     if (g_failures != 0) {
         std::cerr << g_failures << " SegFormer postprocess seam test(s) failed" << '\n';
         return 1;
