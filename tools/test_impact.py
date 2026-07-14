@@ -1842,7 +1842,11 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=486,
             name="task_eval_tool",
-            matcher=_path_equals("tools/task_eval.py"),
+            matcher=_path_in({
+                "tools/task_eval.py",
+                "tools/elf_hf_reference.py",
+                "tools/prepare_elf_task_eval_datasets.py",
+            }),
             resolver=_match_result("task_eval_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_task_eval_tool_triggers_tools_tier",),
         ),
@@ -2674,6 +2678,37 @@ class CandidateTokenDiffRefinementRule(DiffRefinementRule):
         )
 
 
+class PyprojectTaskEvalOptionalDependenciesRule(DiffRefinementRule):
+    """Scope the isolated task-eval optional extra to tools validation."""
+
+    name = "pyproject_task_eval_optional_dependencies"
+    path = "pyproject.toml"
+    _assignment = re.compile(r"^task-eval\s*=\s*\[.*\]\s*$")
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        del imap
+        return (
+            path == self.path
+            and bool(lines)
+            and all(self._assignment.fullmatch(line.strip()) for line in lines)
+        )
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path, lines, imap
+        return RuleMatch(
+            self.name,
+            [],
+            sorted(set(match.unit_tiers) | {"tools"}),
+            False,
+        )
+
+
 class HarnessSharedFp8ScalesRule(DiffRefinementRule):
     name = "harness_shared_fp8_scales"
     path = "tests/e2e_harness/orchestrator.py"
@@ -2904,6 +2939,7 @@ class E2EWaivesModelLinesRule(DiffRefinementRule):
 
 
 DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
+    PyprojectTaskEvalOptionalDependenciesRule(),
     HarnessSharedFp8ScalesRule(),
     KnownModelTimingEstimateRule(),
     RuntimeStrategyMatrixRule(),
