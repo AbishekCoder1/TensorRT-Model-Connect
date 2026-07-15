@@ -891,7 +891,11 @@ class HfTransformersReference:
             from tensorrt_model_connect.families.locateanything.vl_debug_runner import (
                 preprocess_image_inputs_for_trt,
             )
-            from transformers import AutoConfig, AutoModel, AutoTokenizer
+            from transformers import AutoConfig, AutoModel, AutoTokenizer, PretrainedConfig
+
+            if torch.cuda.is_available():
+                # Avoid Thor PyTorch/cuDNN sublibrary mismatches in HF reference conv2d.
+                torch.backends.cudnn.enabled = False
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
@@ -963,19 +967,39 @@ class HfTransformersReference:
                     _compat_get_expanded_tied_weights_keys
                 )
 
+            def _load_locateanything_raw_config(model_ref):
+                raw_config_path = Path(model_ref) / "config.json"
+                if raw_config_path.is_file():
+                    return json.loads(raw_config_path.read_text(encoding="utf-8"))
+                try:
+                    raw_config, _ = PretrainedConfig.get_config_dict(
+                        model_ref, trust_remote_code=trust_remote_code)
+                except Exception:
+                    return {{}}
+                return raw_config if isinstance(raw_config, dict) else {{}}
+
             def _load_locateanything_config(model_ref):
                 config = AutoConfig.from_pretrained(
                     model_ref, trust_remote_code=trust_remote_code)
-                raw_config_path = Path(model_ref) / "config.json"
-                if raw_config_path.is_file() and hasattr(config, "text_config"):
-                    raw_config = json.loads(raw_config_path.read_text(encoding="utf-8"))
+                raw_config = _load_locateanything_raw_config(model_ref)
+                if hasattr(config, "text_config") and not hasattr(
+                    config.text_config, "rope_theta"
+                ):
                     raw_text_config = raw_config.get("text_config", {{}})
-                    if not hasattr(config.text_config, "rope_theta"):
-                        rope_theta = raw_text_config.get("rope_theta")
-                        if rope_theta is None:
-                            rope_parameters = raw_text_config.get("rope_parameters", {{}})
-                            rope_theta = rope_parameters.get("rope_theta", 10000.0)
-                        config.text_config.rope_theta = float(rope_theta)
+                    if not isinstance(raw_text_config, dict):
+                        raw_text_config = {{}}
+                    rope_theta = raw_text_config.get("rope_theta")
+                    if rope_theta is None:
+                        rope_parameters = raw_text_config.get("rope_parameters", {{}})
+                        if isinstance(rope_parameters, dict):
+                            rope_theta = rope_parameters.get("rope_theta")
+                    if rope_theta is None:
+                        rope_scaling = raw_text_config.get("rope_scaling", {{}})
+                        if isinstance(rope_scaling, dict):
+                            rope_theta = rope_scaling.get("rope_theta")
+                    if rope_theta is None:
+                        rope_theta = raw_config.get("rope_theta", 10000.0)
+                    config.text_config.rope_theta = float(rope_theta)
                 return config
 
             def _load_locateanything_tokenizer(model_ref):
@@ -983,13 +1007,23 @@ class HfTransformersReference:
                     return AutoTokenizer.from_pretrained(
                         model_ref, trust_remote_code=trust_remote_code)
                 except Exception as auto_exc:
+                    from huggingface_hub import hf_hub_download
                     from tokenizers import Tokenizer
 
                     model_path = Path(model_ref)
-                    raw_tokenizer = Tokenizer.from_file(
-                        str(model_path / "tokenizer.json"))
+                    if model_path.is_dir():
+                        tokenizer_json = model_path / "tokenizer.json"
+                        tokenizer_config_path = model_path / "tokenizer_config.json"
+                    else:
+                        tokenizer_json = Path(
+                            hf_hub_download(model_ref, "tokenizer.json"))
+                        try:
+                            tokenizer_config_path = Path(
+                                hf_hub_download(model_ref, "tokenizer_config.json"))
+                        except Exception:
+                            tokenizer_config_path = Path()
+                    raw_tokenizer = Tokenizer.from_file(str(tokenizer_json))
                     tokenizer_config = {{}}
-                    tokenizer_config_path = model_path / "tokenizer_config.json"
                     if tokenizer_config_path.is_file():
                         tokenizer_config = json.loads(
                             tokenizer_config_path.read_text(encoding="utf-8"))
