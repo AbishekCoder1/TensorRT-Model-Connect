@@ -67,6 +67,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "scripts/reporting/__init__.py",
         "scripts/reporting/vlm_assessment.py",
         "scripts/schedule_e2e.py",
+        "scripts/hf_cache_download_worker.py",
         "scripts/warm_hf_cache.py",
         "tests/__init__.py",
         "tests/builder/__init__.py",
@@ -323,11 +324,78 @@ def _validate_model_roots() -> None:
                 raise ModelCIError(f"overlapping model ownership roots: {left} and {right}")
 
 
+def _required_gpu_count(payload: dict[str, object], path: str) -> int:
+    """Return the declared device count for one effective E2E testcase."""
+    required = 1
+    build_args = payload.get("build_args", {})
+    distributed = payload.get("distributed_runtime", {})
+    if not isinstance(build_args, dict) or not isinstance(distributed, dict):
+        raise ModelCIError(f"E2E manifest device settings must be objects: {path}")
+    parallel = build_args.get("parallel", {})
+    if not isinstance(parallel, dict):
+        raise ModelCIError(f"E2E manifest build_args.parallel must be an object: {path}")
+    for field, value in (
+        ("build_args.parallel.tp_size", parallel.get("tp_size")),
+        ("distributed_runtime.world_size", distributed.get("world_size")),
+    ):
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ModelCIError(f"E2E manifest {field} must be a positive integer: {path}")
+        required = max(required, value)
+    preflights = payload.get("preflight_requirements", [])
+    if not isinstance(preflights, list):
+        raise ModelCIError(f"E2E manifest preflight_requirements must be an array: {path}")
+    for preflight in preflights:
+        if not isinstance(preflight, dict) or preflight.get("kind") != "gpu_count_min":
+            continue
+        args = preflight.get("args", {})
+        value = args.get("count") if isinstance(args, dict) else None
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ModelCIError(
+                f"E2E manifest gpu_count_min count must be a positive integer: {path}"
+            )
+        required = max(required, value)
+    return required
+
+
+def _validate_e2e_manifest_device_tiers(
+    payload: dict[str, object],
+    path: str,
+    *,
+    allow_legacy_tier: bool = False,
+) -> None:
+    defaults = {key: value for key, value in payload.items() if key != "testcases"}
+    testcases = payload.get("testcases")
+    effective_cases: list[dict[str, object]]
+    if isinstance(testcases, list) and testcases:
+        effective_cases = []
+        for index, testcase in enumerate(testcases):
+            if not isinstance(testcase, dict):
+                raise ModelCIError(f"E2E manifest testcases[{index}] must be an object: {path}")
+            effective_cases.append({**defaults, **testcase})
+    else:
+        effective_cases = [defaults]
+    for testcase in effective_cases:
+        required = _required_gpu_count(testcase, path)
+        if (
+            required > 1
+            and testcase.get("ci_tier") != "multi_device"
+            and not allow_legacy_tier
+        ):
+            name = testcase.get("name", payload.get("name", "<unnamed>"))
+            raise ModelCIError(
+                f"E2E testcase {name!r} requires {required} GPUs but is not "
+                f"ci_tier='multi_device': {path}"
+            )
+
+
 def discover_catalog(
     repo_root: Path,
     revision: str,
     *,
     allow_legacy_shared_runtime: bool = False,
+    allow_legacy_device_tier: bool = False,
 ) -> OwnershipCatalog:
     """Discover model IDs from MODEL.toml blobs at one Git revision."""
     _validate_model_roots()
@@ -400,6 +468,13 @@ def discover_catalog(
             payload = json.loads(_read_blob(repo_root, entry.object_id))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise ModelCIError(f"invalid E2E manifest JSON: {entry.path}") from exc
+        if not isinstance(payload, dict):
+            raise ModelCIError(f"E2E manifest must contain an object: {entry.path}")
+        _validate_e2e_manifest_device_tiers(
+            payload,
+            entry.path,
+            allow_legacy_tier=allow_legacy_device_tier,
+        )
         strategy = payload.get("runtime_strategy")
         if strategy is None:
             continue
@@ -677,14 +752,22 @@ def _scheduled_models(
     repo_root: Path,
     catalog: OwnershipCatalog,
     models: Iterable[str],
-) -> list[str]:
-    """Order model matrix entries longest-first using the pinned timing data.
+    *,
+    exclusive_gpu_first: bool = False,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Order model matrix entries by resource class and pinned timing data.
 
     GitHub starts matrix children in include order when runner capacity becomes
-    available.  Unknown timings are scheduled first because they are the least
-    bounded.  The selected premerge case mirrors the isolated proof runner's
-    L0/contract/fastest preference; allocation safety is still enforced later
-    from the projected manifest rather than trusting this scheduling hint.
+    available.  Nightly can put exclusive-GPU models first so they reserve full
+    devices before shared work fills every slot.  Its duration is the sum of
+    every nightly-selected case, or unknown when any case lacks an estimate.
+    Within each resource class, unknown timings run first because they are the
+    least bounded, followed by longest-known first.  Premerge continues to use
+    the one selected L0/contract/fastest case.  Allocation safety is still
+    enforced later from the projected manifest rather than trusting this hint.
+    The second return value maps every owner to the exact sorted production
+    single-GPU cases that nightly must certify, including an owner's L0
+    fallback only when that owner has no production case.
     """
     entries_by_path = {entry.path: entry for entry in catalog.entries}
     timing_estimates: dict[str, float] = {}
@@ -702,8 +785,11 @@ def _scheduled_models(
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
             }
 
+    selected_models = set(models)
     estimates: dict[str, float | None] = {}
-    for model in set(models):
+    exclusive_gpu: dict[str, bool] = {}
+    expected_cases_by_model: dict[str, list[str]] = {}
+    for model in selected_models:
         cases: list[dict[str, object]] = []
         for family in catalog.e2e_families.get(model, ()):
             prefix = f"tests/e2e/models/{family}/manifests/"
@@ -736,8 +822,35 @@ def _scheduled_models(
                             "tier": tier,
                             "l0_replacement": str(testcase.get("l0_replacement") or ""),
                             "estimated_seconds": timing_estimates.get(name),
+                            "resource_class": str(
+                                manifest.get("e2e_parallel_resource") or "shared"
+                            ),
                         }
                     )
+        production_cases = [case for case in cases if case["tier"] != "l0_only"]
+        nightly_cases = production_cases or cases
+        if not nightly_cases and exclusive_gpu_first:
+            raise ModelCIError(
+                f"model {model!r} has no active single-GPU nightly E2E case"
+            )
+        expected_cases = sorted(str(case["name"]) for case in nightly_cases)
+        if len(expected_cases) != len(set(expected_cases)):
+            raise ModelCIError(
+                f"model {model!r} has duplicate active nightly E2E case names"
+            )
+        expected_cases_by_model[model] = expected_cases
+        exclusive_gpu[model] = any(
+            case["resource_class"] == "exclusive_gpu" for case in nightly_cases
+        )
+        if exclusive_gpu_first:
+            nightly_estimates = [case["estimated_seconds"] for case in nightly_cases]
+            estimates[model] = (
+                sum(float(estimate) for estimate in nightly_estimates)
+                if nightly_estimates
+                and all(isinstance(estimate, (int, float)) for estimate in nightly_estimates)
+                else None
+            )
+            continue
         eligible = [case for case in cases if case["tier"] != "nightly_only"]
         replacements = {
             str(case["l0_replacement"])
@@ -762,13 +875,20 @@ def _scheduled_models(
             else None
         )
 
-    return sorted(
-        set(models),
-        key=lambda model: (
-            0 if estimates.get(model) is None else 1,
-            -(estimates.get(model) or 0.0),
-            model,
+    return (
+        sorted(
+            selected_models,
+            key=lambda model: (
+                0 if not exclusive_gpu_first or exclusive_gpu.get(model, False) else 1,
+                0 if estimates.get(model) is None else 1,
+                -(estimates.get(model) or 0.0),
+                model,
+            ),
         ),
+        {
+            model: expected_cases_by_model[model]
+            for model in sorted(expected_cases_by_model)
+        },
     )
 
 
@@ -788,7 +908,12 @@ def calculate_impact(
         ).strip()
     except ModelCIError:
         comparison_base = base_sha
-    base_catalog = discover_catalog(repo_root, comparison_base, allow_legacy_shared_runtime=True)
+    base_catalog = discover_catalog(
+        repo_root,
+        comparison_base,
+        allow_legacy_shared_runtime=True,
+        allow_legacy_device_tier=True,
+    )
     head_catalog = discover_catalog(repo_root, head, allow_legacy_shared_runtime=True)
     affected: set[str] = set()
     fallback_selected: set[str] = set()
@@ -877,11 +1002,12 @@ def calculate_impact(
         mode = "unit"
     else:
         mode = "none"
+    matrix_models, _ = _scheduled_models(repo_root, head_catalog, affected)
     result = _result(
         affected,
         mode=mode,
         changes=serialized_changes,
-        matrix_models=_scheduled_models(repo_root, head_catalog, affected),
+        matrix_models=matrix_models,
         direct_models=direct_affected,
         fallback_models=fallback_selected,
         run_unit_tests=unit_scope != "none" or broad_change,
@@ -904,6 +1030,12 @@ def _write_github_output(path: Path, result: dict[str, object]) -> None:
         "run_unit_tests": str(bool(result["run_unit_tests"])).lower(),
         "unit_scope": str(result["unit_scope"]),
     }
+    if "expected_cases_by_model" in result:
+        outputs["expected_cases_by_model"] = json.dumps(
+            result["expected_cases_by_model"], separators=(",", ":"), sort_keys=True
+        )
+    if "expected_result_count" in result:
+        outputs["expected_result_count"] = str(result["expected_result_count"])
     with path.open("a", encoding="utf-8") as stream:
         for key, value in outputs.items():
             stream.write(f"{key}={value}\n")
@@ -1129,11 +1261,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _write_github_output(args.github_output, result)
         elif args.command == "all":
             catalog = discover_catalog(args.repo_root, args.revision)
+            matrix_models, expected_cases_by_model = _scheduled_models(
+                args.repo_root,
+                catalog,
+                catalog.models,
+                exclusive_gpu_first=True,
+            )
             result = _result(
                 catalog.models,
                 mode="all",
                 changes=[],
-                matrix_models=_scheduled_models(args.repo_root, catalog, catalog.models),
+                matrix_models=matrix_models,
+            )
+            result["expected_cases_by_model"] = expected_cases_by_model
+            result["expected_result_count"] = sum(
+                len(cases) for cases in expected_cases_by_model.values()
             )
             result["revision"] = catalog.revision
             if args.github_output is not None:

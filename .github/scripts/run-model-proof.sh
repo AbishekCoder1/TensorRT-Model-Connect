@@ -22,6 +22,11 @@ proof_gpu_admission_fd=""
 proof_gpu_admission_file=""
 proof_gpu_predecessor_fd=""
 proof_gpu_predecessor_file=""
+proof_gpu_machine_fd=""
+proof_gpu_machine_file=""
+proof_gpu_lease_deadline=""
+proof_gpu_lock_dir=""
+proof_gpu_lock_namespace=""
 declare -a proof_gpu_slot_ids=()
 declare -a proof_gpu_lease_fds=()
 declare -a proof_gpu_lease_files=()
@@ -38,8 +43,11 @@ declare -a proof_gpu_lease_files=()
 #   admission-<scope>.enqueue.lock       serializes ticket creation
 #   admission-<scope>.next               monotonic ticket counter
 #   admission-<scope>-<20 digits>.lock   FIFO ticket, flocked by its owner
+#   ...lock.handoff.<pid>                 temporary hidden alias during an
+#                                         allocator-guarded GPU handoff
 #   gpu-<id>-reservation.lock            exclusive-proof entry fence
 #   gpu-<id>-slot-<n>.lock               slot lease, held while the proof runs
+#   whole-machine.lock                   shared by proofs, exclusive by all-GPU stages
 
 die() {
   if [ -n "$proof_artifacts_dir" ]; then
@@ -52,7 +60,12 @@ die() {
 
 cleanup_proof_container() {
   local rc="$1"
-  trap - EXIT INT TERM
+  trap - EXIT
+  # GitHub Actions cancels a shell step with INT, then escalates to TERM after
+  # 7.5 seconds.  Do not let that second signal interrupt docker teardown:
+  # process-owned flock leases disappear as soon as this shell exits, while a
+  # daemon-owned proof container would otherwise keep using its GPU.
+  trap '' INT TERM
   # A queued proof owns no GPU yet, so let the next ticket advance before any
   # potentially slow container teardown or fallback-report work.
   release_gpu_admission_ticket
@@ -91,6 +104,177 @@ release_proof_gpu_lease() {
   fi
   release_admission_predecessor
   release_gpu_admission_ticket
+  if [ -n "$proof_gpu_machine_fd" ]; then
+    flock -u "$proof_gpu_machine_fd" >/dev/null 2>&1 || true
+    close_dynamic_fd "$proof_gpu_machine_fd"
+    proof_gpu_machine_fd=""
+    proof_gpu_machine_file=""
+    proof_gpu_lease_deadline=""
+  fi
+}
+
+reclaim_orphaned_proof_containers() {
+  local gpu_id="$1"
+  shift
+  local -a leased_slots=("$@")
+  [[ "$proof_gpu_lock_namespace" =~ ^[a-f0-9]{64}$ ]] || \
+    die "model-proof GPU lock namespace is unavailable"
+  local rows
+  if ! rows="$(docker ps --no-trunc \
+      --filter 'label=com.nvidia.trtmc.model-proof=1' \
+      --filter "label=com.nvidia.trtmc.model-proof.gpu=$gpu_id" \
+      --filter "label=com.nvidia.trtmc.model-proof.lock-namespace=$proof_gpu_lock_namespace" \
+      --format '{{.ID}} {{.Label "com.nvidia.trtmc.model-proof.slots"}}')"; then
+    die "could not inspect existing model-proof containers on GPU $gpu_id"
+  fi
+
+  local container_id container_slots slot leased_slot overlaps
+  local -a existing_slots=()
+  while read -r container_id container_slots; do
+    [ -n "$container_id" ] || continue
+    [[ "$container_id" =~ ^[a-f0-9]{64}$ ]] || \
+      die "existing model-proof container has an unsafe ID: $container_id"
+    [[ "$container_slots" =~ ^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*$ ]] || \
+      die "existing model-proof container $container_id has invalid GPU slot labels"
+    overlaps=0
+    IFS=, read -r -a existing_slots <<< "$container_slots"
+    for slot in "${existing_slots[@]}"; do
+      for leased_slot in "${leased_slots[@]}"; do
+        if [ "$slot" = "$leased_slot" ]; then
+          overlaps=1
+          break 2
+        fi
+      done
+    done
+    [ "$overlaps" -eq 1 ] || continue
+
+    # Owning the same slot flock proves that no live host proof still owns this
+    # labeled container. Reclaim only that exact daemon object before reusing
+    # the lease. This prevents overlap after SIGKILL/force-cancel; it is an
+    # allocator-time safety recovery, not a bounded orphan-cleanup mechanism.
+    echo "Removing orphaned model-proof container $container_id from GPU $gpu_id slot(s) $container_slots"
+    if ! docker rm -f "$container_id" >/dev/null 2>&1; then
+      # The orphan can finish and auto-remove between inventory and rm. Accept
+      # only that exact race; daemon/query failures and a still-present full ID
+      # remain hard failures while this host continues to fence the slot.
+      local remaining_ids
+      if ! remaining_ids="$(docker ps -a --no-trunc \
+          --filter "id=$container_id" --format '{{.ID}}')"; then
+        die "could not confirm removal of orphaned model-proof container $container_id"
+      fi
+      local remaining_id
+      while read -r remaining_id; do
+        [ "$remaining_id" != "$container_id" ] || \
+          die "could not remove orphaned model-proof container $container_id"
+      done <<< "$remaining_ids"
+    fi
+  done <<< "$rows"
+}
+
+cleanup_run_model_proof_containers() {
+  command -v docker >/dev/null || die "docker is required"
+  local run_id="${GITHUB_RUN_ID:-}"
+  local run_attempt="${GITHUB_RUN_ATTEMPT:-}"
+  [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || \
+    die "GITHUB_RUN_ID must be a positive integer for container cleanup"
+  [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]] || \
+    die "GITHUB_RUN_ATTEMPT must be a positive integer for container cleanup"
+
+  local -a filters=(
+    --filter 'label=com.nvidia.trtmc.model-proof.job=1'
+    --filter "label=com.nvidia.trtmc.model-proof.run-id=$run_id"
+    --filter "label=com.nvidia.trtmc.model-proof.run-attempt=$run_attempt"
+    --filter "label=com.nvidia.trtmc.model-proof.model=$model"
+  )
+  local format='{{.ID}} {{.Label "com.nvidia.trtmc.model-proof.run-id"}} {{.Label "com.nvidia.trtmc.model-proof.run-attempt"}} {{.Label "com.nvidia.trtmc.model-proof.model"}}'
+  local rows container_id labeled_run_id labeled_run_attempt labeled_model
+  local -a container_ids=()
+  local retry
+  for retry in 1 2 3; do
+    if ! rows="$(docker ps -a --no-trunc "${filters[@]}" --format "$format")"; then
+      die "could not inspect model-proof containers for run $run_id attempt $run_attempt model $model"
+    fi
+    container_ids=()
+    while read -r container_id labeled_run_id labeled_run_attempt labeled_model; do
+      [ -n "$container_id" ] || continue
+      [[ "$container_id" =~ ^[a-f0-9]{64}$ ]] || \
+        die "model-proof cleanup found an unsafe container ID: $container_id"
+      [ "$labeled_run_id" = "$run_id" ] && \
+        [ "$labeled_run_attempt" = "$run_attempt" ] && \
+        [ "$labeled_model" = "$model" ] || \
+        die "model-proof cleanup inventory did not match the requested job"
+      container_ids+=("$container_id")
+    done <<< "$rows"
+    if [ "${#container_ids[@]}" -eq 0 ]; then
+      echo "No model-proof containers remain for run $run_id attempt $run_attempt model $model"
+      return 0
+    fi
+
+    # Cancellation can race the host trap or Docker's --rm handling. Removing
+    # exact full IDs is idempotent; only the subsequent exact-label inventory
+    # decides whether reconciliation succeeded.
+    docker rm -f "${container_ids[@]}" >/dev/null 2>&1 || true
+    [ "$retry" -eq 3 ] || sleep 1
+  done
+  if ! rows="$(docker ps -a --no-trunc "${filters[@]}" --format "$format")"; then
+    die "could not verify model-proof container cleanup for run $run_id attempt $run_attempt model $model"
+  fi
+  if [ -z "$rows" ]; then
+    echo "No model-proof containers remain for run $run_id attempt $run_attempt model $model"
+    return 0
+  fi
+  die "model-proof containers remain after cleanup for run $run_id attempt $run_attempt model $model"
+}
+
+acquire_proof_gpu_machine_lock() {
+  [ -z "$proof_gpu_machine_fd" ] || return 0
+  command -v flock >/dev/null || die "flock is required for model-proof GPU leasing"
+
+  local configured_lock_dir="${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-/tmp/trtmc-model-proof-gpu-locks}"
+  [ -n "$configured_lock_dir" ] || die "TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not be empty"
+  mkdir -p -- "$configured_lock_dir" || \
+    die "could not create GPU lease directory: $configured_lock_dir"
+  if ! IFS=$'\t' read -r proof_gpu_lock_dir proof_gpu_lock_namespace < <(
+    python3 - "$configured_lock_dir" <<'PY'
+import hashlib
+import os
+import sys
+from pathlib import Path
+
+directory = Path(sys.argv[1]).resolve(strict=True)
+if not directory.is_dir():
+    raise SystemExit("configured GPU lock path is not a directory")
+metadata = os.stat(directory)
+identity = f"{directory}\0{metadata.st_dev}\0{metadata.st_ino}".encode()
+if any(character in str(directory) for character in "\t\r\n"):
+    raise SystemExit("configured GPU lock path contains unsupported whitespace")
+print(directory, hashlib.sha256(identity).hexdigest(), sep="\t")
+PY
+  ); then
+    die "could not resolve GPU lease directory: $configured_lock_dir"
+  fi
+  [ -n "$proof_gpu_lock_dir" ] && \
+    [[ "$proof_gpu_lock_namespace" =~ ^[a-f0-9]{64}$ ]] || \
+    die "could not identify GPU lease directory: $configured_lock_dir"
+  local lock_dir="$proof_gpu_lock_dir"
+
+  local timeout="${TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS:-10800}"
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && [ "$timeout" -le 21600 ] || \
+    die "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS must be an integer from 1 to 21600"
+
+  proof_gpu_machine_file="$lock_dir/whole-machine.lock"
+  : >> "$proof_gpu_machine_file" || \
+    die "could not open whole-machine GPU lock: $proof_gpu_machine_file"
+  exec {proof_gpu_machine_fd}<>"$proof_gpu_machine_file" || \
+    die "could not open whole-machine GPU lock: $proof_gpu_machine_file"
+  proof_gpu_lease_deadline=$((SECONDS + timeout))
+  if ! flock -w "$timeout" -s "$proof_gpu_machine_fd"; then
+    close_dynamic_fd "$proof_gpu_machine_fd"
+    proof_gpu_machine_fd=""
+    proof_gpu_machine_file=""
+    die "timed out after ${timeout}s waiting for the whole-machine GPU lock"
+  fi
+  echo "Acquired shared whole-machine GPU lock via $proof_gpu_machine_file"
 }
 
 release_admission_predecessor() {
@@ -210,9 +394,31 @@ locate_admission_predecessor() {
   local lock_dir="$1"
   local scope="$2"
   local deadline="$3"
-  local ticket_file ticket_fd found_self=0
+  local ticket_file ticket_fd handoff_file handoff_fd found_self=0
   release_admission_predecessor
   acquire_gpu_allocator_mutex "$lock_dir" "$deadline" || return 1
+
+  # A hard-killed exclusive waiter may leave its hidden handoff path behind
+  # after the inode flock and allocator mutex are released. These aliases are
+  # never queue entries; remove only unlocked ones while holding the allocator
+  # mutex so a live transactional handoff cannot be mistaken for stale state.
+  for handoff_file in "$lock_dir"/"admission-$scope-"*.lock.handoff.*; do
+    [ -e "$handoff_file" ] || continue
+    if ! exec {handoff_fd}<>"$handoff_file"; then
+      continue
+    fi
+    if flock -n -x "$handoff_fd"; then
+      if ! rm -f -- "$handoff_file"; then
+        flock -u "$handoff_fd" >/dev/null 2>&1 || true
+        close_dynamic_fd "$handoff_fd"
+        release_gpu_allocator_mutex
+        die "could not prune stale GPU admission handoff: $handoff_file"
+      fi
+      flock -u "$handoff_fd" >/dev/null 2>&1 || true
+    fi
+    close_dynamic_fd "$handoff_fd"
+  done
+
   for ticket_file in "$lock_dir"/"admission-$scope-"*.lock; do
     [ -e "$ticket_file" ] || continue
     if [ "$ticket_file" = "$proof_gpu_admission_file" ]; then
@@ -270,7 +476,15 @@ wait_for_gpu_admission_turn() {
 
 release_gpu_admission_ticket() {
   if [ -n "$proof_gpu_admission_file" ]; then
-    rm -f -- "$proof_gpu_admission_file" || true
+    local handoff_suffix=".handoff.$$"
+    local visible_file="$proof_gpu_admission_file"
+    local handoff_file="${visible_file}${handoff_suffix}"
+    if [[ "$visible_file" == *"$handoff_suffix" ]]; then
+      handoff_file="$visible_file"
+      visible_file="${visible_file%"$handoff_suffix"}"
+    fi
+    # Remove both aliases so signals are safe in either rename/assignment gap.
+    rm -f -- "$visible_file" "$handoff_file" || true
   fi
   if [ -n "$proof_gpu_admission_fd" ]; then
     flock -u "$proof_gpu_admission_fd" >/dev/null 2>&1 || true
@@ -284,6 +498,7 @@ usage() {
   cat <<'EOF'
 usage: run-model-proof.sh --model ID [--suite premerge|nightly] [--revision SHA] [--output-dir DIR]
        run-model-proof.sh --inner --model ID --suite SUITE --revision SHA --output-dir DIR
+       run-model-proof.sh --cleanup-containers --model ID
 EOF
 }
 
@@ -292,6 +507,7 @@ suite="premerge"
 revision="HEAD"
 output_dir=""
 inner=0
+cleanup_containers_only=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --model)
@@ -314,6 +530,10 @@ while [ "$#" -gt 0 ]; do
       inner=1
       shift
       ;;
+    --cleanup-containers)
+      cleanup_containers_only=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -331,6 +551,12 @@ case "$suite" in
   premerge|nightly) ;;
   *) die "--suite must be premerge or nightly" ;;
 esac
+
+if [ "$cleanup_containers_only" -eq 1 ]; then
+  [ "$inner" -eq 0 ] || die "--cleanup-containers cannot be combined with --inner"
+  cleanup_run_model_proof_containers
+  exit 0
+fi
 
 python_bin() {
   if [ -x "${TRTMC_HF_PYTHON:-/opt/venv/bin/python}" ]; then
@@ -396,14 +622,14 @@ release_candidate_slot_locks() {
   candidate_fds_ref=()
 }
 
-try_acquire_all_gpu_slots() {
+try_acquire_exclusive_gpu_atomically() {
   local gpu_id="$1"
   local lock_dir="$2"
   local slots_per_gpu="$3"
   local -a candidate_fds=()
   local -a candidate_files=()
   local -a candidate_slots=()
-  local slot slot_fd slot_file
+  local slot slot_fd slot_file reservation_fd reservation_file
   for ((slot = 0; slot < slots_per_gpu; slot++)); do
     slot_file="$lock_dir/gpu-$gpu_id-slot-$slot.lock"
     exec {slot_fd}>"$slot_file" || die "could not open GPU slot lock: $slot_file"
@@ -416,10 +642,25 @@ try_acquire_all_gpu_slots() {
     candidate_files+=("$slot_file")
     candidate_slots+=("$slot")
   done
+
+  # Acquire the reservation only after every slot is held. The allocator mutex
+  # prevents new admissions during this scan, so a busy GPU never publishes a
+  # transient reservation that could be mistaken for a committed assignment.
+  reservation_file="$lock_dir/gpu-$gpu_id-reservation.lock"
+  exec {reservation_fd}>"$reservation_file" || \
+    die "could not open GPU reservation lock: $reservation_file"
+  if ! flock -n "$reservation_fd"; then
+    close_dynamic_fd "$reservation_fd"
+    release_candidate_slot_locks candidate_fds
+    return 1
+  fi
+
   proof_gpu_id="$gpu_id"
   proof_gpu_lease_fds=("${candidate_fds[@]}")
   proof_gpu_lease_files=("${candidate_files[@]}")
   proof_gpu_slot_ids=("${candidate_slots[@]}")
+  proof_gpu_reservation_fd="$reservation_fd"
+  proof_gpu_reservation_file="$reservation_file"
   return 0
 }
 
@@ -473,56 +714,71 @@ try_reserve_exclusive_gpu() {
   local deadline="$3"
   shift 3
   local -a candidate_gpu_ids=("$@")
-  local gpu_id reservation_fd reservation_file
+  local gpu_id reservation_fd reservation_file visible_ticket handoff_ticket
 
   acquire_gpu_allocator_mutex "$lock_dir" "$deadline" || return 1
 
-  # Prefer a GPU that is already idle so an exclusive proof can start without
-  # draining shared work. The allocator mutex makes the all-slot attempt atomic.
-  for gpu_id in "${candidate_gpu_ids[@]}"; do
+  # With one eligible GPU there is no first-idle choice to preserve. Reserve
+  # it once, complete the queue handoff under the allocator mutex, and let the
+  # caller block event-driven on the remaining slot holders. Skipping the
+  # multi-GPU availability scan also avoids publishing a transient reservation
+  # that is not yet the committed queue-to-GPU handoff.
+  if [ "${#candidate_gpu_ids[@]}" -eq 1 ]; then
+    gpu_id="${candidate_gpu_ids[0]}"
     reservation_file="$lock_dir/gpu-$gpu_id-reservation.lock"
     exec {reservation_fd}>"$reservation_file" || \
       die "could not open GPU reservation lock: $reservation_file"
-    if ! flock -n "$reservation_fd"; then
-      close_dynamic_fd "$reservation_fd"
-      continue
-    fi
-    if try_acquire_all_gpu_slots "$gpu_id" "$lock_dir" "$slots_per_gpu"; then
-      proof_gpu_reservation_fd="$reservation_fd"
-      proof_gpu_reservation_file="$reservation_file"
-      release_gpu_allocator_mutex
-      return 0
-    fi
-    flock -u "$reservation_fd" || true
-    close_dynamic_fd "$reservation_fd"
-  done
 
-  # No GPU is idle. Reserve one GPU now; existing shared holders may finish,
-  # but new shared proofs cannot enter it while the exclusive proof waits.
-  for gpu_id in "${candidate_gpu_ids[@]}"; do
-    reservation_file="$lock_dir/gpu-$gpu_id-reservation.lock"
-    exec {reservation_fd}>"$reservation_file" || \
-      die "could not open GPU reservation lock: $reservation_file"
+    # Hide the queue entry without unlocking its inode. Other waiters cannot
+    # scan while this process holds the allocator mutex, and successors that
+    # already pinned the ticket remain blocked. This makes the visible
+    # ticket-to-reservation transition transactional: restore the path if the
+    # reservation is unavailable, or retire the hidden ticket after success.
+    visible_ticket="$proof_gpu_admission_file"
+    [ -n "$visible_ticket" ] || die "exclusive GPU handoff has no admission ticket"
+    handoff_ticket="${visible_ticket}.handoff.$$"
+    mv -- "$visible_ticket" "$handoff_ticket" || \
+      die "could not begin GPU admission handoff: $visible_ticket"
+    proof_gpu_admission_file="$handoff_ticket"
     if flock -n "$reservation_fd"; then
       proof_gpu_id="$gpu_id"
       proof_gpu_reservation_fd="$reservation_fd"
       proof_gpu_reservation_file="$reservation_file"
+      release_gpu_admission_ticket
       release_gpu_allocator_mutex
       return 2
     fi
+    mv -- "$handoff_ticket" "$visible_ticket" || \
+      die "could not restore GPU admission ticket after reservation contention: $visible_ticket"
+    proof_gpu_admission_file="$visible_ticket"
     close_dynamic_fd "$reservation_fd"
+    release_gpu_allocator_mutex
+    return 1
+  fi
+
+  # The oldest admission ticket prevents younger work from refilling capacity,
+  # so it is enough to atomically scan for the first GPU whose slots have all
+  # drained. Do not pin the waiter to an arbitrary busy GPU: another device may
+  # become idle much sooner.
+  for gpu_id in "${candidate_gpu_ids[@]}"; do
+    if try_acquire_exclusive_gpu_atomically \
+        "$gpu_id" "$lock_dir" "$slots_per_gpu"; then
+      release_gpu_admission_ticket
+      release_gpu_allocator_mutex
+      return 0
+    fi
   done
 
+  # Keep the oldest global ticket and rescan until whichever eligible device
+  # becomes fully idle first can be acquired atomically. An arbitrary early
+  # reservation could pin this proof behind the slowest GPU.
   release_gpu_allocator_mutex
   return 1
 }
 
-# Incrementally lock every slot of the reserved GPU, keeping each slot as it
-# is acquired. The held reservation fences new proofs out, existing holders
-# only ever release, and slots are taken in fixed 0..n-1 order, so this
-# blocking acquisition cannot deadlock. The allocator mutex must NOT be held
-# here: this function waits. Partially acquired slots are released by the
-# regular cleanup path on failure. Returns 0 leased and 1 on deadline.
+# Incrementally lock every slot of the sole reserved GPU. The reservation
+# fences new work out, current holders only release, and fixed slot order makes
+# this blocking acquisition deadlock-free. Returns 0 leased and 1 on deadline.
 drain_reserved_gpu_slots() {
   local lock_dir="$1"
   local slots_per_gpu="$2"
@@ -563,7 +819,7 @@ select_proof_gpu() {
   local timeout="${TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS:-10800}"
   [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && [ "$timeout" -le 21600 ] || \
     die "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS must be an integer from 1 to 21600"
-  # Only the queue head ever polls for shared capacity (everyone behind it
+  # Only the queue head ever polls for GPU capacity (everyone behind it
   # blocks on a predecessor ticket), so this interval bounds the wake latency
   # of exactly one process system-wide.
   local poll_interval="${TRTMC_MODEL_PROOF_POLL_INTERVAL:-0.25}"
@@ -582,9 +838,9 @@ select_proof_gpu() {
     die "TRTMC_MODEL_PROOF_POLL_INTERVAL must be a positive number no greater than 21600 seconds"
   fi
 
-  local lock_dir="${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-/tmp/trtmc-model-proof-gpu-locks}"
-  [ -n "$lock_dir" ] || die "TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not be empty"
-  mkdir -p -- "$lock_dir" || die "could not create GPU lease directory: $lock_dir"
+  local lock_dir="$proof_gpu_lock_dir"
+  [ -n "$lock_dir" ] && [ -d "$lock_dir" ] || \
+    die "canonical model-proof GPU lock directory is unavailable"
 
   local -a configured_gpu_ids=()
   IFS=, read -r -a configured_gpu_ids <<< "$configured_ids"
@@ -616,6 +872,9 @@ select_proof_gpu() {
   fi
 
   local deadline=$((SECONDS + timeout))
+  if [[ "${proof_gpu_lease_deadline:-}" =~ ^[1-9][0-9]*$ ]]; then
+    deadline="$proof_gpu_lease_deadline"
+  fi
   local attempted=0 reserve_rc=0 poll_remaining=0
   local admission_scope="global"
   # Register once in a crash-safe monotonic queue. Every later wait keeps
@@ -652,19 +911,18 @@ select_proof_gpu() {
       reserve_rc=$?
       set -e
       if [ "$reserve_rc" -eq 0 ]; then
-        release_gpu_admission_ticket
         echo "Leased exclusive model-proof GPU $proof_gpu_id slots ${proof_gpu_slot_ids[*]}"
         return 0
       elif [ "$reserve_rc" -eq 2 ]; then
-        # The GPU is reserved: new proofs are fenced out and the remaining
-        # holders only exit. Give up the queue position so the line advances,
-        # then drain the reserved GPU slot by slot, event-driven.
-        release_gpu_admission_ticket
+        # A sole eligible GPU is reserved and its queue handoff is complete.
+        # Wait directly on the remaining slot holders instead of polling.
         drain_reserved_gpu_slots "$lock_dir" "$slots_per_gpu" "$deadline" || \
           die "timed out after ${timeout}s waiting for a ${resource_class} model-proof GPU lease from: ${candidate_gpu_ids[*]}"
         echo "Leased exclusive model-proof GPU $proof_gpu_id slots ${proof_gpu_slot_ids[*]}"
         return 0
       fi
+      # With multiple candidates, retain the oldest FIFO ticket while existing
+      # work drains so younger proofs cannot steal the first fully idle GPU.
     fi
     # Clamp the poll sleep to the remaining lease budget so a large
     # configured interval can never sleep past the deadline and report a
@@ -1081,7 +1339,11 @@ if suite == "premerge":
     )
     selected_cases = candidates[:1]
 else:
-    selected_cases = cases
+    # Nightly proves every production single-GPU case. L0 cases are synthetic
+    # premerge substitutes, so retain them only when an owner has no larger
+    # single-GPU case (for example LocateAnything and LTX Video).
+    production_cases = [case for case in cases if case["ci_tier"] != "l0_only"]
+    selected_cases = production_cases or cases
 
 resource_class = (
     "exclusive_gpu"
@@ -1698,7 +1960,7 @@ PY
     TRTMC_ENGINE_BUILD_GUARD_DIR=/artifacts/engine-builds \
     TRTMC_ENGINE_BUILD_REVISION="$revision" \
     LD_LIBRARY_PATH="$ld_library_path" \
-    "$py" -m pytest "$e2e_test" -v -p no:cacheprovider \
+    "$py" -m pytest "$e2e_test" -v -rs -p no:cacheprovider \
       --rootdir /src -c /src/pyproject.toml \
       "${e2e_filter_args[@]}" \
       --engine-dir /work/engines \
@@ -1709,7 +1971,17 @@ PY
       --rebuild-engines \
       --junitxml=/artifacts/e2e/junit.xml \
       2>&1 | tee /artifacts/e2e.log
+  # Pytest exits successfully when every selected case is skipped.  Validate
+  # result artifacts first so a preflight skip fails with its direct reason
+  # instead of surfacing later as a secondary missing-build-ledger error.
+  update_proof_step result_verification running "e2e-verification.json"
+  "$py" /src/tools/model_plugin_isolation.py verify-results \
+    --repo-root /src \
+    --models-file "$models_file" \
+    --artifacts-dir /artifacts/e2e \
+    --report /artifacts/e2e-verification.json
   update_proof_step e2e_reference passed "e2e/junit.xml, e2e/*/result.json"
+  update_proof_step result_verification passed "e2e-verification.json"
 
   "$py" /src/tools/model_plugin_isolation.py verify-builds \
     --models-file "$models_file" \
@@ -1718,14 +1990,6 @@ PY
     --report /artifacts/engine-build-verification.json
   update_proof_step engine_build_budget passed \
     "engine-builds/*.json, engine-build-verification.json"
-
-  update_proof_step result_verification running "e2e-verification.json"
-  "$py" /src/tools/model_plugin_isolation.py verify-results \
-    --repo-root /src \
-    --models-file "$models_file" \
-    --artifacts-dir /artifacts/e2e \
-    --report /artifacts/e2e-verification.json
-  update_proof_step result_verification passed "e2e-verification.json"
 
   "$py" - "$model" "$revision" "$runtime_model" "$runtime_library" \
     "$TRTMC_MODEL_PROOF_GPU_ID" "$TRTMC_MODEL_PROOF_GPU_SLOT_IDS" \
@@ -2072,6 +2336,12 @@ PY
 
   local container_name="trtmc-model-proof-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$model"
   container_name="${container_name//_/-}"
+  local -a job_identity_labels=(
+    --label com.nvidia.trtmc.model-proof.job=1
+    --label "com.nvidia.trtmc.model-proof.run-id=${GITHUB_RUN_ID:-local}"
+    --label "com.nvidia.trtmc.model-proof.run-attempt=${GITHUB_RUN_ATTEMPT:-0}"
+    --label "com.nvidia.trtmc.model-proof.model=$model"
+  )
   local cache_check_container_name="${container_name}-cache-check"
   proof_container_name="$cache_check_container_name"
   docker rm -f "$cache_check_container_name" >/dev/null 2>&1 || true
@@ -2079,6 +2349,7 @@ PY
   local -a cache_check_docker_args=(
     run --rm
     --name "$cache_check_container_name"
+    "${job_identity_labels[@]}"
     --read-only
     --network none
     --cap-drop ALL
@@ -2220,6 +2491,7 @@ PY
     local -a cache_copy_docker_args=(
       run --rm
       --name "$cache_copy_container_name"
+      "${job_identity_labels[@]}"
       --read-only
       --network none
       --cap-drop ALL
@@ -2261,10 +2533,12 @@ trap - EXIT
     die "selected Hugging Face cache evidence produced no repository copies"
 
   printf '%s\n' "$resource_class" > "$artifacts_dir/gpu-lease-requested.txt"
+  acquire_proof_gpu_machine_lock
   select_proof_gpu "$resource_class"
   local gpu_id="$proof_gpu_id"
   local gpu_slot_ids
   gpu_slot_ids="$(IFS=,; printf '%s' "${proof_gpu_slot_ids[*]}")"
+  reclaim_orphaned_proof_containers "$gpu_id" "${proof_gpu_slot_ids[@]}"
   printf '%s\n' "$gpu_id" > "$artifacts_dir/gpu-id.txt"
   python3 - \
     "$artifacts_dir/gpu-lease.json" "$model" "$revision" "$gpu_id" \
@@ -2304,6 +2578,11 @@ PY
     --ipc private
     --shm-size "${TRTMC_MODEL_PROOF_SHM_SIZE:-16g}"
     --gpus "device=$gpu_id"
+    --label com.nvidia.trtmc.model-proof=1
+    "${job_identity_labels[@]}"
+    --label "com.nvidia.trtmc.model-proof.gpu=$gpu_id"
+    --label "com.nvidia.trtmc.model-proof.slots=$gpu_slot_ids"
+    --label "com.nvidia.trtmc.model-proof.lock-namespace=$proof_gpu_lock_namespace"
     --user "$(id -u):$(id -g)"
     --mount "type=bind,src=$projection_dir,dst=/src,readonly"
     --mount "type=bind,src=$work_dir,dst=/work"

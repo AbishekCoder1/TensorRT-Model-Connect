@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import fcntl
 import json
 import os
@@ -22,6 +23,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / ".github" / "scripts" / "run-model-proof.sh"
+MODEL_CI = REPO_ROOT / "tools" / "model_ci.py"
 IMAGE_ENSURE = REPO_ROOT / ".github" / "scripts" / "ensure-ci-docker-image.sh"
 PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "model-proof.yml"
 FALLBACK_WRITER = REPO_ROOT / ".github" / "scripts" / "write-model-proof-fallback-report.py"
@@ -41,7 +43,27 @@ def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         "set -euo pipefail\n"
         'printf \'%s\\n\' "$*" >> "$DOCKER_LOG"\n'
         'case "${1:-}" in\n'
-        "  image|rm) exit 0 ;;\n"
+        "  image) exit 0 ;;\n"
+        "  rm)\n"
+        '    if [ "${3:-}" = "${FAKE_ORPHAN_CONTAINER_ID:-}" ]; then\n'
+        '      exit "${FAKE_ORPHAN_RM_EXIT_CODE:-0}"\n'
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "  ps)\n"
+        '    if [ "${FAKE_DOCKER_PS_EXIT_CODE:-0}" -ne 0 ]; then\n'
+        '      exit "$FAKE_DOCKER_PS_EXIT_CODE"\n'
+        "    fi\n"
+        '    if [[ " $* " == *" -a "* ]]; then\n'
+        '      record="${FAKE_ORPHAN_CONFIRM_RECORD:-}"\n'
+        "    else\n"
+        '      record="${FAKE_ORPHAN_CONTAINER_RECORD:-}"\n'
+        "    fi\n"
+        '    if [ -n "$record" ]; then\n'
+        '      printf \'%s\\n\' "$record"\n'
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
         "  run)\n"
         '    if [[ " $* " == *" /src/scripts/warm_hf_cache.py "* ]]; then\n'
         '      mkdir -p "$FAKE_ARTIFACTS"\n'
@@ -128,6 +150,26 @@ def _fake_proof_environment(
         }
     )
     return env
+
+
+def _run_fake_proof(env: dict[str, str], output: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--model",
+            "convbert",
+            "--revision",
+            "HEAD",
+            "--output-dir",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _write_fake_pinned_model_reference(
@@ -488,6 +530,7 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
         ("convbert", "shared"),
         ("flux", "exclusive_gpu"),
         ("gpt2", "exclusive_gpu"),
+        ("m2m_100", "exclusive_gpu"),
         ("mixtral", "exclusive_gpu"),
         ("timesfm", "exclusive_gpu"),
     ),
@@ -529,16 +572,12 @@ def test_inner_selection_records_the_leased_gpu_evidence(tmp_path: Path) -> None
         (
             "flux",
             {
-                "flux-2-dev-fp8-l0",
                 "flux-2-dev-fp8",
-                "flux-2-dev-l0",
                 "flux-2-dev",
-                "flux-schnell-l0-batch2",
-                "flux-schnell-l0",
                 "flux-schnell",
             },
         ),
-        ("personaplex", {"personaplex-7b-l0", "personaplex-7b"}),
+        ("personaplex", {"personaplex-7b"}),
         (
             "canary",
             {
@@ -554,7 +593,7 @@ def test_inner_selection_records_the_leased_gpu_evidence(tmp_path: Path) -> None
         ),
     ),
 )
-def test_nightly_selects_the_full_nested_single_gpu_suite(
+def test_nightly_selects_production_single_gpu_cases_without_redundant_l0(
     tmp_path: Path,
     family: str,
     expected_cases: set[str],
@@ -564,7 +603,118 @@ def test_nightly_selects_the_full_nested_single_gpu_suite(
     assert selection["suite"] == "nightly"
     assert {case["name"] for case in selection["e2e_cases"]} == expected_cases
     assert any(case["ci_tier"] == "nightly_only" for case in selection["e2e_cases"])
+    assert all(case["ci_tier"] != "l0_only" for case in selection["e2e_cases"])
     assert all(case["ci_tier"] != "multi_device" for case in selection["e2e_cases"])
+
+
+def test_flux_nightly_model_proof_reserves_an_exclusive_gpu(tmp_path: Path) -> None:
+    selection = _run_test_selection(
+        tmp_path,
+        "flux",
+        "nightly",
+        lease_env={
+            "TRTMC_MODEL_PROOF_GPU_ID": "2",
+            "TRTMC_MODEL_PROOF_GPU_SLOT_IDS": "0,1,2,3",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+            "TRTMC_MODEL_PROOF_RESOURCE_CLASS": "exclusive_gpu",
+        },
+    )
+
+    assert selection["resource_class"] == "exclusive_gpu"
+    assert selection["gpu_resource_class"] == "exclusive_gpu"
+    assert selection["gpu_slot_ids"] == [0, 1, 2, 3]
+    assert selection["gpu_slot"] is None
+    assert {
+        case["name"]: case["gpu_resource_class"]
+        for case in selection["e2e_cases"]
+    } == {
+        "flux-2-dev": "exclusive_gpu",
+        "flux-2-dev-fp8": "shared",
+        "flux-schnell": "shared",
+    }
+
+
+def test_llama_nightly_model_proof_reserves_an_exclusive_gpu(tmp_path: Path) -> None:
+    selection = _run_test_selection(
+        tmp_path,
+        "llama",
+        "nightly",
+        lease_env={
+            "TRTMC_MODEL_PROOF_GPU_ID": "2",
+            "TRTMC_MODEL_PROOF_GPU_SLOT_IDS": "0,1,2,3",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+            "TRTMC_MODEL_PROOF_RESOURCE_CLASS": "exclusive_gpu",
+        },
+    )
+
+    assert selection["resource_class"] == "exclusive_gpu"
+    assert selection["gpu_resource_class"] == "exclusive_gpu"
+    assert selection["gpu_slot_ids"] == [0, 1, 2, 3]
+    assert selection["gpu_slot"] is None
+    assert {
+        case["name"]: case["gpu_resource_class"]
+        for case in selection["e2e_cases"]
+    } == {
+        "falcon3-1b": "exclusive_gpu",
+        "minitron-4b-depth": "shared",
+        "minitron-4b-width": "shared",
+        "nemotron-nano-4b": "shared",
+        "tinyllama-1.1b": "shared",
+    }
+
+
+@pytest.mark.parametrize("family", ("locateanything", "ltx_video"))
+def test_nightly_retains_l0_as_an_owners_only_single_gpu_fallback(
+    tmp_path: Path, family: str
+) -> None:
+    selection = _run_test_selection(tmp_path, family, "nightly")
+
+    assert selection["e2e_cases"]
+    assert all(case["ci_tier"] == "l0_only" for case in selection["e2e_cases"])
+
+
+@pytest.mark.parametrize(
+    ("family", "multi_gpu_case"),
+    (
+        ("internvl", "internvl3-8b-tp4"),
+        ("qwen_moe", "qwen3-moe-30b-a3b-tp4"),
+    ),
+)
+def test_nightly_single_gpu_selection_excludes_tp4_cases(
+    tmp_path: Path,
+    family: str,
+    multi_gpu_case: str,
+) -> None:
+    selection = _run_test_selection(tmp_path, family, "nightly")
+
+    selected = {case["name"] for case in selection["e2e_cases"]}
+    assert multi_gpu_case not in selected
+    assert selected
+    assert all(case["ci_tier"] != "multi_device" for case in selection["e2e_cases"])
+
+
+def test_nightly_inventory_exactly_matches_every_model_proof_selection(
+    tmp_path: Path,
+) -> None:
+    result = subprocess.run(
+        [sys.executable, str(MODEL_CI), "all", "--revision", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    inventory = json.loads(result.stdout)
+    selected_cases_by_model = {}
+    for model in inventory["affected_models"]:
+        selection = _run_test_selection(tmp_path, model, "nightly")
+        selected_cases_by_model[model] = [
+            case["name"] for case in selection["e2e_cases"]
+        ]
+
+    assert inventory["expected_cases_by_model"] == selected_cases_by_model
+    assert inventory["expected_result_count"] == sum(
+        len(cases) for cases in selected_cases_by_model.values()
+    )
 
 
 def test_runner_declares_the_hermetic_container_boundary() -> None:
@@ -641,11 +791,12 @@ def test_runner_keeps_local_fallback_and_workflow_uses_runner_cache_paths() -> N
 
     assert "${HF_HOME:-$HOME/.cache/huggingface}" in runner
     assert "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || " in workflow
+    assert "TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || " in workflow
+    assert "format('{0}/hub', vars.TRTMC_HF_HOME || " in workflow
     assert (
         "TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || "
         in workflow
     )
-    assert "TRTMC_HF_HUB_CACHE:" not in workflow
     assert "TRTMC_HF_MODULES_CACHE:" not in workflow
     assert "${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}" in runner
     assert "TRTMC_HF_MODULES_CACHE" not in runner
@@ -669,13 +820,260 @@ def test_runner_removes_only_its_container_without_masking_exit_status() -> None
     cleanup = text.split("cleanup_proof_container() {", maxsplit=1)[1].split("\n}\n", maxsplit=1)[0]
 
     assert 'local rc="$1"' in cleanup
+    assert "trap - EXIT" in cleanup
+    assert "trap '' INT TERM" in cleanup
     assert 'docker rm -f "$proof_container_name"' in cleanup
+    assert cleanup.index('docker rm -f "$proof_container_name"') < cleanup.index(
+        "release_proof_gpu_lease"
+    )
     assert 'exit "$rc"' in cleanup
     assert "artifacts" not in cleanup
     assert 'proof_container_name="$container_name"' in text
     assert "trap 'cleanup_proof_container \"$?\"' EXIT" in text
     assert "trap 'cleanup_proof_container 130' INT" in text
     assert "trap 'cleanup_proof_container 143' TERM" in text
+
+
+def test_workflow_reconciles_exact_job_containers_after_a_cancelled_proof() -> None:
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+    reconciliation = workflow.split(
+        "- name: Reconcile model proof containers", maxsplit=1
+    )[1].split("- name: Finalize model proof fallback", maxsplit=1)[0]
+
+    assert "if: ${{ always() && steps.checkout.outcome == 'success' }}" in reconciliation
+    assert "--cleanup-containers" in reconciliation
+    assert '--model "$MODEL"' in reconciliation
+    assert workflow.index("Reconcile model proof containers") < workflow.index(
+        "Finalize model proof fallback"
+    )
+
+
+def test_every_host_container_has_exact_workflow_job_identity_labels(tmp_path: Path) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update({"GITHUB_RUN_ID": "4242", "GITHUB_RUN_ATTEMPT": "3"})
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    runs = [
+        line
+        for line in docker_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("run ")
+    ]
+    assert len(runs) == 3
+    for run in runs:
+        assert "--label com.nvidia.trtmc.model-proof.job=1" in run
+        assert "--label com.nvidia.trtmc.model-proof.run-id=4242" in run
+        assert "--label com.nvidia.trtmc.model-proof.run-attempt=3" in run
+        assert "--label com.nvidia.trtmc.model-proof.model=convbert" in run
+
+
+def test_cleanup_mode_removes_only_exact_labeled_job_containers(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    state = tmp_path / "container-present"
+    state.write_text("present\n", encoding="utf-8")
+    remove_count = tmp_path / "remove-count"
+    container_id = "d" * 64
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf \'%s\\n\' "$*" >> "$DOCKER_LOG"\n'
+        'case "${1:-}" in\n'
+        "  ps)\n"
+        '    if [ -e "$FAKE_CONTAINER_STATE" ]; then\n'
+        f'      printf \'%s\\n\' "{container_id} 4242 3 convbert"\n'
+        "    fi\n"
+        "    ;;\n"
+        "  rm)\n"
+        "    count=0\n"
+        '    if [ -e "$FAKE_REMOVE_COUNT" ]; then read -r count < "$FAKE_REMOVE_COUNT"; fi\n'
+        "    count=$((count + 1))\n"
+        '    printf \'%s\\n\' "$count" > "$FAKE_REMOVE_COUNT"\n'
+        '    if [ "$count" -ge 3 ]; then rm -f -- "$FAKE_CONTAINER_STATE"; fi\n'
+        "    ;;\n"
+        "  *) exit 99 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "DOCKER_LOG": str(docker_log),
+            "FAKE_CONTAINER_STATE": str(state),
+            "FAKE_REMOVE_COUNT": str(remove_count),
+            "GITHUB_RUN_ID": "4242",
+            "GITHUB_RUN_ATTEMPT": "3",
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--cleanup-containers",
+            "--model",
+            "convbert",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = docker_log.read_text(encoding="utf-8").splitlines()
+    inventory = next(line for line in lines if line.startswith("ps "))
+    assert "label=com.nvidia.trtmc.model-proof.job=1" in inventory
+    assert "label=com.nvidia.trtmc.model-proof.run-id=4242" in inventory
+    assert "label=com.nvidia.trtmc.model-proof.run-attempt=3" in inventory
+    assert "label=com.nvidia.trtmc.model-proof.model=convbert" in inventory
+    assert f"rm -f {container_id}" in lines
+    assert remove_count.read_text(encoding="utf-8").strip() == "3"
+    assert not state.exists()
+
+
+@pytest.mark.parametrize(("orphan_slots", "removed"), [("0", True), ("1", False)])
+def test_runner_reclaims_only_a_labeled_orphan_overlapping_its_lease(
+    tmp_path: Path,
+    orphan_slots: str,
+    removed: bool,
+) -> None:
+    orphan_id = "d" * 64
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "FAKE_ORPHAN_CONTAINER_ID": orphan_id,
+            "FAKE_ORPHAN_CONTAINER_RECORD": f"{orphan_id} {orphan_slots}",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "7",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
+        }
+    )
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    docker_lines = docker_log.read_text(encoding="utf-8").splitlines()
+    orphan_remove = f"rm -f {orphan_id}"
+    assert (orphan_remove in docker_lines) is removed
+    proof_run = next(line for line in docker_lines if " --inner " in f" {line} ")
+    assert "--label com.nvidia.trtmc.model-proof=1" in proof_run
+    assert "--label com.nvidia.trtmc.model-proof.gpu=7" in proof_run
+    assert "--label com.nvidia.trtmc.model-proof.slots=0" in proof_run
+    namespace_match = re.search(
+        r"--label com\.nvidia\.trtmc\.model-proof\.lock-namespace=([a-f0-9]{64})",
+        proof_run,
+    )
+    assert namespace_match is not None
+    inspection = next(line for line in docker_lines if line.startswith("ps "))
+    assert inspection.startswith("ps --no-trunc ")
+    assert (
+        f"label=com.nvidia.trtmc.model-proof.lock-namespace={namespace_match.group(1)}"
+        in inspection
+    )
+    if removed:
+        inspection_index = next(
+            index
+            for index, line in enumerate(docker_lines)
+            if line.startswith("ps ") and "model-proof.gpu=7" in line
+        )
+        assert inspection_index < docker_lines.index(orphan_remove) < docker_lines.index(proof_run)
+
+
+@pytest.mark.parametrize(
+    ("record", "ps_exit_code", "expected_error"),
+    [
+        (
+            f"{'d' * 64} invalid",
+            "0",
+            f"existing model-proof container {'d' * 64} has invalid GPU slot labels",
+        ),
+        ("", "75", "could not inspect existing model-proof containers on GPU 7"),
+    ],
+)
+def test_orphan_reclamation_fails_closed_on_untrusted_or_unavailable_inventory(
+    tmp_path: Path,
+    record: str,
+    ps_exit_code: str,
+    expected_error: str,
+) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "FAKE_ORPHAN_CONTAINER_RECORD": record,
+            "FAKE_DOCKER_PS_EXIT_CODE": ps_exit_code,
+            "TRTMC_MODEL_PROOF_GPU_IDS": "7",
+        }
+    )
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+    docker_lines = docker_log.read_text(encoding="utf-8").splitlines()
+    assert not any(" --inner " in f" {line} " for line in docker_lines)
+    assert f"rm -f {'d' * 64}" not in docker_lines
+
+
+def test_orphan_reclamation_accepts_only_the_auto_remove_race(tmp_path: Path) -> None:
+    orphan_id = "d" * 64
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "FAKE_ORPHAN_CONTAINER_ID": orphan_id,
+            "FAKE_ORPHAN_CONTAINER_RECORD": f"{orphan_id} 0",
+            "FAKE_ORPHAN_RM_EXIT_CODE": "1",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "7",
+        }
+    )
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    docker_lines = docker_log.read_text(encoding="utf-8").splitlines()
+    assert f"rm -f {orphan_id}" in docker_lines
+    assert any(
+        line.startswith("ps -a --no-trunc ") and f"--filter id={orphan_id}" in line
+        for line in docker_lines
+    )
+
+
+def test_orphan_reclamation_rejects_a_failed_remove_when_full_id_remains(
+    tmp_path: Path,
+) -> None:
+    orphan_id = "d" * 64
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "FAKE_ORPHAN_CONTAINER_ID": orphan_id,
+            "FAKE_ORPHAN_CONTAINER_RECORD": f"{orphan_id} 0",
+            "FAKE_ORPHAN_CONFIRM_RECORD": orphan_id,
+            "FAKE_ORPHAN_RM_EXIT_CODE": "1",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "7",
+        }
+    )
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode != 0
+    assert f"could not remove orphaned model-proof container {orphan_id}" in result.stderr
+    docker_lines = docker_log.read_text(encoding="utf-8").splitlines()
+    assert not any(" --inner " in f" {line} " for line in docker_lines)
 
 
 def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> None:
@@ -705,9 +1103,34 @@ def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
         "- name: Finalize model proof fallback", maxsplit=1
     )[0]
 
-    assert "timeout-minutes: 300" in job_configuration
-    assert "timeout-minutes: 150" in proof
+    assert (
+        "timeout-minutes: ${{ inputs.suite == 'nightly' && 480 || 300 }}"
+        in job_configuration
+    )
+    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 360 || 150 }}" in proof
+    assert "inputs.suite == 'nightly' && '5400' || '3600'" in job_configuration
+    assert "inputs.suite == 'nightly' && '600' || '360'" in job_configuration
     assert "inputs.expected_count" not in workflow
+
+    nightly_job_minutes = 480
+    image_minutes = 90
+    nightly_proof_minutes = 360
+    finalization_margin_minutes = 30
+    lease_minutes = 5400 // 60
+    sana_build_minutes = json.loads(
+        (
+            REPO_ROOT
+            / "tests/e2e/models/sana_wm/manifests/sana-wm-bidirectional.json"
+        ).read_text(encoding="utf-8")
+    )["build_timeout_s"] // 60
+    e2e_and_report_margin_minutes = 150
+    assert nightly_proof_minutes >= (
+        lease_minutes + sana_build_minutes + e2e_and_report_margin_minutes
+    )
+    assert nightly_job_minutes >= (
+        image_minutes + nightly_proof_minutes + finalization_margin_minutes
+    )
+    assert nightly_proof_minutes <= 360
 
 
 def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
@@ -719,7 +1142,7 @@ def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
     assert "path: model-proof-source" in checkout
     assert "clean: true" in checkout
     assert "persist-credentials: false" in checkout
-    assert workflow.count("working-directory: ${{ github.workspace }}/model-proof-source") == 2
+    assert workflow.count("working-directory: ${{ github.workspace }}/model-proof-source") == 3
 
 
 def test_model_proof_bootstraps_html_without_a_checkout_dependency() -> None:
@@ -841,7 +1264,7 @@ def test_workflow_singleton_gate_rejects_invalid_certification(
     assert message in result.stderr
 
 
-def test_model_proof_resolves_runner_temp_only_after_runner_assignment() -> None:
+def test_model_proof_resolves_durable_workspace_after_runner_assignment() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
     job_configuration = workflow.split("\n    steps:", maxsplit=1)[0]
     bootstrap = workflow.split("- name: Bootstrap model HTML before checkout", maxsplit=1)[1].split(
@@ -850,12 +1273,25 @@ def test_model_proof_resolves_runner_temp_only_after_runner_assignment() -> None
     proof = workflow.split("- name: Run isolated model proof", maxsplit=1)[1].split(
         "- name: Finalize model proof fallback", maxsplit=1
     )[0]
+    finalize = workflow.split("- name: Finalize model proof fallback", maxsplit=1)[1].split(
+        "- name: Upload isolated model proof artifact", maxsplit=1
+    )[0]
 
     assert "MODEL_PROOF_OUTPUT_DIR:" not in job_configuration
-    assert "MODEL_PROOF_OUTPUT_DIR: ${{ runner.temp }}" in bootstrap
+    assert (
+        "MODEL_PROOF_OUTPUT_DIR: ${{ github.workspace }}/model-proof-output-"
+        "${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.model }}"
+    ) in bootstrap
+    assert "${{ runner.temp }}/model-proof-" not in workflow
     assert 'echo "MODEL_PROOF_OUTPUT_DIR=$MODEL_PROOF_OUTPUT_DIR" >> "$GITHUB_ENV"' in bootstrap
     assert "${{ env.MODEL_PROOF_OUTPUT_DIR }}" not in proof
     assert '--output-dir "$MODEL_PROOF_OUTPUT_DIR"' in proof
+    assert 'printf \'%s\\n\' "$proof_rc" > "$MODEL_PROOF_OUTPUT_DIR/proof-exit-code.txt"' in proof
+    assert "GITHUB_OUTPUT" not in proof
+    assert "steps.proof.outputs.exit_code" not in finalize
+    assert 'proof_exit_code=1' in finalize
+    assert 'proof-exit-code.txt' in finalize
+    assert '--exit-code "$proof_exit_code"' in finalize
 
 
 def test_model_proof_checks_disk_headroom_before_checkout() -> None:
@@ -875,7 +1311,7 @@ def test_model_proof_checks_disk_headroom_before_checkout() -> None:
     assert 'proof_capacity="$((${#gpu_ids[@]} * TRTMC_MODEL_PROOF_SLOTS_PER_GPU))"' in disk_check
     assert 'required_gib="$((TRTMC_MODEL_PROOF_MIN_FREE_GIB * proof_capacity))"' in disk_check
     assert 'required_kib="$((required_gib * 1024 * 1024))"' in disk_check
-    assert 'df -Pk "$RUNNER_TEMP"' in disk_check
+    assert 'df -Pk "$GITHUB_WORKSPACE"' in disk_check
     assert "Insufficient model-proof disk headroom" in disk_check
 
 
@@ -894,7 +1330,7 @@ def test_model_proof_uploads_before_singleton_gate_and_cleanup() -> None:
     )
     assert "if: ${{ always() }}" in gate
     assert "id: artifact_upload" in workflow
-    assert '"$RUNNER_TEMP"/model-proof-*' in cleanup
+    assert '"$GITHUB_WORKSPACE"/model-proof-output-*' in cleanup
     assert "-name work -o -name projection" in cleanup
     assert 'ARTIFACT_UPLOAD_OUTCOME" = "success"' in cleanup
     assert 'rm -rf -- "$MODEL_PROOF_OUTPUT_DIR"' in cleanup
@@ -968,6 +1404,14 @@ def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None
         '"engine_build_count": len(build_verification["records"])',
     ):
         assert contract in runner
+
+    assert runner.index("model_plugin_isolation.py verify-results") < runner.index(
+        "model_plugin_isolation.py verify-builds"
+    )
+    assert runner.index("model_plugin_isolation.py verify-results") < runner.index(
+        'update_proof_step e2e_reference passed'
+    )
+    assert '"$py" -m pytest "$e2e_test" -v -rs' in runner
 
 
 def test_model_proof_report_assets_are_inside_the_positive_projection() -> None:
@@ -1690,6 +2134,47 @@ def test_explicit_runner_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> Non
     assert not _proof_gpu_ids_if_present(docker_log)
 
 
+def test_model_proof_cannot_bypass_an_exclusive_whole_machine_lock(
+    tmp_path: Path,
+) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "TRTMC_GPU_ID": "0",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "0",
+            "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "1",
+        }
+    )
+    lock_dir = tmp_path / "gpu-locks"
+    lock_dir.mkdir()
+    with (lock_dir / "whole-machine.lock").open("w", encoding="utf-8") as lock_stream:
+        fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(
+            [
+                "bash",
+                str(RUNNER),
+                "--model",
+                "convbert",
+                "--revision",
+                "HEAD",
+                "--output-dir",
+                str(output),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+
+    assert result.returncode != 0
+    assert "waiting for the whole-machine GPU lock" in result.stderr
+    assert not _proof_gpu_ids_if_present(docker_log)
+
+
 def test_explicit_runner_gpu_must_be_in_the_configured_allowlist(tmp_path: Path) -> None:
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
     output = tmp_path / "proof"
@@ -2113,6 +2598,10 @@ def test_gpu_admission_queue_prunes_a_stale_ticket(tmp_path: Path) -> None:
     lock_dir.mkdir()
     stale_ticket = lock_dir / "admission-global-00000000000000000001.lock"
     stale_ticket.write_text("pid=999999 model=stale\n", encoding="utf-8")
+    stale_handoff = (
+        lock_dir / "admission-global-00000000000000000000.lock.handoff.999999"
+    )
+    stale_handoff.write_text("pid=999999 model=stale-handoff\n", encoding="utf-8")
 
     result = subprocess.run(
         [
@@ -2134,6 +2623,7 @@ def test_gpu_admission_queue_prunes_a_stale_ticket(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert not stale_ticket.exists()
+    assert not stale_handoff.exists()
     assert not list(lock_dir.glob("admission-global-*.lock"))
     assert (lock_dir / "admission-global.next").read_text(encoding="utf-8") == "2\n"
     assert _proof_gpu_ids(docker_log) == ["9"]
@@ -2283,6 +2773,7 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
         while time.monotonic() < deadline and not _lock_is_busy(reservation):
             time.sleep(0.05)
         assert _lock_is_busy(reservation), "exclusive proof never reserved GPU 6"
+        assert not list(lock_dir.glob("admission-global-*.lock"))
 
         blocked_dir = tmp_path / "blocked-shared"
         blocked_dir.mkdir()
@@ -2339,6 +2830,156 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
         if exclusive is not None and exclusive.poll() is None:
             exclusive.terminate()
             exclusive.communicate(timeout=10)
+
+
+@pytest.mark.model_proof_allocator
+def test_oldest_exclusive_waiter_takes_the_first_idle_gpu(
+    tmp_path: Path,
+) -> None:
+    lock_dir = tmp_path / "gpu-locks"
+    coordination_timeout_s = 90
+    processes: list[subprocess.Popen[str]] = []
+    release_files: list[Path] = []
+
+    def start_case(
+        name: str,
+        model: str,
+        release_file: Path,
+        *,
+        explicit_gpu: str | None = None,
+    ) -> tuple[subprocess.Popen[str], Path, Path]:
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        fake_bin, docker_log = _write_successful_fake_docker(case_dir)
+        output = case_dir / "proof"
+        env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+        env.update(
+            {
+                "TRTMC_MODEL_PROOF_GPU_IDS": "6,7",
+                "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+                "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
+                "FAKE_PROOF_RELEASE_FILE": str(release_file),
+            }
+        )
+        if explicit_gpu is not None:
+            env["TRTMC_GPU_ID"] = explicit_gpu
+        process = subprocess.Popen(
+            [
+                "bash",
+                str(RUNNER),
+                "--model",
+                model,
+                "--revision",
+                "HEAD",
+                "--output-dir",
+                str(output),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        processes.append(process)
+        release_files.append(release_file)
+        return process, docker_log, output
+
+    def wait_for(predicate: Callable[[], bool], message: str) -> None:
+        deadline = time.monotonic() + coordination_timeout_s
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.05)
+        raise AssertionError(message)
+
+    gpu6_release = tmp_path / "release-gpu6-holder"
+    gpu7_release = tmp_path / "release-gpu7-holder"
+    exclusive_release = tmp_path / "release-exclusive"
+    younger_release = tmp_path / "release-younger-shared"
+    try:
+        gpu6_holder, _, gpu6_output = start_case(
+            "gpu6-holder", "convbert", gpu6_release, explicit_gpu="6"
+        )
+        wait_for(
+            lambda: (gpu6_output / "artifacts" / "gpu-lease.json").is_file(),
+            "GPU 6 holder never acquired its lease",
+        )
+        gpu7_holder, _, gpu7_output = start_case(
+            "gpu7-holder", "albert", gpu7_release, explicit_gpu="7"
+        )
+        wait_for(
+            lambda: (gpu7_output / "artifacts" / "gpu-lease.json").is_file(),
+            "GPU 7 holder never acquired its lease",
+        )
+
+        exclusive, exclusive_log, exclusive_output = start_case(
+            "oldest-exclusive", "flux", exclusive_release
+        )
+        gpu6_reservation = lock_dir / "gpu-6-reservation.lock"
+        wait_for(
+            lambda: len(list(lock_dir.glob("admission-global-*.lock"))) == 1,
+            "exclusive proof did not retain its admission ticket while draining",
+        )
+        exclusive_ticket = list(lock_dir.glob("admission-global-*.lock"))[0]
+        assert "model=flux" in exclusive_ticket.read_text(encoding="utf-8")
+        assert not (exclusive_output / "artifacts" / "gpu-lease.json").exists()
+        assert not _lock_is_busy(gpu6_reservation)
+
+        younger, younger_log, younger_output = start_case(
+            "younger-shared", "convbert", younger_release, explicit_gpu="7"
+        )
+        wait_for(
+            lambda: len(list(lock_dir.glob("admission-global-*.lock"))) == 2,
+            "younger proof never entered the admission queue",
+        )
+        assert not (younger_output / "artifacts" / "gpu-lease.json").exists()
+
+        # GPU 6 remains occupied, but GPU 7 becomes idle. The oldest exclusive
+        # request must claim all four slots on GPU 7 before the younger shared
+        # request can steal any of that newly available capacity.
+        gpu7_release.touch()
+        gpu7_stdout, gpu7_stderr = gpu7_holder.communicate(timeout=30)
+        assert gpu7_holder.returncode == 0, gpu7_stdout + gpu7_stderr
+        wait_for(
+            lambda: (exclusive_output / "artifacts" / "gpu-lease.json").is_file(),
+            "exclusive proof did not claim GPU 7 after it became idle",
+        )
+        exclusive_lease = _gpu_lease(exclusive_output)
+        assert exclusive_lease["gpu_id"] == "7"
+        assert exclusive_lease["gpu_slots"] == [0, 1, 2, 3]
+        assert exclusive_lease["slots_per_gpu"] == 4
+        assert not (younger_output / "artifacts" / "gpu-lease.json").exists()
+        assert not _lock_is_busy(gpu6_reservation)
+        assert _lock_is_busy(lock_dir / "gpu-7-reservation.lock")
+
+        exclusive_release.touch()
+        exclusive_stdout, exclusive_stderr = exclusive.communicate(timeout=30)
+        assert exclusive.returncode == 0, exclusive_stdout + exclusive_stderr
+        assert _proof_gpu_ids(exclusive_log) == ["7"]
+        wait_for(
+            lambda: (younger_output / "artifacts" / "gpu-lease.json").is_file(),
+            "younger shared proof did not run after the exclusive proof",
+        )
+        assert _gpu_lease(younger_output)["gpu_id"] == "7"
+        younger_release.touch()
+        younger_stdout, younger_stderr = younger.communicate(timeout=30)
+        assert younger.returncode == 0, younger_stdout + younger_stderr
+        assert _proof_gpu_ids(younger_log) == ["7"]
+
+        gpu6_release.touch()
+        gpu6_stdout, gpu6_stderr = gpu6_holder.communicate(timeout=30)
+        assert gpu6_holder.returncode == 0, gpu6_stdout + gpu6_stderr
+        assert not list(lock_dir.glob("admission-global-*.lock"))
+    finally:
+        for release_file in release_files:
+            release_file.touch(exist_ok=True)
+        for process in processes:
+            if process.poll() is None:
+                try:
+                    process.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.communicate(timeout=10)
 
 
 @pytest.mark.model_proof_allocator
@@ -2404,13 +3045,13 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
             time.sleep(0.05)
         assert (first_output / "artifacts" / "gpu-lease.json").is_file()
 
-        oldest, _, oldest_output = start_case("oldest-shared", "m2m_100", oldest_release)
+        oldest, _, oldest_output = start_case("oldest-shared", "albert", oldest_release)
         deadline = time.monotonic() + coordination_timeout_s
         while time.monotonic() < deadline and not list(lock_dir.glob("admission-global-*.lock")):
             time.sleep(0.05)
         admission_tickets = sorted(lock_dir.glob("admission-global-*.lock"))
         assert len(admission_tickets) == 1
-        assert "model=m2m_100" in admission_tickets[0].read_text(encoding="utf-8")
+        assert "model=albert" in admission_tickets[0].read_text(encoding="utf-8")
         assert _lock_is_busy(admission_tickets[0])
 
         younger_exclusive, _, younger_exclusive_output = start_case(
@@ -2429,7 +3070,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         assert [
             ticket.read_text(encoding="utf-8").split("model=", maxsplit=1)[1].split()[0]
             for ticket in admission_tickets
-        ] == ["m2m_100", "bark"]
+        ] == ["albert", "bark"]
         younger_shared, _, younger_shared_output = start_case(
             "younger-shared", "convbert", younger_shared_release
         )
@@ -2446,7 +3087,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         assert [
             ticket.read_text(encoding="utf-8").split("model=", maxsplit=1)[1].split()[0]
             for ticket in admission_tickets
-        ] == ["m2m_100", "bark", "convbert"]
+        ] == ["albert", "bark", "convbert"]
 
         first_release.touch()
         deadline = time.monotonic() + coordination_timeout_s
@@ -2595,6 +3236,8 @@ def test_gpu_lock_directory_file_protocol_is_frozen(tmp_path: Path) -> None:
         assert (holder_output / "artifacts" / "gpu-lease.json").is_file()
         # A held lease is an exclusively flocked slot file.
         assert _lock_is_busy(lock_dir / "gpu-6-slot-0.lock")
+        # Every model proof shares the machine-wide fence while it owns GPU work.
+        assert _lock_is_busy(lock_dir / "whole-machine.lock")
 
         waiter, waiter_output = _start_proof_case(
             tmp_path, "waiter", "convbert", waiter_release, common_env
@@ -2635,9 +3278,11 @@ def test_gpu_lock_directory_file_protocol_is_frozen(tmp_path: Path) -> None:
             "allocator.lock",
             "gpu-6-reservation.lock",
             "gpu-6-slot-0.lock",
+            "whole-machine.lock",
         ]
-        # The slot lease is released once no proof runs.
+        # Both GPU fencing layers are released once no proof runs.
         assert not _lock_is_busy(lock_dir / "gpu-6-slot-0.lock")
+        assert not _lock_is_busy(lock_dir / "whole-machine.lock")
     finally:
         holder_release.touch()
         _finish_proof_cases([holder, waiter])
@@ -2657,7 +3302,7 @@ def test_killed_queue_predecessor_wakes_waiter_and_is_pruned(tmp_path: Path) -> 
     waiter_release = tmp_path / "release-waiter"
     waiter_release.touch()
     holder, holder_output = _start_proof_case(
-        tmp_path, "holder", "m2m_100", holder_release, common_env
+        tmp_path, "holder", "albert", holder_release, common_env
     )
     doomed: subprocess.Popen[str] | None = None
     waiter: subprocess.Popen[str] | None = None
@@ -2727,7 +3372,7 @@ def test_exclusive_drain_completes_as_holders_release_in_any_order(
     try:
         for index in range(3):
             process, output = _start_proof_case(
-                tmp_path, f"shared-{index}", "m2m_100", releases[index], common_env
+                tmp_path, f"shared-{index}", "albert", releases[index], common_env
             )
             holders[index] = process
             holder_outputs.append(output)
@@ -2742,8 +3387,8 @@ def test_exclusive_drain_completes_as_holders_release_in_any_order(
         exclusive, exclusive_output = _start_proof_case(
             tmp_path, "exclusive", "bark", exclusive_release, common_env
         )
-        # The exclusive proof reserves the GPU, gives its queue position back,
-        # and then drains the remaining holders event-driven.
+        # One eligible GPU is reserved, the global queue advances, and the
+        # exclusive proof drains the remaining holders event-driven.
         deadline = time.monotonic() + coordination_timeout_s
         while time.monotonic() < deadline and not (
             _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
@@ -2753,11 +3398,8 @@ def test_exclusive_drain_completes_as_holders_release_in_any_order(
         assert _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
         assert not list(lock_dir.glob("admission-global-*.lock"))
 
-        # Release the holders in a non-sequential order and wait for each one
-        # to actually exit (its slot flock is then provably dropped) before
-        # releasing the next, so the out-of-order arrival at the drain is
-        # deterministic rather than scheduler-dependent: slot 1 frees while
-        # slot 0 is still held, forcing the drain to sit blocked on slot 0.
+        # Release holders in a non-sequential order. Waiting on fixed slot order
+        # must still complete after every holder exits.
         for index in (1, 0, 2):
             releases[index].touch()
             holder = holders[index]
@@ -2791,7 +3433,7 @@ def test_long_queue_is_served_in_strict_fifo_order(tmp_path: Path) -> None:
     waiter_release = tmp_path / "release-waiter"
     waiter_release.touch()
     holder, holder_output = _start_proof_case(
-        tmp_path, "holder", "m2m_100", holder_release, common_env
+        tmp_path, "holder", "albert", holder_release, common_env
     )
     waiters: list[subprocess.Popen[str] | None] = [None] * waiter_count
     waiter_outputs: list[Path] = []
@@ -2897,5 +3539,7 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     )
     assert (
         "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "
-        "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || '3600' }}" in workflow
+        "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || "
+        "(inputs.suite == 'nightly' && '5400' || '3600') }}"
+        in workflow
     )

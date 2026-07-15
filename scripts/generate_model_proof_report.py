@@ -74,6 +74,67 @@ def _parse_expected_models(raw: str, issues: list[str]) -> list[str]:
     return models
 
 
+def _parse_expected_cases_by_model(
+    raw: str | None,
+    expected_models: list[str],
+    issues: list[str],
+) -> dict[str, list[str]] | None:
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        issues.append(f"expected cases by model JSON is invalid: {exc}")
+        return {}
+    if not isinstance(payload, dict):
+        issues.append("expected cases by model must be a JSON object")
+        return {}
+
+    expected_set = set(expected_models)
+    valid_keys = {
+        key
+        for key in payload
+        if isinstance(key, str) and _SAFE_MODEL_RE.fullmatch(key) is not None
+    }
+    invalid_keys = sorted(repr(key) for key in payload if key not in valid_keys)
+    if invalid_keys:
+        issues.append(f"expected cases by model has invalid owner keys: {invalid_keys}")
+    missing = sorted(expected_set - valid_keys)
+    unexpected = sorted(valid_keys - expected_set)
+    if missing:
+        issues.append(f"expected cases by model is missing owners: {missing}")
+    if unexpected:
+        issues.append(f"expected cases by model has unexpected owners: {unexpected}")
+
+    parsed: dict[str, list[str]] = {}
+    for model in expected_models:
+        raw_cases = payload.get(model)
+        if not isinstance(raw_cases, list) or not raw_cases:
+            issues.append(f"{model}: expected nightly cases must be a non-empty array")
+            parsed[model] = []
+            continue
+        names: list[str] = []
+        for index, value in enumerate(raw_cases):
+            if (
+                not isinstance(value, str)
+                or not value
+                or "/" in value
+                or "\\" in value
+                or value in {".", ".."}
+            ):
+                issues.append(
+                    f"{model}: expected nightly case {index} is unsafe: {value!r}"
+                )
+                continue
+            names.append(value)
+        if names != sorted(names):
+            issues.append(f"{model}: expected nightly cases are not sorted")
+        if len(names) != len(set(names)):
+            issues.append(f"{model}: expected nightly cases contain duplicates")
+        parsed[model] = names
+    return parsed
+
+
 def _parse_upstream_results(raw_results: list[str], issues: list[str]) -> dict[str, str]:
     results: dict[str, str] = {}
     for raw in raw_results:
@@ -200,6 +261,72 @@ def _raw_result_cases(
     return names, payloads
 
 
+def _validate_nightly_diffusion_assessments(
+    results: list[dict[str, Any]], revision: str, issues: list[str]
+) -> None:
+    diffusion_results = [
+        result
+        for result in results
+        if not result.get("_summary_only")
+        and isinstance(result.get("case_config"), dict)
+        and result["case_config"].get("task_strategy")
+        == "diffusion_media_generation"
+    ]
+    expected_cases = sorted(
+        str(result.get("case_name") or "") for result in diffusion_results
+    )
+    if not expected_cases:
+        return
+    if any(not case_name for case_name in expected_cases):
+        issues.append("nightly diffusion results contain an empty case name")
+        return
+    if len(expected_cases) != len(set(expected_cases)):
+        issues.append(
+            f"nightly diffusion results contain duplicate cases: {expected_cases!r}"
+        )
+        return
+
+    for result in diffusion_results:
+        case_name = str(result.get("case_name"))
+        assessment = result.get("vlm_assessment")
+        if not isinstance(assessment, dict):
+            issues.append(f"{case_name}: required nightly diffusion assessment is missing")
+            continue
+        judgment = assessment.get("vlm_judgment")
+        gate = judgment.get("vlm_gate") if isinstance(judgment, dict) else None
+        if not isinstance(gate, dict) or gate.get("failed") is not False:
+            issues.append(f"{case_name}: nightly diffusion semantic gate is not passing")
+
+        provenance = assessment.get("_assessment_provenance")
+        if not isinstance(provenance, dict):
+            issues.append(f"{case_name}: diffusion assessment provenance is missing")
+            continue
+        required = {
+            "source_revision": revision,
+            "coverage_complete": True,
+            "expected_case_names": expected_cases,
+            "assessed_case_names": expected_cases,
+        }
+        for field, expected in required.items():
+            if provenance.get(field) != expected:
+                issues.append(
+                    f"{case_name}: diffusion assessment {field} is "
+                    f"{provenance.get(field)!r}, expected {expected!r}"
+                )
+        run_id = provenance.get("workflow_run_id")
+        if not isinstance(run_id, str) or not run_id.isdigit():
+            issues.append(f"{case_name}: diffusion assessment workflow_run_id is invalid")
+        run_attempt = provenance.get("workflow_run_attempt")
+        if (
+            not isinstance(run_attempt, int)
+            or isinstance(run_attempt, bool)
+            or run_attempt < 1
+        ):
+            issues.append(
+                f"{case_name}: diffusion assessment workflow_run_attempt is invalid"
+            )
+
+
 def _check_equal(issues: list[str], model: str, label: str, actual: Any, expected: Any) -> None:
     if actual != expected:
         issues.append(f"{model}: {label} must be {expected!r}, found {actual!r}")
@@ -229,7 +356,30 @@ def _fallback_html(title: str, issues: list[str]) -> str:
 def compose(args: argparse.Namespace) -> int:
     issues: list[str] = []
     expected_models = _parse_expected_models(args.expected_models, issues)
+    expected_cases_by_model = _parse_expected_cases_by_model(
+        args.expected_cases_by_model,
+        expected_models,
+        issues,
+    )
     upstream_results = _parse_upstream_results(args.upstream_result, issues)
+    expected_result_count = args.expected_result_count
+    if args.suite == "nightly":
+        if args.expected_cases_by_model is None:
+            issues.append("nightly requires expected cases by model")
+        if expected_result_count is None:
+            issues.append("nightly requires an expected result count")
+    if expected_result_count is not None and expected_result_count < 0:
+        issues.append("expected result count must be non-negative")
+    if expected_cases_by_model is not None and expected_result_count is not None:
+        mapped_result_count = sum(
+            len(cases) for cases in expected_cases_by_model.values()
+        )
+        if mapped_result_count != expected_result_count:
+            issues.append(
+                "expected cases by model contains "
+                f"{mapped_result_count} cases; expected result count is "
+                f"{expected_result_count}"
+            )
     expected_set = set(expected_models)
     parts_dir = args.parts_dir
     if not re.fullmatch(r"[0-9a-f]{40}", args.revision):
@@ -304,6 +454,7 @@ def compose(args: argparse.Namespace) -> int:
 
     proof_contexts: list[dict[str, Any]] = []
     all_results: list[dict[str, Any]] = []
+    certified_result_count = 0
     case_owners: dict[str, str] = {}
     model_entries: list[dict[str, Any]] = []
 
@@ -438,6 +589,19 @@ def compose(args: argparse.Namespace) -> int:
 
         selected_cases = _selected_case_names(selection, model, model_issues)
         result_cases, raw_results = _raw_result_cases(artifacts_root, model, model_issues)
+        certified_result_count += len(raw_results)
+        if expected_cases_by_model is not None:
+            inventory_cases = expected_cases_by_model.get(model, [])
+            if selected_cases != inventory_cases:
+                model_issues.append(
+                    f"{model}: selected E2E cases {selected_cases!r} do not exactly "
+                    f"match inventory cases {inventory_cases!r}"
+                )
+            if result_cases != inventory_cases:
+                model_issues.append(
+                    f"{model}: result E2E cases {result_cases!r} do not exactly "
+                    f"match inventory cases {inventory_cases!r}"
+                )
         if set(selected_cases) != set(result_cases) or len(selected_cases) != len(result_cases):
             model_issues.append(
                 f"{model}: selected E2E cases {sorted(selected_cases)!r} do not "
@@ -525,10 +689,24 @@ def compose(args: argparse.Namespace) -> int:
             }
         )
 
+    if (
+        expected_result_count is not None
+        and certified_result_count != expected_result_count
+    ):
+        issues.append(
+            "combined report contains "
+            f"{certified_result_count} certified E2E results; "
+            f"expected exactly {expected_result_count}"
+        )
+
+    if args.suite == "nightly":
+        _validate_nightly_diffusion_assessments(all_results, args.revision, issues)
+
     # The per-model path uses 32 MiB so normal audio/video evidence remains
     # visible.  Apply the same bounded limit to the combined report.
     e2e_report._MAX_EMBED_BYTES = _MAX_EMBED_BYTES
-    title = f"Premerge Isolated Model Report: {args.revision[:12]}"
+    suite_title = "Nightly" if args.suite == "nightly" else "Premerge"
+    title = f"{suite_title} Isolated Model Report: {args.revision[:12]}"
     try:
         html_content = e2e_report.render_report(
             all_results,
@@ -570,13 +748,17 @@ def compose(args: argparse.Namespace) -> int:
         "selected_artifact_count": sum(
             entry.get("artifact_root") is not None for entry in model_entries
         ),
-        "result_count": len(all_results),
+        "result_count": certified_result_count,
         "issue_count": len(issues),
         "issues": issues,
         "report": args.output.name,
         "report_exists": output_written,
         "models": model_entries,
     }
+    if expected_result_count is not None:
+        status_payload["expected_result_count"] = expected_result_count
+    if expected_cases_by_model is not None:
+        status_payload["expected_cases_by_model"] = expected_cases_by_model
     status_written = False
     try:
         args.status_output.parent.mkdir(parents=True, exist_ok=True)
@@ -601,11 +783,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--parts-dir", type=Path, required=True)
     parser.add_argument("--expected-models", required=True)
+    parser.add_argument(
+        "--expected-cases-by-model",
+        help="Exact sorted nightly E2E case names keyed by ownership model.",
+    )
     parser.add_argument("--revision", required=True)
     parser.add_argument("--suite", choices=("premerge", "nightly"), required=True)
     parser.add_argument("--project-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--status-output", type=Path, required=True)
+    parser.add_argument(
+        "--expected-result-count",
+        type=int,
+        help="Require exactly this many certified raw E2E result records.",
+    )
     parser.add_argument(
         "--upstream-result",
         action="append",

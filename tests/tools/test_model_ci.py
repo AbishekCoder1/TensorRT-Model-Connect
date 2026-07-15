@@ -83,6 +83,7 @@ def _add_model(
                 "name": logical_id,
                 "family": logical_id,
                 "runtime_strategy": strategy,
+                "testcases": [{"name": logical_id}],
             }
         )
         + "\n",
@@ -144,6 +145,7 @@ def _make_repo(
     _write(repo, "scripts/reporting/__init__.py", "")
     _write(repo, "scripts/reporting/vlm_assessment.py", "# report component\n")
     _write(repo, "scripts/schedule_e2e.py", "# shared E2E scheduler\n")
+    _write(repo, "scripts/hf_cache_download_worker.py", "# cache download worker\n")
     _write(repo, "scripts/warm_hf_cache.py", "# cache check\n")
     _write(repo, "tools/__init__.py", "")
     _write(repo, "tools/diff_logits.py", "# shared logits diff\n")
@@ -224,6 +226,11 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
             {"model": "model_b", "selection_kind": "direct"},
         ]
     }
+    assert result["expected_cases_by_model"] == {
+        "model_a": ["model_a"],
+        "model_b": ["model_b"],
+    }
+    assert result["expected_result_count"] == 2
     assert output.read_text(encoding="utf-8").splitlines() == [
         'matrix={"include":[{"model":"model_a","selection_kind":"direct"},'
         '{"model":"model_b","selection_kind":"direct"}]}',
@@ -235,30 +242,97 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
         "mode=all",
         "run_unit_tests=false",
         "unit_scope=none",
+        'expected_cases_by_model={"model_a":["model_a"],"model_b":["model_b"]}',
+        "expected_result_count=2",
     ]
 
 
-def test_matrix_schedules_unknown_then_longest_known_premerge_models(
+def test_validate_rejects_multi_gpu_case_outside_multi_device_tier(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["build_args"] = {
+        "parallel": {"mode": "tensor_parallel", "tp_size": 4}
+    }
+    manifest["distributed_runtime"] = {"enabled": True, "world_size": 4}
+    manifest["testcases"] = [{"name": "model_a-tp4", "ci_tier": "nightly_only"}]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    revision = _commit(repo, "add invalid tp4 tier")
+
+    result = _run(repo, "validate", "--revision", revision, check=False)
+
+    assert result.returncode != 0
+    assert "requires 4 GPUs" in result.stderr
+    assert "ci_tier='multi_device'" in result.stderr
+
+
+def test_validate_uses_gpu_count_preflight_for_device_tier(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["testcases"] = [
+        {
+            "name": "model_a-multi-gpu",
+            "ci_tier": "nightly_only",
+            "preflight_requirements": [
+                {"kind": "gpu_count_min", "args": {"count": 2}, "gating": True}
+            ],
+        }
+    ]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    revision = _commit(repo, "add invalid multi-gpu preflight tier")
+
+    result = _run(repo, "validate", "--revision", revision, check=False)
+
+    assert result.returncode != 0
+    assert "requires 2 GPUs" in result.stderr
+    assert "ci_tier='multi_device'" in result.stderr
+
+
+def test_nightly_matrix_schedules_exclusive_then_shared_and_longest_first(
     tmp_path: Path,
 ) -> None:
     repo, _ = _make_repo(tmp_path)
-    for model, seconds in (("model_a", 25), ("model_b", 200)):
+    for model in ("model_c", "model_d", "model_e", "model_f"):
+        _add_model(repo, model)
+    estimates = {
+        "model_a-fast": 100,
+        "model_a-slow": 150,
+        "model_b-case": 200,
+        "model_d-fast": 150,
+        "model_d-slow": 200,
+        "model_e-case": 300,
+    }
+    for model in ("model_a", "model_b", "model_c", "model_d", "model_e", "model_f"):
         manifest_path = repo / f"tests/e2e/models/{model}/manifests/{model}.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["testcases"] = [{"name": f"{model}-case", "ci_tier": "l0_only"}]
+        if model == "model_a":
+            manifest["testcases"] = [
+                {"name": "model_a-fast", "ci_tier": "contract_only"},
+                {"name": "model_a-slow", "ci_tier": "contract_only"},
+                {"name": "model_a-tp", "ci_tier": "multi_device"},
+            ]
+        elif model == "model_d":
+            manifest["testcases"] = [
+                {"name": "model_d-fast", "ci_tier": "l0_only"},
+                {"name": "model_d-slow", "ci_tier": "l0_only"},
+            ]
+        elif model in {"model_c", "model_f"}:
+            manifest["testcases"] = [
+                {"name": f"{model}-nightly", "ci_tier": "nightly_only"}
+            ]
+        else:
+            manifest["testcases"] = [{"name": f"{model}-case", "ci_tier": "l0_only"}]
+        if model in {"model_d", "model_e", "model_f"}:
+            manifest["e2e_parallel_resource"] = "exclusive_gpu"
         manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
-        if model == "model_b":
-            _add_model(repo, "model_c")
     _write(
         repo,
         "tests/e2e/timing_estimates.json",
         json.dumps(
             {
                 "schema_version": 1,
-                "estimates_s": {
-                    "model_a-case": 25,
-                    "model_b-case": 200,
-                },
+                "estimates_s": estimates,
             }
         )
         + "\n",
@@ -267,16 +341,50 @@ def test_matrix_schedules_unknown_then_longest_known_premerge_models(
 
     result = json.loads(_run(repo, "all", "--revision", revision).stdout)
 
-    # model_c has no estimate, so it runs first conservatively. The known
-    # models then follow longest-processing-time order.
-    assert result["affected_models"] == ["model_a", "model_b", "model_c"]
+    # Exclusive-GPU models are emitted first. A selected nightly-only case with
+    # no timing makes the owner unknown. Known durations sum every selected
+    # production case, or every L0 case when it is the owner's nightly fallback.
+    assert result["affected_models"] == [
+        "model_a",
+        "model_b",
+        "model_c",
+        "model_d",
+        "model_e",
+        "model_f",
+    ]
     assert result["matrix"] == {
         "include": [
+            {"model": "model_f", "selection_kind": "direct"},
+            {"model": "model_d", "selection_kind": "direct"},
+            {"model": "model_e", "selection_kind": "direct"},
             {"model": "model_c", "selection_kind": "direct"},
-            {"model": "model_b", "selection_kind": "direct"},
             {"model": "model_a", "selection_kind": "direct"},
+            {"model": "model_b", "selection_kind": "direct"},
         ]
     }
+    assert result["expected_cases_by_model"] == {
+        "model_a": ["model_a-fast", "model_a-slow"],
+        "model_b": ["model_b-case"],
+        "model_c": ["model_c-nightly"],
+        "model_d": ["model_d-fast", "model_d-slow"],
+        "model_e": ["model_e-case"],
+        "model_f": ["model_f-nightly"],
+    }
+    assert result["expected_result_count"] == 8
+
+
+def test_all_rejects_an_owner_without_a_single_gpu_nightly_case(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path, model_ids=("model_a",))
+    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["testcases"] = [{"name": "model_a-tp", "ci_tier": "multi_device"}]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    revision = _commit(repo, "leave no single gpu case")
+
+    result = _run(repo, "all", "--revision", revision, check=False)
+
+    assert result.returncode == 2
+    assert "model 'model_a' has no active single-GPU nightly E2E case" in result.stderr
 
 
 def test_impact_selects_only_model_a(tmp_path: Path) -> None:
@@ -297,6 +405,37 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
     assert result["matrix"] == {"include": [{"model": "model_a", "selection_kind": "direct"}]}
     assert result["run_unit_tests"] is False
     assert result["unit_scope"] == "none"
+
+
+def test_impact_allows_head_to_migrate_legacy_multi_gpu_tier(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["build_args"] = {
+        "parallel": {"mode": "tensor_parallel", "tp_size": 4}
+    }
+    manifest["distributed_runtime"] = {"enabled": True, "world_size": 4}
+    manifest["testcases"] = [{"name": "model_a-tp4", "ci_tier": "nightly_only"}]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    base = _commit(repo, "add legacy tp4 tier")
+
+    base_validation = _run(repo, "validate", "--revision", base, check=False)
+    assert base_validation.returncode == 2
+    assert "ci_tier='multi_device'" in base_validation.stderr
+
+    manifest["testcases"] = [{"name": "model_a-tp4", "ci_tier": "multi_device"}]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    head = _commit(repo, "migrate tp4 tier")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["affected_models"] == ["model_a"]
+    assert result["direct_models"] == ["model_a"]
+    assert json.loads(_run(repo, "validate", "--revision", head).stdout)["models"] == [
+        "model_a",
+        "model_b",
+    ]
 
 
 def test_impact_selects_each_modified_model_once(tmp_path: Path) -> None:
@@ -796,6 +935,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "scripts/reporting/__init__.py",
         "scripts/reporting/vlm_assessment.py",
         "scripts/schedule_e2e.py",
+        "scripts/hf_cache_download_worker.py",
         "scripts/warm_hf_cache.py",
         "tools/__init__.py",
         "tools/diff_logits.py",
