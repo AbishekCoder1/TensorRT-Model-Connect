@@ -85,7 +85,7 @@ auto final = stream->finish();
 trtmc::TranscriptionConfig cfg;
 cfg.input_sample_rate = 16000;
 cfg.max_output_tokens = 80;
-cfg.beam_size = 4;
+cfg.beam_size = 2;
 cfg.source_language = "en";
 cfg.target_language = "fr";
 cfg.task = trtmc::TranscriptionTask::kTranslate;
@@ -103,8 +103,9 @@ for (const auto& segment : result.segments) {
 
 `transcribe_batch(const std::vector<TranscriptionRequest>&)` preserves each
 request's samples and config. The default implementation is sequential and
-returns results in request order. The legacy max-token/sample-rate overload is
-still supported.
+returns results in request order. Canary overrides it with native batches of up
+to 16 encoder inputs and a 32-lane decoder, including batched beam search. The
+legacy max-token/sample-rate overload is still supported.
 
 ## C ABI
 

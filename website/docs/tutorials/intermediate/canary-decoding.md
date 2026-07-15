@@ -59,14 +59,20 @@ The source and target must differ for `translate`; one of them must be `en`.
   --source-language en \
   --target-language fr \
   --task translate \
-  --beam-size 4 \
+  --beam-size 2 \
   --max-new-tokens 120
 ```
 
 `--beam-size 1` is the backward-compatible greedy path. Values from 2 through
-16 use deterministic beam search. The current engine stores one decoder
-hypothesis, so beam search replays candidate prefixes and trades throughput for
-search quality.
+16 use deterministic beam search. Beam branches retain their decoder KV cache,
+so each surviving hypothesis advances by one decoder call instead of replaying
+its full prefix. Beam search still performs more decoder work than greedy;
+start with beam size 2 and validate quality and latency on representative audio.
+
+Canary uses a fixed beam length penalty of `1.0`: cumulative token log
+probability is divided by decoded length. This default ranks by average token
+log probability and avoids an inherent preference for short hypotheses. It is
+applied automatically by both the CLI and C++ API.
 
 Use `--no-punctuation` to request the checkpoint's no-punctuation prompt and
 remove remaining punctuation from decoded text. `--punctuation` is the default.
@@ -116,6 +122,12 @@ results retain input order, and every output line starts with its source path.
   --beam-size 2
 ```
 
+Canary bundles use a dynamic encoder batch from 1 through 16. The decoder has
+32 lanes so a batch of 16 can run the recommended beam size 2 in one decoder
+step. Larger CLI batches are split automatically while preserving input order.
+Beam sizes above 2 reduce the number of requests in each decoder chunk because
+each hypothesis occupies one decoder lane.
+
 ## C++ API
 
 The C++ batch API carries a complete configuration per request:
@@ -135,7 +147,7 @@ english.config.target_language = "en";
 
 trtmc::TranscriptionRequest translation = english;
 translation.audio_samples = second_pcm;
-translation.config.beam_size = 4;
+translation.config.beam_size = 2;
 translation.config.target_language = "fr";
 translation.config.task = trtmc::TranscriptionTask::kTranslate;
 translation.config.timestamps = true;
@@ -144,9 +156,12 @@ std::vector<trtmc::TextResult> results =
     pipeline->transcribe_batch({english, translation});
 ```
 
-The default batch implementation executes requests sequentially and preserves
-their order and individual configs. The legacy four-argument `transcribe`
-overload remains available and maps to the default greedy configuration.
+Canary validates every request before execution, groups requests by beam size,
+and processes up to 16 encoder inputs together. Mel extraction runs in parallel,
+and greedy or beam decoding advances all active requests in lockstep. Results
+preserve request and segment order even when per-request configs cause separate
+decoder groups. The legacy four-argument `transcribe` overload remains
+available and maps to the default greedy configuration.
 
 Unsupported languages, mismatched task/language combinations, invalid beam
 sizes, excessive output lengths, and invalid duration values throw

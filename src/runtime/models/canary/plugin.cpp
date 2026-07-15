@@ -13,6 +13,7 @@
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <algorithm>
 #include <exception>
 #include <limits>
 #include <string>
@@ -49,8 +50,18 @@ int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
 }
 
 int32_t decoder_cache_row_width(const TrtModule& module, const BaseConfig& config) {
-    const int32_t from_engine = dim_at(module.tensor_shape("cache_k_0"), 1);
+    const auto shape = module.tensor_shape("cache_k_0");
+    const int32_t from_engine =
+        shape.empty() ? -1 : dim_at(shape, static_cast<int32_t>(shape.size()) - 1);
     return from_engine > 0 ? from_engine : compute_kv_dim(config);
+}
+
+int32_t decoder_batch_capacity(const TrtModule& module) {
+    if (!module.input_is_dynamic("token_id"))
+        return 1;
+    const auto shape =
+        module.input_profile_shape("token_id", module.profile_idx(), ProfileShapeSelector::kMax);
+    return std::max(dim_at(shape, 0), 1);
 }
 
 bool canary_cuda_graph_disabled(const PipelineContext& ctx) {
@@ -111,23 +122,17 @@ class CanaryPlugin final : public IPipelinePlugin {
         int32_t eot_token_id = extract_json_int(json, "eot_token_id", -1);
         wc.eot_token_id = (eot_token_id >= 0) ? eot_token_id : ctx.config.id_eos;
         wc.mel_length = extract_json_int(json, "mel_length", 0);
-        wc.decoder_start_token_ids =
-            extract_json_int_array(json, "decoder_start_token_ids", 256);
+        wc.decoder_start_token_ids = extract_json_int_array(json, "decoder_start_token_ids", 256);
         wc.supported_languages = extract_json_string_array(json, "canary_supported_languages");
-        wc.language_token_ids =
-            extract_json_int_array(json, "canary_language_token_ids", 256);
-        wc.source_language_position =
-            extract_json_int(json, "canary_source_language_position", 4);
-        wc.target_language_position =
-            extract_json_int(json, "canary_target_language_position", 5);
+        wc.language_token_ids = extract_json_int_array(json, "canary_language_token_ids", 256);
+        wc.source_language_position = extract_json_int(json, "canary_source_language_position", 4);
+        wc.target_language_position = extract_json_int(json, "canary_target_language_position", 5);
         wc.punctuation_position = extract_json_int(json, "canary_punctuation_position", 6);
         wc.timestamp_position = extract_json_int(json, "canary_timestamp_position", 8);
         wc.punctuation_token_id = extract_json_int(json, "canary_punctuation_token_id", -1);
-        wc.no_punctuation_token_id =
-            extract_json_int(json, "canary_no_punctuation_token_id", -1);
+        wc.no_punctuation_token_id = extract_json_int(json, "canary_no_punctuation_token_id", -1);
         wc.timestamp_token_id = extract_json_int(json, "canary_timestamp_token_id", -1);
-        wc.no_timestamp_token_id =
-            extract_json_int(json, "canary_no_timestamp_token_id", -1);
+        wc.no_timestamp_token_id = extract_json_int(json, "canary_no_timestamp_token_id", -1);
         wc.translation_requires_english =
             extract_json_bool(json, "canary_translation_requires_english", true);
         wc.disable_cuda_graph = canary_cuda_graph_disabled(ctx);
@@ -137,8 +142,9 @@ class CanaryPlugin final : public IPipelinePlugin {
         int32_t kv_dim = decoder_cache_row_width(*dec_loaded.module, ctx.config);
         int32_t max_cache = ctx.config.max_cache_length;
         DType cache_dtype = dec_loaded.module->tensor_dtype("cache_k_0");
-        std::unique_ptr<CanaryInferenceState> state =
-            std::make_unique<CanaryKvCache>(dl, max_cache, kv_dim, stream, cache_dtype);
+        const int32_t batch_capacity = decoder_batch_capacity(*dec_loaded.module);
+        std::unique_ptr<CanaryInferenceState> state = std::make_unique<CanaryKvCache>(
+            dl, max_cache, kv_dim, stream, cache_dtype, batch_capacity);
         if (!state->ok())
             throw std::runtime_error("Failed to create CanaryKvCache for Canary decoder");
 
