@@ -837,19 +837,29 @@ pytest tests/builder/ -m trt -v
 
 ---
 
+## CI orchestration
+
+The class-based CI control flow is documented in the
+[CI orchestration tutorial](../../../tools/ci/README.md). Start there to follow
+the `run-ci` trigger through impact analysis, unit gates, isolated model proofs,
+GPU scheduling, and the combined HTML report.
+
+---
+
 ## Coverage
 
-Coverage is configured in `pyproject.toml` and enforced by dedicated scripts.
+Coverage is configured in `pyproject.toml` and enforced by the class-based CI
+module.
 
 ```bash
 # Python gates (line and branch coverage must be 100%)
-tools/coverage/python_coverage.sh -v --ignore=tests/builder/test_cli.py
+python3 -m tools.ci coverage python -v --ignore=tests/builder/test_cli.py
 
 # C++ gate (line/function/branch coverage must each be 100%)
-tools/coverage/cpp_coverage.sh
+python3 -m tools.ci coverage cpp
 
 # Combined local run
-tools/coverage/run_coverage_all.sh
+python3 -m tools.ci coverage all
 ```
 
 Configuration:
@@ -858,14 +868,12 @@ Configuration:
 - **Excluded lines**: `pragma: no cover`, `if __name__ == "__main__"`, `raise NotImplementedError`
 
 CI integration (GitHub Actions):
-- `coverage-python` runs `tools/coverage_ci/run_python_coverage.sh`
-  - Emits `coverage/python-cobertura.xml`
-  - Enforces line=100% and branch=100%
-  - Uploads Cobertura artifacts
-- `coverage-cpp` runs `tools/coverage_ci/run_cpp_coverage.sh`
-  - Emits `coverage/cpp-cobertura.xml`
-  - Uploads Cobertura artifacts
-- Both jobs are hard gates in the test DAG before smoke/E2E jobs.
+- `python3 -m tools.ci stage python-builder` runs the selected Python tests and emits
+  `coverage/python-cobertura.xml`.
+- `python3 -m tools.ci stage cpp-coverage` runs the selected C++ coverage scope and emits
+  `coverage/cpp-cobertura.xml`.
+- `tools/ci/coverage.py` owns test execution, report generation, artifact validation, and the
+  configured CI thresholds. It does not delegate coverage work to shell scripts.
 
 Note:
 - Python function coverage is not natively reported by `coverage.py`; Python gates therefore enforce line + branch.
