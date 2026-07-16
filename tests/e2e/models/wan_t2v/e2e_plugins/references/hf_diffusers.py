@@ -17,7 +17,15 @@ import time
 from pathlib import Path
 
 from .. import _case_artifact_dir
-from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..contracts import (
+    E2ECase,
+    RunContext,
+    StageOutput,
+    StageSpec,
+    ensure_initial_latents,
+    normalize_wan_prompt,
+    uses_shared_initial_latents,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +101,9 @@ class HfDiffusersReference:
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
         model_ref = _resolve_cached_model_ref(case.hf_id)
-        prompt = case.inputs.get("prompt", "A cat sitting on a beach")
+        prompt = normalize_wan_prompt(
+            case.inputs.get("prompt", "A cat sitting on a beach")
+        )
         python = ctx.reference_python_path() or sys.executable
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -122,7 +132,7 @@ if shared is not None and embed is not None and shared.weight.shape == embed.wei
         pipe.text_encoder.encoder.embed_tokens = pipe.text_encoder.shared
 tokens = pipe.tokenizer(
     {prompt!r}, return_tensors="pt", padding="max_length",
-    max_length={int(case.inputs.get("text_max_length", 512))}, truncation=True)
+    max_length={int(case.inputs.get("text_max_length", 226))}, truncation=True)
 with torch.no_grad():
     t5_out = pipe.text_encoder(
         input_ids=tokens.input_ids,
@@ -156,13 +166,41 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
         model_ref = _resolve_cached_model_ref(case.hf_id)
+        # WanPipeline applies Diffusers ``prompt_clean`` internally. Passing
+        # the original prompt avoids cleaning nested entities twice; the TRT
+        # runner performs the equivalent single normalization before native
+        # tokenization.
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
         video_height = case.inputs.get("video_height", 480)
         video_width = case.inputs.get("video_width", 832)
         video_num_frames = case.inputs.get("video_num_frames", 17)
         guidance_scale = float(case.inputs.get("guidance_scale", 5.0))
+        text_max_length = int(case.inputs.get("text_max_length", 226))
         python = ctx.reference_python_path() or sys.executable
+        initial_latents = (
+            ensure_initial_latents(case, ctx)
+            if uses_shared_initial_latents(case)
+            else None
+        )
+
+        if initial_latents is not None:
+            latent_setup = f"""
+raw_latents = np.fromfile({str(initial_latents.path)!r}, dtype=np.float32)
+expected_shape = {initial_latents.shape!r}
+expected_size = int(np.prod(expected_shape))
+if raw_latents.size != expected_size:
+    raise RuntimeError(
+        f"Wan shared latents size {{raw_latents.size}} does not match "
+        f"expected {{expected_shape}} = {{expected_size}}"
+    )
+initial_latents = torch.from_numpy(raw_latents.reshape(expected_shape)).to(
+    device="cuda", dtype=torch.float32)
+"""
+            generation_input = "latents=initial_latents,"
+        else:
+            latent_setup = ""
+            generation_input = ""
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -195,13 +233,16 @@ if shared is not None and embed is not None and shared.weight.shape == embed.wei
     if shared.weight.data_ptr() != embed.weight.data_ptr():
         pipe.text_encoder.encoder.embed_tokens = pipe.text_encoder.shared
 pipe.to("cuda")
+{latent_setup}
 output = pipe(
     prompt={prompt!r},
+    max_sequence_length={text_max_length},
     num_inference_steps={num_steps},
     height={video_height},
     width={video_width},
     num_frames={video_num_frames},
     guidance_scale={guidance_scale},
+    {generation_input}
     generator=torch.Generator("cuda").manual_seed({int(case.inputs.get("seed", case.determinism.get("seed", 42)))}),
 )
 frames = output.frames[0]
@@ -226,15 +267,23 @@ print(f"Generated {{len(frames)}} frames")
         frame_files = sorted(Path(frames_dir).glob("frame_*.png"))
         if result.returncode != 0:
             logger.error("Wan HF reference failed (rc=%d): %s", result.returncode, result.stderr[-500:])
+        data = {
+            "returncode": result.returncode,
+            "num_frames": len(frame_files),
+            "frames_dir": frames_dir,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+        if initial_latents is not None:
+            data.update(
+                {
+                    "initial_latents_path": str(initial_latents.path),
+                    "initial_latents_sha256": initial_latents.sha256,
+                }
+            )
         return StageOutput(
             stage_name=stage.name,
-            data={
-                "returncode": result.returncode,
-                "num_frames": len(frame_files),
-                "frames_dir": frames_dir,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-            },
+            data=data,
             text=result.stdout,
             timing_s=elapsed,
             metadata={"backend": "hf_diffusers"},

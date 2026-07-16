@@ -9,6 +9,7 @@ import ast
 import copy
 import csv
 import gc
+import hashlib
 import html
 import json
 import math
@@ -21,6 +22,8 @@ import traceback
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 import warnings
 from collections import Counter, defaultdict
 from itertools import product
@@ -51,6 +54,26 @@ DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
 CHOICE_LETTERS = set("ABCDEFGHIJ")
 GPT_OSS_MMLU_SYSTEM_PROMPT = "You are a helpful assistant. Answer with only the option letter."
+_DIFFUSION_SAMPLE_INPUT_FIELDS = frozenset(
+    {
+        "action",
+        "camera_intrinsics",
+        "camera_intrinsics_file",
+        "image",
+        "image_path",
+        "prompt_file",
+        "rotation_speed_deg",
+        "translation_speed",
+    }
+)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def load_structured_file(path: Path) -> dict[str, Any]:
@@ -91,6 +114,260 @@ def suite_by_id(suites: list[dict[str, Any]], suite_id: str) -> dict[str, Any]:
             return suite
     known = ", ".join(sorted(s["id"] for s in suites))
     raise ValueError(f"Unknown suite {suite_id!r}. Known suites: {known}")
+
+
+def validate_ci_suite(suite: dict[str, Any], lane: str) -> dict[str, Any]:
+    ci = suite.get("ci", {})
+    if not isinstance(ci, dict) or ci.get("eligible") is not True:
+        raise ValueError(f"Task-eval suite {suite['id']!r} is not CI-eligible")
+    if str(ci.get("lane", "")) != lane:
+        raise ValueError(
+            f"Task-eval suite {suite['id']!r} belongs to lane "
+            f"{ci.get('lane')!r}, not {lane!r}"
+        )
+    if int(ci.get("limit", 0) or 0) <= 0:
+        raise ValueError(f"Task-eval suite {suite['id']!r} must define a positive CI limit")
+    if not isinstance(ci.get("sample_seed"), int):
+        raise ValueError(f"Task-eval suite {suite['id']!r} must define an integer CI sample seed")
+    models = suite.get("default_model_names", [])
+    if not isinstance(models, list) or not models or not all(isinstance(item, str) for item in models):
+        raise ValueError(f"Task-eval suite {suite['id']!r} has no default CI models")
+    return ci
+
+
+def _verified_ci_dataset(path: Path, expected_sha256: str) -> Path | None:
+    if path.is_file() and _sha256_file(path) == expected_sha256:
+        return path
+    return None
+
+
+def ensure_ci_dataset(
+    suite: dict[str, Any], *, explicit_path: Path | None, cache_root: Path
+) -> Path:
+    dataset = suite.get("dataset", {})
+    if not isinstance(dataset, dict):
+        raise ValueError("CI task-eval dataset configuration must be a mapping")
+    expected_sha256 = str(dataset.get("sha256", ""))
+    if len(expected_sha256) != 64:
+        raise ValueError("CI task-eval dataset must define a SHA-256 digest")
+
+    candidates = [explicit_path] if explicit_path is not None else []
+    if dataset.get("default_path"):
+        candidates.append(Path(str(dataset["default_path"])))
+    for candidate in candidates:
+        verified = _verified_ci_dataset(candidate, expected_sha256)
+        if verified is not None:
+            return verified
+    if explicit_path is not None:
+        raise ValueError("Explicit CI task-eval dataset is missing or has the wrong checksum")
+
+    source = str(dataset.get("source", ""))
+    parsed = urllib.parse.urlparse(source)
+    if parsed.scheme != "https":
+        raise ValueError("CI task-eval dataset source must use HTTPS")
+    filename = Path(parsed.path).name
+    if not filename:
+        raise ValueError("CI task-eval dataset source has no filename")
+    destination = cache_root / str(suite["id"]) / filename
+    verified = _verified_ci_dataset(destination, expected_sha256)
+    if verified is not None:
+        return verified
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    try:
+        with urllib.request.urlopen(source, timeout=60) as response, temporary.open("wb") as stream:
+            shutil.copyfileobj(response, stream)
+        if _sha256_file(temporary) != expected_sha256:
+            raise ValueError("Downloaded CI task-eval dataset has the wrong checksum")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def validate_eval_summary(
+    summary: dict[str, Any], expected_models: list[str]
+) -> tuple[bool, list[dict[str, Any]]]:
+    raw_results = summary.get("results", [])
+    if not isinstance(raw_results, list):
+        return False, []
+    results = [result for result in raw_results if isinstance(result, dict)]
+    actual_models = [str(result.get("model", "")) for result in results]
+    complete = len(results) == len(expected_models) and sorted(actual_models) == sorted(expected_models)
+    return complete and all(result.get("status") == "passed" for result in results), results
+
+
+def _public_ci_result(result: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "suite",
+        "model",
+        "hf_id",
+        "status",
+        "mode",
+        "valid_count",
+        "passed_count",
+        "sample_agreement_rate",
+        "prediction_agreement_rate",
+        "mean_relative_l2",
+        "max_relative_l2",
+        "max_absolute_error",
+        "error_type",
+    )
+    return {key: result[key] for key in keys if key in result}
+
+
+def _public_time_series_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    summary_keys = (
+        "status",
+        "sample_count",
+        "valid_count",
+        "passed_count",
+        "sample_agreement_rate",
+        "mean_relative_l2",
+        "max_relative_l2",
+        "max_absolute_error",
+    )
+    case_keys = (
+        "sample_id",
+        "output_numel",
+        "hf_output_shape",
+        "trtfb_output_shape",
+        "relative_l2",
+        "max_absolute_error",
+        "passed",
+    )
+    gate_keys = ("max_relative_l2", "max_absolute_error", "min_sample_agreement_rate")
+    public = {key: summary[key] for key in summary_keys if key in summary}
+    gates = summary.get("gates", {})
+    if isinstance(gates, dict):
+        public["gates"] = {key: gates[key] for key in gate_keys if key in gates}
+    cases = summary.get("cases", [])
+    if isinstance(cases, list):
+        public["cases"] = [
+            {key: case[key] for key in case_keys if key in case}
+            for case in cases
+            if isinstance(case, dict)
+        ]
+    return public
+
+
+def _ci_metric(value: Any) -> str:
+    return f"{float(value):.6e}" if isinstance(value, (int, float)) else "n/a"
+
+
+def write_public_ci_artifacts(
+    *,
+    suite: dict[str, Any],
+    expected_models: list[str],
+    results: list[dict[str, Any]],
+    work_root: Path,
+    artifact_dir: Path,
+) -> None:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    passed, _ = validate_eval_summary({"results": results}, expected_models)
+    payload = {
+        "suite": suite["id"],
+        "ci": suite["ci"],
+        "models": [_public_ci_result(result) for result in results],
+        "passed": passed,
+        "counts": {
+            "expected": len(expected_models),
+            "reported": len(results),
+            "passed": sum(result.get("status") == "passed" for result in results),
+            "failed": sum(result.get("status") == "failed" for result in results),
+            "skipped": sum(result.get("status") == "skipped" for result in results),
+        },
+    }
+    (artifact_dir / "eval_summary.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    lines = [
+        f"# {suite['id']} task-eval CI",
+        "",
+        f"- Passed: `{str(passed).lower()}`",
+        f"- Models: `{len(results)}/{len(expected_models)}`",
+        "",
+        "| Model | Status | Agreement | Max relative-L2 | Max absolute error |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for result in results:
+        lines.append(
+            "| {model} | {status} | {agreement} | {relative} | {absolute} |".format(
+                model=result.get("model", "unknown"),
+                status=result.get("status", "unknown"),
+                agreement=_ci_metric(result.get("sample_agreement_rate")),
+                relative=_ci_metric(result.get("max_relative_l2")),
+                absolute=_ci_metric(result.get("max_absolute_error")),
+            )
+        )
+        model_name = str(result.get("model", ""))
+        numeric_summary = work_root / str(suite["id"]) / model_name / "summary.json"
+        if numeric_summary.is_file():
+            destination = artifact_dir / "models" / model_name / "summary.json"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            raw_summary = json.loads(numeric_summary.read_text(encoding="utf-8"))
+            if not isinstance(raw_summary, dict):
+                raise ValueError(f"Invalid time-series summary for {model_name!r}")
+            destination.write_text(
+                json.dumps(_public_time_series_summary(raw_summary), indent=2, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
+    report = "\n".join(lines) + "\n"
+    (artifact_dir / "summary.md").write_text(report, encoding="utf-8")
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
+            stream.write(report)
+
+
+def configure_ci_eval(args: argparse.Namespace, suite: dict[str, Any]) -> list[str]:
+    ci = validate_ci_suite(suite, args.ci_lane)
+    default_models = list(suite["default_model_names"])
+    requested_models = list(dict.fromkeys(args.model))
+    unknown_models = sorted(set(requested_models) - set(default_models))
+    if unknown_models:
+        raise ValueError(f"CI task-eval model selection is not allowlisted: {unknown_models}")
+    expected_models = requested_models or default_models
+    if args.limit not in {0, int(ci["limit"])}:
+        raise ValueError("CI task-eval limit must match the suite CI profile")
+    if args.sample_seed not in {None, int(ci["sample_seed"])}:
+        raise ValueError("CI task-eval sample seed must match the suite CI profile")
+    args.model = expected_models
+    args.limit = int(ci["limit"])
+    args.sample_seed = int(ci["sample_seed"])
+    args.single_device_only = True
+    args.local_files_only = True
+    if not args.waive_platform:
+        args.waive_platform = "GB300"
+    if not args.engine_dir:
+        args.engine_dir = os.environ.get("ENGINE_DIR", "")
+    if not args.engine_dir:
+        raise ValueError("CI task-eval requires --engine-dir")
+    explicit_dataset = Path(args.dataset) if args.dataset else None
+    args.dataset = str(
+        ensure_ci_dataset(
+            suite,
+            explicit_path=explicit_dataset,
+            cache_root=Path(args.dataset_cache_root),
+        )
+    )
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    return expected_models
+
+
+def cmd_prepare_ci_dataset(args: argparse.Namespace) -> int:
+    suite = suite_by_id(load_suites(Path(args.suites)), args.suite)
+    validate_ci_suite(suite, args.ci_lane)
+    dataset = ensure_ci_dataset(
+        suite,
+        explicit_path=Path(args.dataset) if args.dataset else None,
+        cache_root=Path(args.dataset_cache_root),
+    )
+    print(dataset.resolve())
+    return 0
 
 
 def _deep_merge_mappings(*values: Any) -> dict[str, Any]:
@@ -496,7 +773,16 @@ def prepare_mmlu_dataset(
         sample_seed=sample_seed,
     )
     work_dir.mkdir(parents=True, exist_ok=True)
-    requests = [req for _idx, req in indexed]
+    sample_prefix = str(suite.get("dataset", {}).get("sample_prefix", "mmlu"))
+    requests = []
+    for dataset_index, request in indexed:
+        prepared_request = dict(request)
+        prepared_request["sample_id"] = str(
+            request.get("id")
+            or request.get("sample_id")
+            or f"{sample_prefix}_{dataset_index:06d}"
+        )
+        requests.append(prepared_request)
     answers = _copy_dataset_header(data, requests)
     answers_path = work_dir / "answers.json"
     prompts_path = work_dir / "prompts.jsonl"
@@ -504,10 +790,12 @@ def prepare_mmlu_dataset(
 
     answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
     with prompts_path.open("w", encoding="utf-8") as f:
-        for out_idx, (dataset_index, request) in enumerate(indexed):
+        for out_idx, ((dataset_index, request), prepared_request) in enumerate(
+            zip(indexed, requests, strict=True)
+        ):
             prompt = render_mmlu_prompt(_request_prompt(request), task_eval_config)
             sample = {
-                "sample_id": f"mmlu_{dataset_index:06d}",
+                "sample_id": prepared_request["sample_id"],
                 "dataset_index": dataset_index,
                 "eval_index": out_idx,
                 "subject": request.get("subject", ""),
@@ -834,6 +1122,12 @@ def prepare_diffusion_prompt_json_dataset(
     task_eval_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    dataset_config = suite.get("dataset", {})
+    asset_fields = dataset_config.get("asset_fields", [])
+    if not isinstance(asset_fields, list) or not all(
+        isinstance(field, str) for field in asset_fields
+    ):
+        raise ValueError(f"Suite {suite['id']} dataset.asset_fields must be a list of strings")
     requests = data.get("requests")
     if not isinstance(requests, list):
         raise ValueError(f"{dataset_path}: expected top-level 'requests' list")
@@ -853,6 +1147,21 @@ def prepare_diffusion_prompt_json_dataset(
         prepared.setdefault("dataset_index", source_position)
         prepared.setdefault("category", category)
         prepared.setdefault("challenge", "")
+        for field in asset_fields:
+            value = prepared.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"{dataset_path}: request {source_position} has no {field!r} asset"
+                )
+            asset_path = Path(value)
+            if not asset_path.is_absolute():
+                asset_path = dataset_path.parent / asset_path
+            if not asset_path.is_file():
+                raise FileNotFoundError(
+                    f"{dataset_path}: request {source_position} {field!r} asset "
+                    f"does not exist: {asset_path}"
+                )
+            prepared[field] = str(asset_path.resolve())
         indexed.append((source_position, prepared))
     if sample_seed is not None:
         rng = random.Random(sample_seed)
@@ -1220,7 +1529,7 @@ def _load_indexed_json_requests(
     return data, indexed
 
 
-def _write_vision_task_dataset(
+def _write_indexed_json_task_dataset(
     *,
     dataset_path: Path,
     work_dir: Path,
@@ -1307,7 +1616,7 @@ def prepare_image_classification_dataset(
         }
         prompt_rows.append(row)
         prepared_requests.append({**request, **row})
-    return _write_vision_task_dataset(
+    return _write_indexed_json_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
         suite=suite,
@@ -1363,7 +1672,7 @@ def prepare_semantic_segmentation_dataset(
         }
         prompt_rows.append(row)
         prepared_requests.append({**request, **row})
-    return _write_vision_task_dataset(
+    return _write_indexed_json_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
         suite=suite,
@@ -1439,7 +1748,85 @@ def prepare_prompted_segmentation_dataset(
         }
         prompt_rows.append(row)
         prepared_requests.append({**request, **row})
-    return _write_vision_task_dataset(
+    return _write_indexed_json_task_dataset(
+        dataset_path=dataset_path,
+        work_dir=work_dir,
+        suite=suite,
+        data=data,
+        indexed=indexed,
+        prompt_rows=prompt_rows,
+        prepared_requests=prepared_requests,
+        limit=limit,
+        subject=subject,
+        sample_seed=sample_seed,
+        task_eval_config=task_eval_config,
+    )
+
+
+def prepare_reranking_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    dataset_config = suite.get("dataset", {})
+    subject_field = str(dataset_config.get("subject_field", "subset"))
+    data, indexed = _load_indexed_json_requests(
+        dataset_path,
+        subject=subject,
+        subject_field=subject_field,
+        limit=limit,
+        sample_seed=sample_seed,
+    )
+    prepared_requests: list[dict[str, Any]] = []
+    prompt_rows: list[dict[str, Any]] = []
+    for eval_index, (dataset_index, request) in enumerate(indexed):
+        query = str(request.get("query", "") or "")
+        documents = request.get("documents")
+        if not query:
+            raise ValueError(f"{dataset_path}: request {dataset_index} has no query")
+        if not isinstance(documents, list) or len(documents) < 2:
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} requires at least two documents"
+            )
+        documents = [str(document) for document in documents]
+        if any(not document for document in documents):
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} contains an empty document"
+            )
+        relevant = request.get("relevant_document_indices", [])
+        if not isinstance(relevant, list):
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} relevant indices must be a list"
+            )
+        try:
+            relevant_indices = [int(index) for index in relevant]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} has invalid relevant indices"
+            ) from exc
+        if any(index < 0 or index >= len(documents) for index in relevant_indices):
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} relevant index is out of range"
+            )
+        sample_id = str(request.get("id", f"reranking_{dataset_index:06d}"))
+        row = {
+            "sample_id": sample_id,
+            "dataset_index": dataset_index,
+            "eval_index": eval_index,
+            "subject": str(request.get(subject_field, "")),
+            "prompt": query,
+            "query": query,
+            "documents": documents,
+            "relevant_document_indices": relevant_indices,
+        }
+        prompt_rows.append(row)
+        prepared_requests.append({**request, **row})
+    return _write_indexed_json_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
         suite=suite,
@@ -2035,6 +2422,176 @@ def prepare_sts_pair_dataset(
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
 
+def _time_series_columns(value: Any, *, field: str) -> list[str]:
+    if isinstance(value, str):
+        columns = [value]
+    elif isinstance(value, list):
+        columns = [str(column) for column in value]
+    else:
+        columns = []
+    if not columns or any(not column for column in columns):
+        raise ValueError(f"time_series.{field} must contain at least one column name")
+    return columns
+
+
+def prepare_time_series_csv_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    """Prepare model-shaped numeric windows from a shared time-series CSV."""
+    if subject:
+        raise ValueError("time_series_csv does not support --subject filtering")
+    config = task_eval_config if isinstance(task_eval_config, dict) else {}
+    time_series = config.get("time_series", {})
+    if not isinstance(time_series, dict):
+        raise ValueError("task_eval.time_series must be a mapping")
+
+    input_columns = _time_series_columns(time_series.get("input_columns"), field="input_columns")
+    target_columns = _time_series_columns(
+        time_series.get("target_columns", input_columns), field="target_columns"
+    )
+    input_key = str(time_series.get("input_key", "field_input") or "field_input")
+    if input_key not in {"field_input", "branch_input"}:
+        raise ValueError("time_series.input_key must be either 'field_input' or 'branch_input'")
+    context_length = int(time_series.get("context_length", 0) or 0)
+    prediction_length = int(time_series.get("prediction_length", 0) or 0)
+    stride = int(time_series.get("stride", prediction_length or 1) or 0)
+    dataset_config = suite.get("dataset", {})
+    test_fraction = float(time_series.get("test_fraction", 0.2))
+    if context_length <= 0 or prediction_length <= 0 or stride <= 0:
+        raise ValueError(
+            "time_series context_length, prediction_length, and stride must be positive"
+        )
+    if not 0.0 < test_fraction <= 1.0:
+        raise ValueError("time_series.test_fraction must be in (0, 1]")
+
+    with dataset_path.open(newline="", encoding="utf-8") as csv_file:
+        reader = csv.DictReader(csv_file)
+        fieldnames = set(reader.fieldnames or [])
+        required_columns = set(input_columns) | set(target_columns)
+        missing_columns = sorted(required_columns - fieldnames)
+        if missing_columns:
+            raise ValueError(f"{dataset_path}: missing time-series columns {missing_columns}")
+        rows = list(reader)
+    minimum_rows = context_length + prediction_length
+    if len(rows) < minimum_rows:
+        raise ValueError(f"{dataset_path}: needs at least {minimum_rows} rows, found {len(rows)}")
+
+    test_target_start = int(
+        time_series.get(
+            "test_target_start",
+            dataset_config.get("test_target_start", int(len(rows) * (1.0 - test_fraction))),
+        )
+    )
+    test_end = int(time_series.get("test_end", dataset_config.get("test_end", len(rows))))
+    if not context_length <= test_target_start < test_end <= len(rows):
+        raise ValueError(
+            "time_series test_target_start/test_end do not define a valid test window"
+        )
+    first_start = test_target_start - context_length
+    last_start = test_end - context_length - prediction_length
+    if last_start < first_start:
+        raise ValueError("time_series test window is shorter than prediction_length")
+    starts = list(range(first_start, last_start + 1, stride))
+    if sample_seed is not None:
+        random.Random(sample_seed).shuffle(starts)
+    if limit > 0:
+        starts = starts[:limit]
+
+    timestamp_column = str(time_series.get("timestamp_column", "date") or "")
+    sample_prefix = str(dataset_config.get("sample_prefix", "time_series") or "time_series")
+    frequency = time_series.get("frequency")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    requests: list[dict[str, Any]] = []
+    with prompts_path.open("w", encoding="utf-8") as prompts_file:
+        for eval_index, start in enumerate(starts):
+            context_rows = rows[start : start + context_length]
+            target_rows = rows[start + context_length : start + context_length + prediction_length]
+            try:
+                input_values = [
+                    float(row[column]) for row in context_rows for column in input_columns
+                ]
+                target_values = [
+                    float(row[column]) for row in target_rows for column in target_columns
+                ]
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{dataset_path}: non-numeric value in window starting at row {start}"
+                ) from exc
+            target_index = start + context_length
+            sample_id = f"{sample_prefix}_{target_index:06d}"
+            inputs: dict[str, Any] = {input_key: input_values}
+            if frequency is not None:
+                inputs["trunk_input"] = [int(frequency)]
+            request = {
+                "sample_id": sample_id,
+                "dataset_index": target_index,
+                "context_index": start,
+                "input_columns": input_columns,
+                "target_columns": target_columns,
+                "target_values": target_values,
+            }
+            if timestamp_column and timestamp_column in fieldnames:
+                request["context_start"] = str(context_rows[0][timestamp_column])
+                request["context_end"] = str(context_rows[-1][timestamp_column])
+                request["target_start"] = str(target_rows[0][timestamp_column])
+                request["target_end"] = str(target_rows[-1][timestamp_column])
+            requests.append(request)
+            prompts_file.write(
+                json.dumps(
+                    {
+                        **request,
+                        "eval_index": eval_index,
+                        "inputs": inputs,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    answers = {
+        "dataset": str(suite.get("dataset", {}).get("name", dataset_path.stem)),
+        "scoring": suite.get("scoring", {}),
+        "requests": requests,
+    }
+    answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_kind": suite.get("dataset", {}).get("kind", ""),
+        "request_count": len(requests),
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "scoring": suite.get("scoring", {}),
+        "time_series": {
+            "input_columns": input_columns,
+            "target_columns": target_columns,
+            "input_key": input_key,
+            "context_length": context_length,
+            "prediction_length": prediction_length,
+            "stride": stride,
+            "test_fraction": test_fraction,
+            "test_target_start": test_target_start,
+            "test_end": test_end,
+            **({"frequency": int(frequency)} if frequency is not None else {}),
+        },
+        "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
+    }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
 def prepare_task_dataset(
     *,
     dataset_path: Path,
@@ -2046,7 +2603,7 @@ def prepare_task_dataset(
     task_eval_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     dataset_kind = suite.get("dataset", {}).get("kind", "")
-    if dataset_kind == "mmlu_five_shot_json":
+    if dataset_kind in {"mmlu_five_shot_json", "text_generation_json"}:
         return prepare_mmlu_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
@@ -2088,6 +2645,16 @@ def prepare_task_dataset(
         )
     if dataset_kind == "prompted_segmentation_json":
         return prepare_prompted_segmentation_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
+    if dataset_kind == "reranking_json":
+        return prepare_reranking_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
             suite=suite,
@@ -2148,6 +2715,16 @@ def prepare_task_dataset(
         )
     if dataset_kind == "sts_pair_jsonl":
         return prepare_sts_pair_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
+    if dataset_kind == "time_series_csv":
+        return prepare_time_series_csv_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
             suite=suite,
@@ -2301,9 +2878,17 @@ def max_prompt_token_length(
     )
     max_len = 0
     for row in load_jsonl(prompts_path):
-        prompt = str(row.get("prompt", ""))
-        length = len(tokenizer(prompt, add_special_tokens=False).input_ids)
-        max_len = max(max_len, length)
+        documents = row.get("documents")
+        if isinstance(documents, list) and documents:
+            query = str(row.get("query", row.get("prompt", "")))
+            prompts = [
+                f"question:{query}   passage:{document}" for document in documents
+            ]
+        else:
+            prompts = [str(row.get("prompt", ""))]
+        for prompt in prompts:
+            length = len(tokenizer(prompt, add_special_tokens=False).input_ids)
+            max_len = max(max_len, length)
     return max_len
 
 
@@ -2424,7 +3009,7 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
     defaults = generation_defaults(work_dir)
     raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
     predictions = work_dir / (args.predictions or "trtfb_predictions.json")
-    log_path = work_dir / (args.log or "trtfb_run.log")
+    log_path = work_dir / (getattr(args, "log", "") or "trtfb_run.log")
     max_new_tokens = (
         args.max_new_tokens
         if args.max_new_tokens is not None
@@ -4269,6 +4854,27 @@ def apply_metric_gates(result: dict[str, Any], gates: dict[str, Any]) -> dict[st
     return result
 
 
+def continuation_task_quality_diagnostics(
+    task_metric: str,
+    hf_predictions: dict[str, Any],
+    trtfb_predictions: dict[str, Any],
+    answers: dict[str, Any],
+) -> dict[str, Any]:
+    if task_metric != "sacrebleu":
+        return {}
+    hf_quality = score_sacrebleu_predictions(hf_predictions, answers)
+    trtfb_quality = score_sacrebleu_predictions(trtfb_predictions, answers)
+    return {
+        "hf": hf_quality,
+        "trtfb": trtfb_quality,
+        "hf_corpus_bleu": hf_quality["corpus_bleu"],
+        "trtfb_corpus_bleu": trtfb_quality["corpus_bleu"],
+        "corpus_bleu_abs_delta": abs(
+            hf_quality["corpus_bleu"] - trtfb_quality["corpus_bleu"]
+        ),
+    }
+
+
 def score_predictions(
     predictions_data: dict[str, Any],
     answers_data: dict[str, Any],
@@ -4661,6 +5267,34 @@ def compare_diffusion_image_predictions(
                 f"Diffusion sample id mismatch at index {index}: "
                 f"expected={expected_id!r} hf={hf_id!r} trtfb={trt_id!r}"
             )
+        expected_prompt = str(request.get("prompt", ""))
+        hf_prompt = str(hf_row.get("prompt", ""))
+        trt_prompt = str(trt_row.get("prompt", ""))
+        if expected_prompt and (
+            hf_prompt != expected_prompt or trt_prompt != expected_prompt
+        ):
+            raise ValueError(
+                f"Diffusion prompt mismatch at index {index}: "
+                f"expected={expected_prompt!r} hf={hf_prompt!r} trtfb={trt_prompt!r}"
+            )
+        shared_inputs: dict[str, Any] = {}
+        for field in ("seed", "condition_image_sha256", "action"):
+            hf_value = hf_row.get(field)
+            trt_value = trt_row.get(field)
+            if hf_value in (None, "") and trt_value in (None, ""):
+                continue
+            if hf_value != trt_value:
+                raise ValueError(
+                    f"Diffusion shared input mismatch at index {index} for {field}: "
+                    f"hf={hf_value!r} trtfb={trt_value!r}"
+                )
+            expected_value = request.get(field)
+            if field != "seed" and expected_value not in (None, "") and hf_value != expected_value:
+                raise ValueError(
+                    f"Diffusion dataset input mismatch at index {index} for {field}: "
+                    f"expected={expected_value!r} actual={hf_value!r}"
+                )
+            shared_inputs[field] = hf_value
         hf_latent_hash = str(hf_row.get("initial_latents_sha256", ""))
         trt_latent_hash = str(trt_row.get("initial_latents_sha256", ""))
         require_matching_latents = float(gates.get("require_matching_initial_latents", 0)) > 0
@@ -4694,6 +5328,7 @@ def compare_diffusion_image_predictions(
                 "trtfb_image": str(_first_generated_image(str(trt_row.get("frames_dir", ""))) or ""),
                 "status": StageStatus.ERROR.value,
                 "metrics": {},
+                "shared_inputs": shared_inputs,
             })
             continue
 
@@ -4831,6 +5466,7 @@ def compare_diffusion_image_predictions(
             "hf_image": str(_first_generated_image(str(hf_output.data["frames_dir"])) or ""),
             "trtfb_image": str(_first_generated_image(str(trt_output.data["frames_dir"])) or ""),
             "initial_latents_sha256": hf_latent_hash,
+            "shared_inputs": shared_inputs,
             "status": result.status,
             "metrics": sample_metrics,
             "message": result.message,
@@ -4950,12 +5586,20 @@ def _is_encoder_embedding_dataset_kind(kind: str) -> bool:
     return kind == "sts_pair_jsonl"
 
 
+def _is_time_series_dataset_kind(kind: str) -> bool:
+    return kind == "time_series_csv"
+
+
 def _is_vision_task_dataset_kind(kind: str) -> bool:
     return kind in {
         "image_classification_json",
         "semantic_segmentation_json",
         "prompted_segmentation_json",
     }
+
+
+def _is_reranking_dataset_kind(kind: str) -> bool:
+    return kind == "reranking_json"
 
 
 def work_scoring(work_dir: Path) -> dict[str, Any]:
@@ -5881,6 +6525,166 @@ def _load_vision_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
     return case, reference, runner
 
 
+def _load_time_series_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
+    task_eval_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
+    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+    if not manifest_ref:
+        raise ValueError("time-series task eval requires task_eval.model_manifest")
+    manifest_path = Path(manifest_ref)
+    if not manifest_path.is_absolute():
+        manifest_path = REPO_ROOT / manifest_path
+    case = load_manifest(manifest_path)
+    activate_model_plugins(str(case.metadata.get("model_test_dir", "") or ""))
+    reference = get_reference(case.reference_backend)
+    runner = get_runner(case.task_strategy)
+    if reference is None:
+        raise RuntimeError(f"No reference plugin {case.reference_backend!r} for {case.family}")
+    if runner is None:
+        raise RuntimeError(f"No runner plugin {case.task_strategy!r} for {case.family}")
+    return case, reference, runner
+
+
+def _time_series_case_for_request(template: Any, prompt_row: dict[str, Any], index: int) -> Any:
+    case = copy.deepcopy(template)
+    case.name = str(prompt_row.get("sample_id", f"time_series_{index:06d}"))
+    inputs = prompt_row.get("inputs")
+    if not isinstance(inputs, dict) or not inputs:
+        raise ValueError(f"Time-series sample {case.name!r} has no numeric inputs")
+    case.inputs = copy.deepcopy(inputs)
+    return case
+
+
+def _time_series_full_inference_stage(case: Any) -> Any:
+    from tests.e2e_harness.contracts import StageSpec
+
+    for stage in case.stages:
+        if stage.name == "full_inference":
+            return stage
+    return StageSpec(name="full_inference", required=True)
+
+
+def _time_series_response(*, case: Any, source: str, output: Any) -> dict[str, Any]:
+    data = output.data if isinstance(output.data, dict) else {}
+    metadata = output.metadata if isinstance(output.metadata, dict) else {}
+    error = str(data.get("error", "") or "")
+    values = data.get("output_field", data.get("field"))
+    if error:
+        raise RuntimeError(f"{source} time-series inference failed for {case.name}: {error}")
+    if not isinstance(values, list) or not values:
+        raise RuntimeError(
+            f"{source} time-series inference produced no output tensor for {case.name}"
+        )
+    try:
+        output_values = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"{source} time-series inference produced non-numeric output for {case.name}"
+        ) from exc
+    output_shape = data.get("output_shape")
+    if not isinstance(output_shape, list):
+        output_shape = [int(data.get("output_dim", len(output_values)))]
+    return {
+        "sample_id": case.name,
+        "source": source,
+        "output_values": output_values,
+        "output_shape": [int(dim) for dim in output_shape],
+        "output_name": str(data.get("reference_output_name", "") or ""),
+        "returncode": int(metadata.get("returncode", 0) or 0),
+        "wall_ms": float(output.timing_s) * 1000.0,
+    }
+
+
+def run_time_series_hf_reference(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, reference, _runner = _load_time_series_task_eval_plugins(work_dir)
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "hf_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_file:
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _time_series_case_for_request(template, prompt_row, index)
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                hf_python=sys.executable,
+                reference_python=sys.executable,
+            )
+            output = reference.run_stage(case, _time_series_full_inference_stage(case), context)
+            response = _time_series_response(case=case, source="hf", output=output)
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.time_series_hf] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
+def run_time_series_trtfb(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, _reference, runner = _load_time_series_task_eval_plugins(work_dir)
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    log_path = work_dir / (args.log or "trtfb_run.log")
+    bundle_path = Path(args.bundle).resolve()
+    responses: list[dict[str, Any]] = []
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        log_path.open("w", encoding="utf-8") as log_file,
+    ):
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _time_series_case_for_request(template, prompt_row, index)
+            case.bundle = bundle_path.name
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                binary_path=str(args.trtmc_binary),
+                hf_python=str(getattr(args, "hf_python", "") or ""),
+                runtime_python=str(getattr(args, "hf_python", "") or ""),
+                engine_dir=str(bundle_path.parent),
+                model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
+            )
+            output = runner.run_stage(case, _time_series_full_inference_stage(case), context)
+            log_file.write(
+                json.dumps(
+                    {
+                        "sample_id": case.name,
+                        **(output.metadata if isinstance(output.metadata, dict) else {}),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            log_file.flush()
+            response = _time_series_response(case=case, source="trtfb", output=output)
+            if response["returncode"] != 0:
+                raise RuntimeError(
+                    f"TRT time-series run failed for {case.name}: "
+                    f"returncode={response['returncode']}"
+                )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.time_series_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
 def _vision_case_for_request(
     template: Any,
     prompt_row: dict[str, Any],
@@ -6097,6 +6901,174 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
     write_predictions(pred_path, responses)
 
 
+def _load_reranking_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any, Any]:
+    task_eval_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
+    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+    if not manifest_ref:
+        raise ValueError("reranking task eval requires task_eval.model_manifest")
+    manifest_path = Path(manifest_ref)
+    if not manifest_path.is_absolute():
+        manifest_path = REPO_ROOT / manifest_path
+    case = load_manifest(manifest_path)
+    model_test_dir = str(case.metadata.get("model_test_dir", "") or "")
+    activate_model_plugins(model_test_dir)
+    reference = get_reference(case.reference_backend)
+    runner = get_runner(case.task_strategy)
+    comparator = get_comparator(case.task_strategy)
+    if reference is None:
+        raise RuntimeError(
+            f"No reference plugin {case.reference_backend!r} for {case.family}"
+        )
+    if runner is None:
+        raise RuntimeError(f"No runner plugin {case.task_strategy!r} for {case.family}")
+    if comparator is None:
+        raise RuntimeError(
+            f"No comparator plugin {case.task_strategy!r} for {case.family}"
+        )
+    return case, reference, runner, comparator
+
+
+def _reranking_case_for_request(
+    template: Any, prompt_row: dict[str, Any], index: int
+) -> Any:
+    case = copy.deepcopy(template)
+    case.name = str(prompt_row.get("sample_id", f"reranking_{index:06d}"))
+    case.inputs["prompt"] = str(prompt_row["query"])
+    case.inputs["documents"] = [str(document) for document in prompt_row["documents"]]
+    return case
+
+
+def _reranking_full_inference_stage(case: Any) -> Any:
+    from tests.e2e_harness.contracts import StageSpec
+
+    for stage in case.stages:
+        if stage.name == "full_inference":
+            return stage
+    return StageSpec(name="full_inference", required=True)
+
+
+def _reranking_response(
+    *, case: Any, source: str, output: Any, prompt_row: dict[str, Any]
+) -> dict[str, Any]:
+    data = output.data if isinstance(output.data, dict) else {}
+    scores = data.get("scores")
+    if not isinstance(scores, list) or len(scores) != len(prompt_row["documents"]):
+        raise RuntimeError(
+            f"{source} reranking produced {len(scores) if isinstance(scores, list) else 0} "
+            f"scores for {len(prompt_row['documents'])} documents"
+        )
+    return {
+        "sample_id": case.name,
+        "source": source,
+        "query": str(prompt_row["query"]),
+        "documents": [str(document) for document in prompt_row["documents"]],
+        "scores": [float(score) for score in scores],
+        "wall_ms": float(output.timing_s) * 1000.0,
+    }
+
+
+def _write_reranking_run_metadata(log_file: Any, sample_id: str, output: Any) -> None:
+    metadata = output.metadata if isinstance(output.metadata, dict) else {}
+    log_file.write(
+        json.dumps({"sample_id": sample_id, "metadata": metadata}, ensure_ascii=False)
+        + "\n"
+    )
+    log_file.flush()
+
+
+def run_reranking_hf_reference(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, reference, _runner, _comparator = _load_reranking_task_eval_plugins(
+        work_dir
+    )
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "hf_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    metadata_path = work_dir / "hf_reference_metadata.jsonl"
+    responses: list[dict[str, Any]] = []
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        metadata_path.open("w", encoding="utf-8") as metadata_file,
+    ):
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _reranking_case_for_request(template, prompt_row, index)
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                hf_python=sys.executable,
+                reference_python=sys.executable,
+            )
+            output = reference.run_stage(
+                case, _reranking_full_inference_stage(case), context
+            )
+            response = _reranking_response(
+                case=case, source="hf", output=output, prompt_row=prompt_row
+            )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            _write_reranking_run_metadata(metadata_file, case.name, output)
+            print(
+                f"[task_eval.reranking_hf] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
+def run_reranking_trtfb(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, _reference, runner, _comparator = _load_reranking_task_eval_plugins(
+        work_dir
+    )
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    metadata_path = work_dir / (args.log or "trtfb_run.log")
+    bundle_path = Path(args.bundle).resolve()
+    responses: list[dict[str, Any]] = []
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        metadata_path.open("w", encoding="utf-8") as metadata_file,
+    ):
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _reranking_case_for_request(template, prompt_row, index)
+            case.bundle = bundle_path.name
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                binary_path=str(args.trtmc_binary),
+                hf_python=str(getattr(args, "hf_python", "") or ""),
+                runtime_python=str(getattr(args, "hf_python", "") or ""),
+                engine_dir=str(bundle_path.parent),
+                model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
+            )
+            output = runner.run_stage(
+                case, _reranking_full_inference_stage(case), context
+            )
+            response = _reranking_response(
+                case=case, source="trtfb", output=output, prompt_row=prompt_row
+            )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            _write_reranking_run_metadata(metadata_file, case.name, output)
+            print(
+                f"[task_eval.reranking_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
 def _load_diffusion_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
     task_eval_config = work_manifest(work_dir).get("task_eval", {})
     if not isinstance(task_eval_config, dict):
@@ -6138,6 +7110,9 @@ def _diffusion_case_for_prompt(
     case.name = str(prompt_row.get("sample_id", f"diffusion_{index:06d}"))
     case.inputs.update(generation)
     case.inputs["prompt"] = str(prompt_row["prompt"])
+    for field in _DIFFUSION_SAMPLE_INPUT_FIELDS:
+        if field in prompt_row:
+            case.inputs[field] = copy.deepcopy(prompt_row[field])
     seed = int(generation.get("seed", case.determinism.get("seed", 42)))
     case.inputs["seed"] = seed + index
     return case
@@ -6152,9 +7127,15 @@ def _diffusion_end_to_end_stage(case: Any) -> Any:
     return StageSpec(name="end_to_end", required=True)
 
 
-def _diffusion_response(sample_id: str, source: str, output: Any) -> dict[str, Any]:
+def _diffusion_response(
+    sample_id: str,
+    source: str,
+    output: Any,
+    *,
+    case: Any | None = None,
+) -> dict[str, Any]:
     data = output.data if isinstance(output.data, dict) else {}
-    return {
+    response = {
         "sample_id": sample_id,
         "source": source,
         "returncode": int(data.get("returncode", 1)),
@@ -6165,6 +7146,17 @@ def _diffusion_response(sample_id: str, source: str, output: Any) -> dict[str, A
         "initial_latents_sha256": str(data.get("initial_latents_sha256", "")),
         "wall_ms": float(output.timing_s) * 1000.0,
     }
+    if case is not None:
+        response["seed"] = int(case.inputs.get("seed", case.determinism.get("seed", 42)))
+        response["action"] = str(case.inputs.get("action", ""))
+        image_value = str(
+            case.inputs.get("image") or case.inputs.get("image_path") or ""
+        )
+        response["condition_image"] = image_value
+        image_path = Path(image_value) if image_value else None
+        if image_path is not None and image_path.is_file():
+            response["condition_image_sha256"] = _sha256_file(image_path)
+    return response
 
 
 def run_diffusion_hf_reference(args: argparse.Namespace) -> None:
@@ -6191,7 +7183,7 @@ def run_diffusion_hf_reference(args: argparse.Namespace) -> None:
             output = reference.run_stage(
                 case, _diffusion_end_to_end_stage(case), context
             )
-            response = _diffusion_response(case.name, "hf", output)
+            response = _diffusion_response(case.name, "hf", output, case=case)
             response["prompt"] = str(prompt_row["prompt"])
             if response["returncode"] != 0 or response["num_frames"] < 1:
                 raise RuntimeError(
@@ -6324,6 +7316,29 @@ def encoder_reference_class_names(reference_family: str) -> tuple[str, str]:
     return "AutoModel", "AutoTokenizer"
 
 
+def load_hf_text_generation_model(
+    transformers_module: Any,
+    model_id: str,
+    *,
+    model_kwargs: dict[str, Any],
+    trust_remote_code: bool,
+    local_files_only: bool,
+) -> tuple[Any, bool]:
+    """Load the matching causal or encoder-decoder HF generation class."""
+    config = transformers_module.AutoConfig.from_pretrained(
+        model_id,
+        trust_remote_code=trust_remote_code,
+        local_files_only=local_files_only,
+    )
+    is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
+    model_class = (
+        transformers_module.AutoModelForSeq2SeqLM
+        if is_encoder_decoder
+        else transformers_module.AutoModelForCausalLM
+    )
+    return model_class.from_pretrained(model_id, **model_kwargs).eval(), is_encoder_decoder
+
+
 def run_encoder_embedding_hf_reference(args: argparse.Namespace) -> None:
     try:
         import torch
@@ -6429,6 +7444,12 @@ def run_encoder_embedding_hf_reference(args: argparse.Namespace) -> None:
 
 def run_hf_reference(args: argparse.Namespace) -> None:
     dataset_kind = _work_dataset_kind(Path(args.work_dir))
+    if _is_reranking_dataset_kind(dataset_kind):
+        run_reranking_hf_reference(args)
+        return
+    if _is_time_series_dataset_kind(dataset_kind):
+        run_time_series_hf_reference(args)
+        return
     if _is_vision_task_dataset_kind(dataset_kind):
         run_vision_hf_reference(args)
         return
@@ -6452,7 +7473,7 @@ def run_hf_reference(args: argparse.Namespace) -> None:
         return
     try:
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer, logging
+        import transformers
     except Exception as exc:  # pragma: no cover - runtime dependency
         raise RuntimeError("run-hf requires torch and transformers") from exc
 
@@ -6481,8 +7502,8 @@ def run_hf_reference(args: argparse.Namespace) -> None:
     )
     generation_overrides = hf_generation_overrides(work_dir)
 
-    logging.set_verbosity_error()
-    tokenizer = AutoTokenizer.from_pretrained(
+    transformers.logging.set_verbosity_error()
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
         args.model,
         trust_remote_code=args.trust_remote_code,
         local_files_only=args.local_files_only,
@@ -6505,7 +7526,13 @@ def run_hf_reference(args: argparse.Namespace) -> None:
         model_kwargs["device_map"] = args.device_map
     if args.attn_impl:
         model_kwargs["attn_implementation"] = args.attn_impl
-    model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs).eval()
+    model, is_encoder_decoder = load_hf_text_generation_model(
+        transformers,
+        args.model,
+        model_kwargs=model_kwargs,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
     if not args.device_map:
         device = torch.device(args.device)
         model.to(device)
@@ -6545,8 +7572,19 @@ def run_hf_reference(args: argparse.Namespace) -> None:
                     **generation_overrides,
                 )
             wall_ms = (time.perf_counter() - start) * 1000.0
-            generated = output_ids[0, encoded["input_ids"].shape[1] :]
-            output_text = tokenizer.decode(generated, skip_special_tokens=False)
+            if is_encoder_decoder:
+                generated = output_ids[0]
+                decoder_start_token_id = getattr(model.config, "decoder_start_token_id", None)
+                if (
+                    decoder_start_token_id is not None
+                    and generated.numel() > 0
+                    and int(generated[0]) == int(decoder_start_token_id)
+                ):
+                    generated = generated[1:]
+                output_text = tokenizer.decode(generated, skip_special_tokens=True)
+            else:
+                generated = output_ids[0, encoded["input_ids"].shape[1] :]
+                output_text = tokenizer.decode(generated, skip_special_tokens=False)
             generated_token_ids = [int(token_id) for token_id in generated.tolist()]
             row = {
                 "sample_id": prompt_rows[idx].get("sample_id", f"mmlu_{idx:06d}"),
@@ -6598,7 +7636,7 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
             output = runner.run_stage(
                 case, _diffusion_end_to_end_stage(case), context
             )
-            response = _diffusion_response(case.name, "trtfb", output)
+            response = _diffusion_response(case.name, "trtfb", output, case=case)
             response["prompt"] = str(prompt_row["prompt"])
             if response["returncode"] != 0 or response["num_frames"] < 1:
                 raise RuntimeError(
@@ -7038,6 +8076,12 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
 def run_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     dataset_kind = _work_dataset_kind(work_dir)
+    if _is_reranking_dataset_kind(dataset_kind):
+        run_reranking_trtfb(args)
+        return
+    if _is_time_series_dataset_kind(dataset_kind):
+        run_time_series_trtfb(args)
+        return
     if _is_vision_task_dataset_kind(dataset_kind):
         run_vision_trtfb(args)
         return
@@ -7654,6 +8698,129 @@ def _task_eval_response_rows(data: dict[str, Any], label: str) -> list[dict[str,
     return rows
 
 
+def compare_time_series_prediction_sets(
+    hf_data: dict[str, Any],
+    trtfb_data: dict[str, Any],
+    *,
+    gates: dict[str, Any],
+) -> dict[str, Any]:
+    """Gate every numeric sample with the model-owned E2E parity metrics."""
+    hf_rows = _task_eval_response_rows(hf_data, "HF")
+    trtfb_rows = _task_eval_response_rows(trtfb_data, "TRTMC")
+    if len(hf_rows) != len(trtfb_rows):
+        raise ValueError(
+            f"Time-series HF/TRTMC prediction count mismatch: {len(hf_rows)} != {len(trtfb_rows)}"
+        )
+    max_relative_l2 = float(gates.get("max_relative_l2", 0.01))
+    max_absolute_error = float(gates.get("max_absolute_error", 0.1))
+    min_sample_agreement_rate = float(gates.get("min_sample_agreement_rate", 1.0))
+    cases: list[dict[str, Any]] = []
+    for index, (hf_row, trtfb_row) in enumerate(zip(hf_rows, trtfb_rows, strict=True)):
+        hf_id = str(hf_row.get("sample_id", index))
+        trtfb_id = str(trtfb_row.get("sample_id", index))
+        if hf_id != trtfb_id:
+            raise ValueError(
+                f"Time-series sample id mismatch at {index}: {hf_id!r} != {trtfb_id!r}"
+            )
+        hf_values = hf_row.get("output_values")
+        trtfb_values = trtfb_row.get("output_values")
+        if not isinstance(hf_values, list) or not isinstance(trtfb_values, list):
+            raise ValueError(f"Time-series prediction {hf_id!r} is missing output_values")
+        if len(hf_values) != len(trtfb_values) or not hf_values:
+            cases.append(
+                {
+                    "sample_id": hf_id,
+                    "passed": False,
+                    "error": (
+                        "output element count mismatch: "
+                        f"HF={len(hf_values)} TRTMC={len(trtfb_values)}"
+                    ),
+                }
+            )
+            continue
+        hf_vector = [float(value) for value in hf_values]
+        trtfb_vector = [float(value) for value in trtfb_values]
+        if not all(math.isfinite(value) for value in hf_vector + trtfb_vector):
+            cases.append(
+                {
+                    "sample_id": hf_id,
+                    "passed": False,
+                    "error": "non-finite output value",
+                }
+            )
+            continue
+        squared_error = sum(
+            (trtfb - hf) ** 2 for hf, trtfb in zip(hf_vector, trtfb_vector, strict=True)
+        )
+        reference_squared_norm = sum(value * value for value in hf_vector)
+        relative_l2 = (
+            math.sqrt(squared_error / reference_squared_norm)
+            if reference_squared_norm >= 1e-24
+            else math.sqrt(squared_error)
+        )
+        absolute_error = max(
+            abs(trtfb - hf) for hf, trtfb in zip(hf_vector, trtfb_vector, strict=True)
+        )
+        cases.append(
+            {
+                "sample_id": hf_id,
+                "output_numel": len(hf_vector),
+                "hf_output_shape": hf_row.get("output_shape", []),
+                "trtfb_output_shape": trtfb_row.get("output_shape", []),
+                "relative_l2": relative_l2,
+                "max_absolute_error": absolute_error,
+                "passed": (relative_l2 <= max_relative_l2 and absolute_error <= max_absolute_error),
+            }
+        )
+
+    valid_cases = [case for case in cases if "relative_l2" in case]
+    passed_count = sum(bool(case.get("passed")) for case in cases)
+    agreement_rate = passed_count / len(cases) if cases else 0.0
+    status = (
+        "passed"
+        if cases and len(valid_cases) == len(cases) and agreement_rate >= min_sample_agreement_rate
+        else "failed"
+    )
+    return {
+        "status": status,
+        "sample_count": len(cases),
+        "valid_count": len(valid_cases),
+        "passed_count": passed_count,
+        "sample_agreement_rate": agreement_rate,
+        "mean_relative_l2": (
+            sum(float(case["relative_l2"]) for case in valid_cases) / len(valid_cases)
+            if valid_cases
+            else float("inf")
+        ),
+        "max_relative_l2": max(
+            (float(case["relative_l2"]) for case in valid_cases),
+            default=float("inf"),
+        ),
+        "max_absolute_error": max(
+            (float(case["max_absolute_error"]) for case in valid_cases),
+            default=float("inf"),
+        ),
+        "gates": {
+            "max_relative_l2": max_relative_l2,
+            "max_absolute_error": max_absolute_error,
+            "min_sample_agreement_rate": min_sample_agreement_rate,
+        },
+        "cases": cases,
+    }
+
+
+def write_time_series_summary_markdown(summary: dict[str, Any], path: Path) -> None:
+    lines = [
+        "# Time-series HF/TRTMC Parity Summary",
+        "",
+        f"- status: {summary['status']}",
+        f"- sample_agreement_rate: {summary['sample_agreement_rate']:.4f}",
+        f"- max_relative_l2: {summary['max_relative_l2']:.6e}",
+        f"- max_absolute_error: {summary['max_absolute_error']:.6e}",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def compare_image_classification_prediction_sets(
     hf_data: dict[str, Any],
     trtfb_data: dict[str, Any],
@@ -8008,6 +9175,148 @@ def compare_prompted_segmentation_prediction_sets(
     }
 
 
+def compare_reranking_prediction_sets(
+    hf_data: dict[str, Any],
+    trtfb_data: dict[str, Any],
+    answers: dict[str, Any],
+    *,
+    gates: dict[str, Any],
+    comparator: Any,
+) -> dict[str, Any]:
+    from tests.e2e_harness.contracts import (
+        StageOutput,
+        StageSpec,
+        StageStatus,
+        ThresholdProfile,
+    )
+
+    hf_by_id = {
+        str(row["sample_id"]): row
+        for row in _task_eval_response_rows(hf_data, "HF")
+    }
+    trtfb_by_id = {
+        str(row["sample_id"]): row
+        for row in _task_eval_response_rows(trtfb_data, "TRTMC")
+    }
+    metric_thresholds = {
+        "pairwise_ordering_agreement": float(
+            gates.get("pairwise_ordering_agreement", 0.9)
+        ),
+        "kendall_tau": float(gates.get("kendall_tau", 0.8)),
+        "spearman_rho": float(gates.get("spearman_rho", 0.8)),
+        "score_correlation": float(gates.get("score_correlation", 0.9)),
+    }
+    threshold = ThresholdProfile(
+        task_strategy="reranking", metrics=metric_thresholds
+    )
+    stage = StageSpec(name="full_inference", required=True)
+    cases: list[dict[str, Any]] = []
+    for request in answers.get("requests", []):
+        sample_id = str(request.get("sample_id") or request.get("id") or "")
+        hf_row = hf_by_id.get(sample_id)
+        trtfb_row = trtfb_by_id.get(sample_id)
+        if hf_row is None or trtfb_row is None:
+            cases.append(
+                {"sample_id": sample_id, "passed": False, "error": "missing prediction"}
+            )
+            continue
+        hf_scores = hf_row.get("scores")
+        trtfb_scores = trtfb_row.get("scores")
+        if not isinstance(hf_scores, list) or not isinstance(trtfb_scores, list):
+            cases.append(
+                {"sample_id": sample_id, "passed": False, "error": "missing scores"}
+            )
+            continue
+        if not hf_scores or len(hf_scores) != len(trtfb_scores):
+            cases.append(
+                {
+                    "sample_id": sample_id,
+                    "passed": False,
+                    "error": (
+                        f"score count mismatch: HF={len(hf_scores)}, "
+                        f"TRTMC={len(trtfb_scores)}"
+                    ),
+                }
+            )
+            continue
+        comparison = comparator.compare(
+            StageOutput(stage_name=stage.name, data={"scores": trtfb_scores}),
+            StageOutput(stage_name=stage.name, data={"scores": hf_scores}),
+            threshold,
+            stage,
+        )
+        metrics = {
+            name: {
+                "value": float(metric.value),
+                "threshold": metric.threshold,
+                "operator": metric.operator,
+                "passed": bool(metric.passed),
+                "note": metric.note,
+            }
+            for name, metric in comparison.metrics.items()
+        }
+        relevant_indices = {
+            int(index) for index in request.get("relevant_document_indices", [])
+        }
+        hf_top_index = max(range(len(hf_scores)), key=lambda index: hf_scores[index])
+        trtfb_top_index = max(
+            range(len(trtfb_scores)), key=lambda index: trtfb_scores[index]
+        )
+        cases.append(
+            {
+                "sample_id": sample_id,
+                "passed": comparison.status == StageStatus.PASSED.value,
+                "status": comparison.status,
+                "message": comparison.message,
+                "metrics": metrics,
+                "hf_scores": [float(score) for score in hf_scores],
+                "trtfb_scores": [float(score) for score in trtfb_scores],
+                "hf_top_document_index": hf_top_index,
+                "trtfb_top_document_index": trtfb_top_index,
+                "relevant_document_indices": sorted(relevant_indices),
+                "hf_top1_correct": hf_top_index in relevant_indices,
+                "trtfb_top1_correct": trtfb_top_index in relevant_indices,
+            }
+        )
+    valid = [case for case in cases if "error" not in case]
+    passed_count = sum(bool(case["passed"]) for case in valid)
+    sample_pass_rate = passed_count / len(valid) if valid else 0.0
+    min_sample_pass_rate = float(gates.get("min_sample_pass_rate", 1.0))
+    metric_summaries: dict[str, dict[str, float]] = {}
+    for name in metric_thresholds:
+        values = [float(case["metrics"][name]["value"]) for case in valid]
+        metric_summaries[name] = {
+            "mean": _mean(values),
+            "min": min(values) if values else 0.0,
+        }
+    gold_cases = [case for case in valid if case["relevant_document_indices"]]
+    hf_top1_accuracy = _mean(
+        [1.0 if case["hf_top1_correct"] else 0.0 for case in gold_cases]
+    )
+    trtfb_top1_accuracy = _mean(
+        [1.0 if case["trtfb_top1_correct"] else 0.0 for case in gold_cases]
+    )
+    status = (
+        "passed"
+        if valid
+        and len(valid) == len(cases)
+        and sample_pass_rate >= min_sample_pass_rate
+        else "failed"
+    )
+    return {
+        "status": status,
+        "sample_count": len(cases),
+        "valid_count": len(valid),
+        "passed_count": passed_count,
+        "sample_pass_rate": sample_pass_rate,
+        "hf_top1_accuracy": hf_top1_accuracy,
+        "trtfb_top1_accuracy": trtfb_top1_accuracy,
+        "metrics": metric_summaries,
+        "gates": {**metric_thresholds, "min_sample_pass_rate": min_sample_pass_rate},
+        "cases": cases,
+    }
+
+
 def write_encoder_embedding_summary_markdown(summary: dict[str, Any], path: Path) -> None:
     lines = [
         "# Encoder / Embedding Parity Summary",
@@ -8109,6 +9418,8 @@ def eval_one_model(
     else:
         engine_dir = Path(args.engine_dir or (work_root / "_bundles"))
         bundle_path = engine_dir / str(model["bundle"])
+    if getattr(args, "require_prebuilt_bundles", False) and not bundle_path.is_file():
+        raise FileNotFoundError(f"Required prebuilt task-eval bundle is missing: {bundle_path}")
 
     max_prompt_len = None
     if (
@@ -8117,6 +9428,7 @@ def eval_one_model(
         and not _is_diffusion_media_dataset_kind(dataset_kind)
         and not _is_diffusion_text_dataset_kind(dataset_kind)
         and not _is_tts_dataset_kind(dataset_kind)
+        and not _is_time_series_dataset_kind(dataset_kind)
         and not _is_vision_task_dataset_kind(dataset_kind)
     ):
         prompt_rows_path = work_dir / "prompts.jsonl"
@@ -8185,7 +9497,31 @@ def eval_one_model(
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 
-    if scorer == "image_classification_parity":
+    if scorer == "time_series_parity":
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        summary = compare_time_series_prediction_sets(
+            hf_data,
+            trtfb_data,
+            gates=suite.get("gates", {}),
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        write_time_series_summary_markdown(summary, work_dir / "summary.md")
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "sample_agreement_rate": summary["sample_agreement_rate"],
+            "prediction_agreement_rate": summary["sample_agreement_rate"],
+            "mean_relative_l2": summary["mean_relative_l2"],
+            "max_relative_l2": summary["max_relative_l2"],
+            "max_absolute_error": summary["max_absolute_error"],
+        }
+    elif scorer == "image_classification_parity":
         hf_data = json.loads(
             (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
         )
@@ -8273,6 +9609,42 @@ def eval_one_model(
             "ground_truth_iou_drop_from_hf": summary[
                 "ground_truth_iou_drop_from_hf"
             ],
+        }
+    elif scorer == "reranking_parity":
+        hf_data = json.loads(
+            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
+        )
+        trtfb_data = json.loads(
+            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        )
+        _template, _reference, _runner, comparator = (
+            _load_reranking_task_eval_plugins(work_dir)
+        )
+        summary = compare_reranking_prediction_sets(
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+            gates=suite.get("gates", {}),
+            comparator=comparator,
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "sample_pass_rate": summary["sample_pass_rate"],
+            "hf_top1_accuracy": summary["hf_top1_accuracy"],
+            "trtfb_top1_accuracy": summary["trtfb_top1_accuracy"],
+            "mean_pairwise_ordering_agreement": summary["metrics"][
+                "pairwise_ordering_agreement"
+            ]["mean"],
+            "min_pairwise_ordering_agreement": summary["metrics"][
+                "pairwise_ordering_agreement"
+            ]["min"],
         }
     elif scorer == "encoder_embedding_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
@@ -8406,7 +9778,7 @@ def eval_one_model(
         summary = compare_continuation_sets(
             hf_data,
             trtfb_data,
-            tokenize=_model_tokenizer(model, args),
+            require_token_ids=True,
         )
         (work_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -8415,12 +9787,49 @@ def eval_one_model(
         result = {
             **base_result,
             "mode": "continuation",
+            "evaluation_policy": (
+                "threshold_gated" if suite.get("gates", {}) else "diagnostic_only"
+            ),
             "comparison_granularity": summary.get("comparison_granularity", ""),
             "exact_match_rate": summary["exact_match_rate"],
             "token_prefix_agreement": summary["token_prefix_agreement"],
             "mean_first_divergence": summary["mean_first_divergence"],
+            "divergent_count": summary["divergent_count"],
+            "divergence_rate": summary["divergence_rate"],
+            "mean_divergent_first_divergence": summary[
+                "mean_divergent_first_divergence"
+            ],
+            "mean_divergent_prefix_ratio": summary["mean_divergent_prefix_ratio"],
+            "min_divergent_prefix_ratio": summary["min_divergent_prefix_ratio"],
+            "mean_divergent_severity": summary["mean_divergent_severity"],
+            "max_divergent_severity": summary["max_divergent_severity"],
+            # Preserve the historical generic agreement field for downstream
+            # consumers; the divergence fields above are the primary output.
             "prediction_agreement_rate": summary["token_prefix_agreement"],
         }
+        diagnostics = continuation_task_quality_diagnostics(
+            str(suite.get("scoring", {}).get("task_metric", "")),
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+        )
+        if diagnostics:
+            result.update(
+                {
+                    "hf_corpus_bleu": diagnostics["hf_corpus_bleu"],
+                    "trtfb_corpus_bleu": diagnostics["trtfb_corpus_bleu"],
+                    "corpus_bleu_abs_delta": diagnostics["corpus_bleu_abs_delta"],
+                }
+            )
+            summary["task_quality_diagnostics"] = {
+                "hf": diagnostics["hf"],
+                "trtfb": diagnostics["trtfb"],
+                "corpus_bleu_abs_delta": diagnostics["corpus_bleu_abs_delta"],
+            }
+            (work_dir / "summary.json").write_text(
+                json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        apply_metric_gates(result, suite.get("gates", {}))
     elif scorer == "diffusion_image_clip_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
@@ -8517,10 +9926,13 @@ def eval_one_model(
 
 
 # ---------------------------------------------------------------------------
-# Continuation parity for base / completion models (generation-only, no logits).
+# Continuation divergence diagnostics for base / completion models
+# (generation-only, no logits).
 # HF reference and TRTFB both greedily generate from the same plain-text prompt;
-# we compare the two continuations. No gold answer or logprobs are needed — the
-# metric is HF<->TRTFB output agreement (conversion fidelity).
+# we compare the two continuations. No gold answer or logprobs are needed. The
+# primary metrics describe how often they diverge and how much of each divergent
+# continuation remains after its first differing token. Legacy agreement fields
+# remain in the result for compatibility.
 # ---------------------------------------------------------------------------
 
 
@@ -8581,6 +9993,9 @@ def compare_continuation_sets(
     total_matched = 0
     total_reference = 0
     div_positions: list[int] = []
+    divergent_positions: list[int] = []
+    divergent_prefix_ratios: list[float] = []
+    divergent_severities: list[float] = []
     samples: list[dict[str, Any]] = []
     for idx, (hf_row, trt_row) in enumerate(zip(hf_rows, trt_rows, strict=True)):
         hf_text = str(hf_row.get("output_text", ""))
@@ -8597,9 +10012,17 @@ def compare_continuation_sets(
         exact += int(is_exact)
         divergence = _first_divergence(hf_tokens, trt_tokens)
         reference_len = max(1, len(hf_tokens), len(trt_tokens))
+        normalized_divergence = 1.0 if is_exact else divergence / reference_len
+        divergence_severity = (
+            0.0 if is_exact else (reference_len - divergence) / reference_len
+        )
         total_matched += min(divergence, reference_len)
         total_reference += reference_len
         div_positions.append(divergence)
+        if not is_exact:
+            divergent_positions.append(divergence)
+            divergent_prefix_ratios.append(normalized_divergence)
+            divergent_severities.append(divergence_severity)
         hf_token_at_divergence = hf_tokens[divergence] if divergence < len(hf_tokens) else None
         trt_token_at_divergence = trt_tokens[divergence] if divergence < len(trt_tokens) else None
         samples.append(
@@ -8608,7 +10031,10 @@ def compare_continuation_sets(
                 "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
                 "exact": is_exact,
                 "text_exact": text_is_exact,
+                "diverged": not is_exact,
                 "first_divergence": divergence,
+                "normalized_first_divergence": normalized_divergence,
+                "divergence_severity": divergence_severity,
                 "hf_len": len(hf_tokens),
                 "trtfb_len": len(trt_tokens),
                 "hf_token_at_divergence": hf_token_at_divergence,
@@ -8620,8 +10046,11 @@ def compare_continuation_sets(
     exact_rate = (exact / count) if count else 0.0
     prefix_agreement = (total_matched / total_reference) if total_reference else 0.0
     mean_divergence = (sum(div_positions) / count) if count else 0.0
+    divergent_count = len(divergent_positions)
     return {
         "comparison_granularity": comparison_granularity,
+        "divergence_metric_scope": "divergent_samples_only",
+        "normalization_denominator": "max_hf_trtfb_generated_length",
         "exact_match_rate": exact_rate,
         "token_id_exact_match_rate": exact_rate if has_all_token_ids else None,
         "text_exact_match_rate": (text_exact / count) if count else 0.0,
@@ -8629,6 +10058,23 @@ def compare_continuation_sets(
         "token_id_prefix_agreement": prefix_agreement if has_all_token_ids else None,
         "mean_first_divergence": mean_divergence,
         "mean_first_token_id_divergence": mean_divergence if has_all_token_ids else None,
+        "divergent_count": divergent_count,
+        "divergence_rate": divergent_count / count if count else 0.0,
+        "mean_divergent_first_divergence": (
+            sum(divergent_positions) / divergent_count if divergent_count else None
+        ),
+        "mean_divergent_prefix_ratio": (
+            sum(divergent_prefix_ratios) / divergent_count if divergent_count else None
+        ),
+        "min_divergent_prefix_ratio": (
+            min(divergent_prefix_ratios) if divergent_prefix_ratios else None
+        ),
+        "mean_divergent_severity": (
+            sum(divergent_severities) / divergent_count if divergent_count else 0.0
+        ),
+        "max_divergent_severity": (
+            max(divergent_severities) if divergent_severities else 0.0
+        ),
         "count": count,
         "exact_count": exact,
         "text_exact_count": text_exact,
@@ -8662,9 +10108,16 @@ def cmd_compare_continuation(args: argparse.Namespace) -> int:
     output_path = Path(args.output) if args.output else work_dir / "continuation_parity.json"
     output_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(
-        f"exact_match={summary['exact_match_rate']:.4f} "
-        f"token_agreement={summary['token_prefix_agreement']:.4f} "
-        f"mean_first_divergence={summary['mean_first_divergence']:.2f} "
+        f"divergent_count={summary['divergent_count']} "
+        f"divergence_rate={summary['divergence_rate']:.4f} "
+        f"mean_divergent_first_divergence="
+        f"{_format_optional_float(summary['mean_divergent_first_divergence'], precision=2)} "
+        f"mean_divergent_prefix_ratio="
+        f"{_format_optional_float(summary['mean_divergent_prefix_ratio'])} "
+        f"min_divergent_prefix_ratio="
+        f"{_format_optional_float(summary['min_divergent_prefix_ratio'])} "
+        f"mean_divergent_severity={summary['mean_divergent_severity']:.4f} "
+        f"max_divergent_severity={summary['max_divergent_severity']:.4f} "
         f"output={output_path}"
     )
     return 0
@@ -8694,11 +10147,30 @@ def _format_optional_float(value: Any, *, precision: int = 4) -> str:
 
 def write_continuation_summary_markdown(summary: dict[str, Any], path: Path) -> None:
     lines = [
-        "# Continuation Parity Summary",
+        "# Continuation Divergence Summary",
+        "",
+        "`first_divergence` is the number of generated tokens that match before the "
+        "first difference. Prefix and severity aggregates include divergent samples "
+        "only; exact samples do not dilute divergence severity.",
         "",
         "| Metric | Value |",
         "|---|---:|",
         f"| comparison_granularity | {summary.get('comparison_granularity', '')} |",
+        f"| divergence_metric_scope | {summary.get('divergence_metric_scope', '')} |",
+        f"| normalization_denominator | {summary.get('normalization_denominator', '')} |",
+        f"| sample_count | {summary['count']} |",
+        f"| divergent_count | {summary['divergent_count']} |",
+        f"| divergence_rate | {summary['divergence_rate']:.4f} |",
+        f"| mean_divergent_first_divergence | {_format_optional_float(summary.get('mean_divergent_first_divergence'), precision=2)} |",
+        f"| mean_divergent_prefix_ratio | {_format_optional_float(summary.get('mean_divergent_prefix_ratio'))} |",
+        f"| min_divergent_prefix_ratio | {_format_optional_float(summary.get('min_divergent_prefix_ratio'))} |",
+        f"| mean_divergent_severity | {summary['mean_divergent_severity']:.4f} |",
+        f"| max_divergent_severity | {summary['max_divergent_severity']:.4f} |",
+        "",
+        "## Compatibility Diagnostics",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
         f"| exact_match_rate | {summary['exact_match_rate']:.4f} |",
         f"| token_id_exact_match_rate | {_format_optional_float(summary.get('token_id_exact_match_rate'))} |",
         f"| text_exact_match_rate | {summary['text_exact_match_rate']:.4f} |",
@@ -8706,8 +10178,27 @@ def write_continuation_summary_markdown(summary: dict[str, Any], path: Path) -> 
         f"| token_id_prefix_agreement | {_format_optional_float(summary.get('token_id_prefix_agreement'))} |",
         f"| mean_first_divergence | {summary['mean_first_divergence']:.2f} |",
         f"| mean_first_token_id_divergence | {_format_optional_float(summary.get('mean_first_token_id_divergence'), precision=2)} |",
-        f"| count | {summary['count']} |",
     ]
+    divergent_samples = [sample for sample in summary.get("samples", []) if sample["diverged"]]
+    lines.extend(["", "## Divergent Samples", ""])
+    if not divergent_samples:
+        lines.append("No divergent samples.")
+    else:
+        lines.extend(
+            [
+                "| Sample | First divergence | HF length | TRTFB length | Prefix ratio | Severity | HF token | TRTFB token |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for sample in divergent_samples:
+            lines.append(
+                f"| {sample['sample_id']} | {sample['first_divergence']} | "
+                f"{sample['hf_len']} | {sample['trtfb_len']} | "
+                f"{sample['normalized_first_divergence']:.4f} | "
+                f"{sample['divergence_severity']:.4f} | "
+                f"{sample['hf_token_at_divergence']} | "
+                f"{sample['trtfb_token_at_divergence']} |"
+            )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -8762,6 +10253,20 @@ def write_diffusion_text_summary_markdown(summary: dict[str, Any], path: Path) -
 
 def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     common = f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
+    if result.get("mode") == "reranking_parity":
+        return (
+            f"model={model['name']} sample_pass_rate={result['sample_pass_rate']:.4f} "
+            f"mean_pairwise={result['mean_pairwise_ordering_agreement']:.4f} "
+            f"min_pairwise={result['min_pairwise_ordering_agreement']:.4f} "
+            f"status={result.get('status', '')} {common}"
+        )
+    if result.get("mode") == "time_series_parity":
+        return (
+            f"model={model['name']} agreement={result['sample_agreement_rate']:.4f} "
+            f"max_rel_l2={result['max_relative_l2']:.6e} "
+            f"max_abs_error={result['max_absolute_error']:.6e} "
+            f"status={result.get('status', '')} {common}"
+        )
     if result.get("mode") == "encoder_embedding_parity":
         return (
             f"model={model['name']} vector_pass_rate={result['vector_pass_rate']:.4f} "
@@ -8771,9 +10276,16 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
         )
     if result.get("mode") == "continuation":
         return (
-            f"model={model['name']} exact={result['exact_match_rate']:.4f} "
-            f"token_agreement={result['token_prefix_agreement']:.4f} "
-            f"mean_first_divergence={result['mean_first_divergence']:.2f} "
+            f"model={model['name']} divergent_count={result['divergent_count']} "
+            f"divergence_rate={result['divergence_rate']:.4f} "
+            f"mean_divergent_first_divergence="
+            f"{_format_optional_float(result['mean_divergent_first_divergence'], precision=2)} "
+            f"mean_divergent_prefix_ratio="
+            f"{_format_optional_float(result['mean_divergent_prefix_ratio'])} "
+            f"min_divergent_prefix_ratio="
+            f"{_format_optional_float(result['min_divergent_prefix_ratio'])} "
+            f"mean_divergent_severity={result['mean_divergent_severity']:.4f} "
+            f"max_divergent_severity={result['max_divergent_severity']:.4f} "
             f"granularity={result.get('comparison_granularity', '')} {common}"
         )
     if result.get("mode") == "diffusion_image_clip_parity":
@@ -8934,7 +10446,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--raw", required=True)
     p.add_argument("--predictions", required=True)
 
-    p = sub.add_parser("compare-continuation")
+    p = sub.add_parser(
+        "compare-continuation",
+        help="Measure HF/TRTFB continuation divergence frequency and severity.",
+    )
     p.add_argument("--work-dir", required=True)
     p.add_argument("--hf-predictions")
     p.add_argument("--trtfb-predictions")
@@ -8942,6 +10457,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument("--local-files-only", action="store_true")
     p.add_argument("--output")
+
+    p = sub.add_parser("prepare-media")
+    p.add_argument("--output-root", type=Path, required=True)
+    p.add_argument("--vbench-info", type=Path)
+    p.add_argument("--gedit-source", default="")
+    p.add_argument("--sana-wm-root", type=Path)
+    p.add_argument("--limit", type=int, default=10)
+
+    p = sub.add_parser("prepare-ci-dataset")
+    p.add_argument("--suites", default=str(DEFAULT_SUITES))
+    p.add_argument("--suite", required=True)
+    p.add_argument("--ci-lane", required=True)
+    p.add_argument("--dataset")
+    p.add_argument("--dataset-cache-root", required=True)
 
     p = sub.add_parser("score")
     p.add_argument("--answers")
@@ -8988,6 +10517,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--work-root", default="/tmp/trtmc-task-eval")
     p.add_argument("--engine-dir", default="")
     p.add_argument(
+        "--ci-lane",
+        default="",
+        help="Run the suite's fail-closed CI profile for this lane.",
+    )
+    p.add_argument("--dataset-cache-root", default=".ci/task-eval-data")
+    p.add_argument("--artifact-dir", default="")
+    p.add_argument(
         "--bundle", default="", help="Prebuilt bundle path; only valid with one --model."
     )
     p.add_argument(
@@ -9001,6 +10537,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample-seed", type=int)
     p.add_argument("--force-hf", action="store_true", help="Regenerate HF reference outputs.")
     p.add_argument("--force-build", action="store_true", help="Rebuild the .trtfb bundle.")
+    p.add_argument(
+        "--require-prebuilt-bundles",
+        action="store_true",
+        help="Fail instead of building when a selected bundle is missing.",
+    )
     p.add_argument(
         "--fail-fast",
         action="store_true",
@@ -9382,12 +10923,35 @@ def cmd_eval_worker(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_prepare_media(args: argparse.Namespace) -> int:
+    from tools.prepare_media_task_eval_datasets import prepare_media_datasets
+
+    outputs = prepare_media_datasets(
+        output_root=args.output_root,
+        vbench_info=args.vbench_info,
+        gedit_source=args.gedit_source,
+        sana_wm_root=args.sana_wm_root,
+        limit=args.limit,
+    )
+    for output in outputs:
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        print(f"{output}: {payload['request_count']} requests")
+    return 0
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     suites = load_suites(Path(args.suites))
     suite = suite_by_id(suites, args.suite)
+    ci_lane = str(getattr(args, "ci_lane", ""))
+    expected_models = (
+        configure_ci_eval(args, suite)
+        if ci_lane
+        else list(suite.get("default_model_names", []))
+    )
     dataset_kind = suite.get("dataset", {}).get("kind", "")
     if dataset_kind not in {
         "mmlu_five_shot_json",
+        "text_generation_json",
         "vlm_chat_json",
         "vlm_unified_json",
         "asr_chat_json",
@@ -9400,6 +10964,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
         "image_classification_json",
         "semantic_segmentation_json",
         "prompted_segmentation_json",
+        "time_series_csv",
+        "reranking_json",
     }:
         raise ValueError(f"eval does not support dataset kind {dataset_kind!r}")
     models = load_manifest_records(Path(args.models_dir))
@@ -9498,6 +11064,18 @@ def cmd_eval(args: argparse.Namespace) -> int:
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"[task_eval] summary={summary_path}")
+    artifact_dir = str(getattr(args, "artifact_dir", ""))
+    if artifact_dir:
+        write_public_ci_artifacts(
+            suite=suite,
+            expected_models=expected_models,
+            results=results,
+            work_root=Path(args.work_root),
+            artifact_dir=Path(artifact_dir),
+        )
+    if ci_lane:
+        passed, _ = validate_eval_summary(out, expected_models)
+        return 0 if passed else 1
     return 0
 
 
@@ -9509,6 +11087,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_plan(args)
     if args.cmd == "prepare":
         return cmd_prepare(args)
+    if args.cmd == "prepare-media":
+        return cmd_prepare_media(args)
+    if args.cmd == "prepare-ci-dataset":
+        return cmd_prepare_ci_dataset(args)
     if args.cmd == "run-hf":
         run_hf_reference(args)
         return 0

@@ -163,6 +163,250 @@ suites:
         Intended for local/p2021 validation before a sampled CI variant is
         enabled.
 
+  - id: humaneval_code_continuation_parity
+    description: >
+      Greedy code-completion parity on the official HumanEval prompts used by
+      both CodeGen and StarCoder2 evaluations. Functional pass@1 is intentionally
+      not executed by this runner. Divergence is expected and reported as its
+      per-sample frequency, first position, normalized prefix, and severity.
+    user_contract: code_completion
+    default_model_names:
+      - codegen-350m
+      - starcoder2-3b
+    dataset:
+      kind: text_generation_json
+      name: OpenAI HumanEval
+      default_path: /mnt/data/HumanEval/humaneval_task_eval.json
+      prompt_source: prompt
+      answer_field: answer
+      subject_field: subject
+      sample_prefix: humaneval
+    selectors:
+      model_names:
+        - codegen-350m
+        - starcoder2-3b
+      task_strategies:
+        - text_generation_causal
+      user_contracts:
+        - code_completion
+    generation:
+      max_new_tokens: 64
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+    model_overrides:
+      by_model:
+        codegen-350m:
+          build_generation_headroom: true
+        starcoder2-3b:
+          build_generation_headroom: true
+    gates: {}
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Run with --limit 10 on GB300. Generated code is not executed by
+        task-eval; HumanEval pass@1 remains a separate diagnostic.
+
+  - id: wikitext103_distilgpt2_continuation_parity
+    description: >
+      Greedy language-model continuation parity for DistilGPT2 on WikiText-103,
+      the benchmark reported by its model card. Full-corpus perplexity is outside
+      this smoke runner; divergence frequency and severity are diagnostic.
+    user_contract: continuation_parity
+    default_model_names:
+      - distilgpt2
+    dataset:
+      kind: text_generation_json
+      name: WikiText-103 test
+      default_path: /mnt/data/WikiText103/wikitext103_task_eval.json
+      prompt_source: prompt
+      answer_field: answer
+      subject_field: subject
+      sample_prefix: wikitext103
+    selectors:
+      model_names:
+        - distilgpt2
+      task_strategies:
+        - text_generation_causal
+      user_contracts:
+        - model_card_generation_parity
+    generation:
+      max_new_tokens: 64
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+    model_overrides:
+      by_model:
+        distilgpt2:
+          build_generation_headroom: true
+    gates: {}
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Run with --limit 10 on GB300; full-corpus perplexity is not meaningful
+        on the smoke slice.
+
+  - id: newstest2019_en_ru_marian_translation_parity
+    description: >
+      English-to-Russian translation parity for Marian on WMT newstest2019,
+      one of the checkpoint model card's reported benchmarks. SacreBLEU is
+      reported separately while backend divergence frequency and severity are
+      retained per sample.
+    user_contract: translation
+    default_model_names:
+      - marian-en-ru
+    dataset:
+      kind: text_generation_json
+      name: WMT newstest2019 English-Russian
+      default_path: /mnt/data/WMT19_en_ru/newstest2019_en_ru_task_eval.json
+      prompt_source: prompt
+      answer_field: answer
+      subject_field: subject
+      sample_prefix: newstest2019_en_ru
+    selectors:
+      model_names:
+        - marian-en-ru
+      task_strategies:
+        - text_generation_causal
+      runtime_strategies:
+        - marian_translation
+      user_contracts:
+        - translation
+    generation:
+      max_new_tokens: 128
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+      task_metric: sacrebleu
+    gates: {}
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Run with --limit 10 on GB300. BLEU on ten samples is diagnostic only.
+
+  - id: wmt14_en_de_t5_translation_parity
+    description: >
+      English-to-German translation parity for T5-small on the WMT task used by
+      the T5 paper. Inputs retain the checkpoint's required task prefix;
+      SacreBLEU and backend divergence severity are diagnostic.
+    user_contract: seq2seq_output
+    default_model_names:
+      - t5-small
+    dataset:
+      kind: text_generation_json
+      name: WMT14 English-German
+      default_path: /mnt/data/WMT14_de_en/wmt14_en_de_t5_task_eval.json
+      prompt_source: prompt
+      answer_field: answer
+      subject_field: subject
+      sample_prefix: wmt14_en_de
+    selectors:
+      model_names:
+        - t5-small
+      task_strategies:
+        - text_generation_causal
+      runtime_strategies:
+        - t5_text_to_text
+      user_contracts:
+        - seq2seq_output
+    generation:
+      max_new_tokens: 128
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+      task_metric: sacrebleu
+    gates: {}
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Dataset prompts must be prefixed with "translate English to German:".
+        Derive them by reversing the existing WMT14 de-en parallel JSONL under
+        /mnt/data/WMT14_de_en. Run with --limit 10 on GB300; BLEU is diagnostic
+        on the smoke slice.
+
+  - id: flores200_en_fr_riva_translation_parity
+    description: >
+      English-to-French translation parity for Riva Translate on FLORES-200,
+      one of the checkpoint model card's reported benchmark families. Dataset
+      prompts use the model-card en-fr chat expansion so both backends consume
+      the identical rendered text. SacreBLEU and backend divergence severity
+      remain diagnostic.
+    user_contract: translation
+    default_model_names:
+      - riva-translate-4b
+    dataset:
+      kind: text_generation_json
+      name: FLORES-200 devtest English-French
+      default_path: /mnt/data/FLORES200_en_fr/flores200_en_fr_task_eval.json
+      prompt_source: prompt
+      answer_field: answer
+      subject_field: subject
+      sample_prefix: flores200_en_fr
+    selectors:
+      model_names:
+        - riva-translate-4b
+      task_strategies:
+        - text_generation_causal
+      runtime_strategies:
+        - mistral_decoder_kv_cache
+      user_contracts:
+        - translation
+    generation:
+      max_new_tokens: 128
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+      task_metric: sacrebleu
+    model_overrides:
+      by_model:
+        riva-translate-4b:
+          build_generation_headroom: true
+    gates: {}
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Run with --limit 10 on GB300. BLEU on ten samples is diagnostic only.
+
   - id: vlm_mmmu_pro_vision_mcq
     description: >
       Local VLM multiple-choice accuracy evaluation on MMMU-Pro-Vision. This
@@ -584,6 +828,168 @@ suites:
       notes: >
         P2021-only until the DPG-Bench scorecard is visually calibrated.
 
+  - id: vbench_t2v_diffusion_video
+    description: >
+      HF-to-TRTMC text-to-video parity on a fixed ten-prompt slice of the
+      official VBench prompt suite. The slice spans motion, dynamics, object
+      composition, human action, color, spatial relationships, scene, and
+      temporal/appearance style. Every sample records the shared seed and
+      reference-relative frame metrics; VBench quality scoring remains a
+      separate downstream concern.
+    user_contract: diffusion_video
+    default_model_names:
+      - ltx-video-l0
+      - wan21-t2v-1.3b-l0
+    dataset:
+      kind: diffusion_prompt_json
+      default_path: /mnt/data/VBench/vbench_t2v_task_eval.json
+      prompt_field: prompt
+      subject_field: category
+    selectors:
+      model_names:
+        - ltx-video-l0
+        - wan21-t2v-1.3b-l0
+      task_strategies:
+        - diffusion_media_generation
+      runtime_strategies:
+        - diffusion_ltx
+        - diffusion_wan
+      user_contracts:
+        - diffusion_video
+      families:
+        - ltx_video
+        - wan_t2v
+    generation:
+      seed: 42
+      use_shared_initial_latents: true
+    scoring:
+      scorer: diffusion_image_clip_parity
+    gates:
+      require_matching_initial_latents: 1
+      min_pixel_mean: 0.15
+      max_pixel_mean: 0.85
+      min_pixel_std: 0.05
+      temporal_consistency: 0.60
+      min_trt_hf_image_clip_cosine: 0.85
+    family_profiles:
+      ltx_video:
+        generation:
+          text_max_length: 128
+        gates:
+          psnr: 5.0
+          ssim: 0.1
+      wan_t2v:
+        generation:
+          text_max_length: 226
+        gates:
+          psnr: 2.0
+          ssim: -1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only sampled validation. Run with --limit 10; do not expand to
+        the full VBench prompt suite in task-eval.
+
+  - id: gedit_bench_image_edit
+    description: >
+      HF-to-TRTMC image-edit parity on ten task-diverse English inputs from
+      the official GEdit-Bench used by the Qwen-Image technical report. Input
+      images are deterministically center-cropped to the manifest's static
+      1024x1024 condition geometry. Each sample records the condition-image
+      digest, shared seed and initial-latent digest before semantic comparison.
+    user_contract: image-to-image
+    default_model_names:
+      - qwen-image-edit-2511
+    dataset:
+      kind: diffusion_prompt_json
+      default_path: /mnt/data/GEdit-Bench/gedit_bench_task_eval.json
+      prompt_field: prompt
+      subject_field: category
+      asset_fields:
+        - image
+    selectors:
+      model_names:
+        - qwen-image-edit-2511
+      task_strategies:
+        - diffusion_media_generation
+      runtime_strategies:
+        - diffusion_qwen_image
+      user_contracts:
+        - image-to-image
+      families:
+        - qwen_image
+    generation:
+      seed: 42
+      video_num_frames: 1
+      use_shared_initial_latents: true
+    scoring:
+      scorer: diffusion_image_clip_parity
+    gates:
+      min_pixel_mean: 0.15
+      max_pixel_mean: 0.85
+      min_pixel_std: 0.05
+      min_trt_hf_image_clip_cosine: 0.85
+      require_matching_initial_latents: 1
+      psnr: 5.0
+      ssim: 0.1
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only sampled validation. Run with --limit 10; this suite reports
+        implementation agreement, not the GEdit judge score.
+
+  - id: sana_wm_benchmark_diffusion_video
+    description: >
+      HF-to-TRTMC image-to-video parity on ten scenes sampled from the
+      official SANA-WM 80-scene benchmark. Both backends consume the same
+      image, prompt, intrinsics, seed, and 320-step action-string trajectory.
+      The current native TRT runtime cannot ingest the benchmark's arbitrary
+      c2w files, so official 60-second pose-accuracy scoring remains out of
+      scope and is recorded as a dataset limitation.
+    user_contract: diffusion_video
+    default_model_names:
+      - sana-wm-bidirectional
+    dataset:
+      kind: diffusion_prompt_json
+      default_path: /mnt/data/SANA-WM-Bench/sana_wm_task_eval.json
+      prompt_field: prompt
+      subject_field: category
+      asset_fields:
+        - image
+        - prompt_file
+        - camera_intrinsics_file
+    selectors:
+      model_names:
+        - sana-wm-bidirectional
+      task_strategies:
+        - diffusion_media_generation
+      runtime_strategies:
+        - diffusion_sana_wm
+      user_contracts:
+        - diffusion_video
+      families:
+        - sana_wm
+    generation:
+      seed: 42
+    scoring:
+      scorer: diffusion_image_clip_parity
+    gates:
+      min_pixel_mean: 0.15
+      max_pixel_mean: 0.85
+      min_pixel_std: 0.05
+      temporal_consistency: 0.60
+      min_trt_hf_image_clip_cosine: 0.85
+      psnr: 5.0
+      ssim: 0.1
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only sampled validation. Run with --limit 10; the full official
+        961-frame benchmark and its pose evaluator are intentionally excluded.
+
   - id: imagenette_image_classification
     description: >
       HF-to-TRTMC image-classification parity on Imagenette validation, a
@@ -659,13 +1065,15 @@ suites:
 
   - id: coco2017_prompted_segmentation
     description: >
-      Point-prompted segmentation parity on COCO 2017 validation. SAM uses a
-      deterministic foreground point and its instance mask. Backend mask
-      agreement is gated while COCO ground-truth IoU is reported and guarded
-      against regression from the HF reference.
+      Unified prompted-segmentation parity on COCO 2017 validation. SAM uses a
+      deterministic foreground point and its instance mask; SAM3 uses the COCO
+      category text prompt and the exhaustive union of category instances.
+      Backend mask agreement is gated while COCO ground-truth IoU is reported
+      and guarded against regression from the HF reference.
     user_contract: prompted_mask
     default_model_names:
       - sam-vit-base
+      - sam3
     dataset:
       kind: prompted_segmentation_json
       name: COCO 2017 validation prompted segmentation
@@ -679,8 +1087,10 @@ suites:
         - prompted_segmentation
       runtime_strategies:
         - sam_prompted_segmentation
+        - sam3_prompted_segmentation
       families:
         - sam
+        - sam3
       user_contracts:
         - prompted_mask
     scoring:
@@ -697,9 +1107,144 @@ suites:
         sam:
           prompt_mode: point
           ground_truth_mask_field: instance_mask
+        sam3:
+          prompt_mode: text
+          ground_truth_mask_field: category_mask
     ci:
       eligible: false
       lane: local_only
+
+  - id: etth1_time_series_parity
+    description: >
+      Per-sample HF-versus-TRTMC numeric parity on official ETTh1 test windows.
+      Model-specific adapters preserve each checkpoint's native contract:
+      univariate quantile/point forecasts, seven-channel point forecasts, and
+      six-channel regression. Every sample must satisfy both relative-L2 and
+      maximum-absolute-error gates.
+    user_contract: time_series_prediction_parity
+    default_model_names:
+      - chronos-bolt-tiny-official
+      - patchtsmixer-granite-official
+      - patchtst-etth1-regression-distribution
+      - patchtst-granite-official
+      - timesfm-2.0-500m-official
+    dataset:
+      kind: time_series_csv
+      name: ETT-small ETTh1
+      default_path: /mnt/data/ETTh1/ETTh1.csv
+      source: https://raw.githubusercontent.com/zhouhaoyi/ETDataset/1d16c8f4f943005d613b5bc962e9eeb06058cf07/ETT-small/ETTh1.csv
+      source_revision: 1d16c8f4f943005d613b5bc962e9eeb06058cf07
+      sha256: f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066
+      sample_prefix: etth1
+      # Standard ETT-hourly split: 12 train + 4 validation + 4 test months.
+      test_target_start: 11520
+      test_end: 14400
+    selectors:
+      task_strategies:
+        - neural_operator
+      runtime_strategies:
+        - chronos_bolt_trt
+        - patchtsmixer_trt
+        - patchtst_trt
+        - timesfm_trt
+      families:
+        - chronos_bolt
+        - patchtsmixer
+        - patchtst
+        - timesfm
+      user_contracts:
+        - time_series_point_forecast
+        - time_series_quantile_forecast
+        - time_series_regression
+    scoring:
+      scorer: time_series_parity
+    gates:
+      min_sample_agreement_rate: 1.0
+      max_relative_l2: 0.01
+      max_absolute_error: 0.1
+    model_overrides:
+      by_model:
+        chronos-bolt-tiny-official:
+          time_series:
+            input_columns: [OT]
+            target_columns: [OT]
+            input_key: branch_input
+            context_length: 512
+            prediction_length: 64
+            stride: 24
+            test_fraction: 0.2
+        patchtsmixer-granite-official:
+          time_series:
+            input_columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL, OT]
+            target_columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL, OT]
+            input_key: field_input
+            context_length: 512
+            prediction_length: 96
+            stride: 24
+            test_fraction: 0.2
+        patchtst-etth1-regression-distribution:
+          time_series:
+            input_columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL]
+            target_columns: [OT]
+            input_key: field_input
+            context_length: 512
+            prediction_length: 1
+            stride: 24
+            test_fraction: 0.2
+        patchtst-granite-official:
+          time_series:
+            input_columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL, OT]
+            target_columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL, OT]
+            input_key: field_input
+            context_length: 512
+            prediction_length: 96
+            stride: 24
+            test_fraction: 0.2
+        timesfm-2.0-500m-official:
+          time_series:
+            input_columns: [OT]
+            target_columns: [OT]
+            input_key: branch_input
+            context_length: 2048
+            prediction_length: 128
+            stride: 24
+            test_fraction: 0.2
+            frequency: 0
+    model_profiles:
+      # Calibrated on 100 deterministic GB300 ETTh1 windows (seed 20260715).
+      # Relative-L2 remains the primary scale-aware drift bound; maximum
+      # absolute error is a catastrophic-tail guard for each full output.
+      chronos-bolt-tiny-official:
+        gates:
+          max_relative_l2: 1.0e-06
+          max_absolute_error: 8.0e-06
+      patchtsmixer-granite-official:
+        gates:
+          max_relative_l2: 5.0e-04
+          max_absolute_error: 2.5e-02
+      patchtst-etth1-regression-distribution:
+        gates:
+          max_relative_l2: 1.0e-03
+          max_absolute_error: 1.0e-03
+      patchtst-granite-official:
+        gates:
+          max_relative_l2: 1.5e-03
+          max_absolute_error: 3.5e-02
+      timesfm-2.0-500m-official:
+        gates:
+          max_relative_l2: 4.0e-03
+          max_absolute_error: 7.0e-03
+    ci:
+      eligible: true
+      lane: nightly
+      limit: 10
+      sample_seed: 20260715
+      notes: >
+        Run as a blocking nightly GB300 task-eval stage. ETTh1 is shared by all
+        five checkpoints, but output quality metrics are not mixed across their
+        distinct forecast and regression contracts; this suite gates backend
+        prediction parity. TimesFM remains gated at its reviewed tolerance while
+        its observed FP32 divergence is investigated.
 
   - id: stsbenchmark_encoder_embedding_parity
     description: >
@@ -777,6 +1322,49 @@ suites:
       xlnet-base:
         gates:
           min_vector_cosine: 0.95
+
+  - id: beir_scifact_reranking
+    description: >
+      Per-query HF-versus-TRTMC ranking parity on the BEIR SciFact test split.
+      Each sample ranks the same relevant passage and deterministic distractors;
+      every low-agreement sample is retained in summary.json. Gold top-1
+      retrieval accuracy is reported separately as a task-quality diagnostic.
+    user_contract: ranking_order
+    default_model_names:
+      - nemotron-rerank-vl-1b-v2
+    dataset:
+      kind: reranking_json
+      name: BEIR SciFact test reranking
+      default_path: /mnt/data/BEIR_scifact_reranking/beir_scifact_reranking.json
+      subject_field: subset
+    selectors:
+      model_names:
+        - nemotron-rerank-vl-1b-v2
+      task_strategies:
+        - reranking
+      runtime_strategies:
+        - eagle_vlm_reranking
+      families:
+        - eagle_vlm
+      user_contracts:
+        - ranking_order
+    scoring:
+      scorer: reranking_parity
+      task_metric: top1_retrieval_accuracy
+    gates:
+      # Match the model-owned E2E ranking contract per query.
+      pairwise_ordering_agreement: 1.0
+      kendall_tau: 1.0
+      spearman_rho: 1.0
+      score_correlation: 0.95
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        The limit-10 GB300 run is smoke coverage; use the complete processed
+        SciFact test set for a stable task-quality score.
+
   - id: wmt14_de_en_elf_diffusion_text
     description: >
       HF-versus-TRTMC parity evaluation for ELF-B translation on WMT14

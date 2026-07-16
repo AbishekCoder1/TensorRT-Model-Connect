@@ -4,15 +4,23 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import struct
 import sys
+import types
 import wave
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
+import numpy as np
 import pytest
+from PIL import Image
 
+from tools import prepare_media_task_eval_datasets as prepare_media
 from tools import task_eval
 
 
@@ -192,6 +200,207 @@ def _write_stsbenchmark(path: Path) -> None:
     )
 
 
+def _write_time_series_csv(path: Path, row_count: int = 40) -> None:
+    lines = ["date,A,B"]
+    for index in range(row_count):
+        lines.append(f"2026-01-{index + 1:02d},{index},{100 + index}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_default_suites_include_etth1_time_series_parity() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "etth1_time_series_parity")
+
+    assert suite["dataset"]["kind"] == "time_series_csv"
+    assert suite["dataset"]["source_revision"] == (
+        "1d16c8f4f943005d613b5bc962e9eeb06058cf07"
+    )
+    assert suite["dataset"]["sha256"] == (
+        "f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066"
+    )
+    assert suite["scoring"]["scorer"] == "time_series_parity"
+    assert suite["gates"]["min_sample_agreement_rate"] == 1.0
+    assert suite["default_model_names"] == [
+        "chronos-bolt-tiny-official",
+        "patchtsmixer-granite-official",
+        "patchtst-etth1-regression-distribution",
+        "patchtst-granite-official",
+        "timesfm-2.0-500m-official",
+    ]
+    models = task_eval.load_manifest_records()
+    plan = task_eval.build_plan([suite], models)
+    assert {row["model"] for row in plan if row["selected"]} == set(suite["default_model_names"])
+    assert suite["ci"]["eligible"] is True
+    assert suite["ci"]["lane"] == "nightly"
+    assert suite["ci"]["limit"] == 10
+    assert suite["ci"]["sample_seed"] == 20260715
+    expected_gates = {
+        "chronos-bolt-tiny-official": (1.0e-06, 8.0e-06),
+        "patchtsmixer-granite-official": (5.0e-04, 2.5e-02),
+        "patchtst-etth1-regression-distribution": (1.0e-03, 1.0e-03),
+        "patchtst-granite-official": (1.5e-03, 3.5e-02),
+        "timesfm-2.0-500m-official": (4.0e-03, 7.0e-03),
+    }
+    for model_name, (max_relative_l2, max_absolute_error) in expected_gates.items():
+        profile = suite["model_profiles"][model_name]
+        assert profile["gates"]["max_relative_l2"] == max_relative_l2
+        assert profile["gates"]["max_absolute_error"] == max_absolute_error
+        assert suite["model_overrides"]["by_model"][model_name]["time_series"]["stride"] == 24
+
+
+def test_prepare_time_series_csv_dataset_uses_time_major_windows(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "series.csv"
+    _write_time_series_csv(dataset_path)
+    work_dir = tmp_path / "work"
+    suite = {
+        "id": "time_series_test",
+        "dataset": {"kind": "time_series_csv", "name": "test series"},
+        "scoring": {"scorer": "time_series_parity"},
+    }
+
+    task_eval.prepare_time_series_csv_dataset(
+        dataset_path=dataset_path,
+        work_dir=work_dir,
+        suite=suite,
+        limit=2,
+        task_eval_config={
+            "time_series": {
+                "input_columns": ["A", "B"],
+                "target_columns": ["B"],
+                "input_key": "branch_input",
+                "context_length": 3,
+                "prediction_length": 2,
+                "stride": 2,
+                "test_fraction": 0.5,
+                "frequency": 0,
+            }
+        },
+    )
+
+    prompts = task_eval.load_jsonl(work_dir / "prompts.jsonl")
+    answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
+    manifest = json.loads((work_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert len(prompts) == len(answers["requests"]) == 2
+    assert prompts[0]["dataset_index"] == 20
+    assert prompts[0]["context_index"] == 17
+    assert prompts[0]["inputs"] == {
+        "branch_input": [17.0, 117.0, 18.0, 118.0, 19.0, 119.0],
+        "trunk_input": [0],
+    }
+    assert prompts[0]["target_values"] == [120.0, 121.0]
+    assert manifest["time_series"]["context_length"] == 3
+
+
+def test_time_series_case_replaces_manifest_probe_inputs() -> None:
+    template = SimpleNamespace(name="template", inputs={"field_input": [999], "stale": True})
+
+    case = task_eval._time_series_case_for_request(
+        template,
+        {
+            "sample_id": "etth1_000001",
+            "inputs": {"branch_input": [1.0, 2.0], "trunk_input": [0]},
+        },
+        0,
+    )
+
+    assert case.name == "etth1_000001"
+    assert case.inputs == {"branch_input": [1.0, 2.0], "trunk_input": [0]}
+    assert template.inputs == {"field_input": [999], "stale": True}
+
+
+def test_time_series_trtfb_reuses_model_runner_and_writes_run_log(
+    tmp_path: Path, monkeypatch
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "time_series_csv"}), encoding="utf-8"
+    )
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps(
+            {
+                "sample_id": "etth1_011520",
+                "inputs": {"field_input": [1.0, 2.0, 3.0]},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    template = SimpleNamespace(
+        name="template",
+        inputs={"field_input": [999.0]},
+        stages=[],
+        bundle="template.trtfb",
+    )
+    captured_inputs: list[dict] = []
+
+    class FakeRunner:
+        def run_stage(self, case, stage, context):
+            captured_inputs.append(dict(case.inputs))
+            return SimpleNamespace(
+                data={"output_field": [1.5, 2.5], "output_dim": 2},
+                metadata={"command": ["trtmc", "solve"], "returncode": 0},
+                timing_s=0.01,
+            )
+
+    monkeypatch.setattr(
+        task_eval,
+        "_load_time_series_task_eval_plugins",
+        lambda _work_dir: (template, object(), FakeRunner()),
+    )
+    task_eval.run_time_series_trtfb(
+        SimpleNamespace(
+            work_dir=str(work_dir),
+            raw_output="",
+            predictions="",
+            log="",
+            bundle=str(tmp_path / "model.trtfb"),
+            trtmc_binary="trtmc",
+            hf_python="python",
+            model_plugin_dir="",
+        )
+    )
+
+    predictions = json.loads(
+        (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+    )
+    log_row = task_eval.load_jsonl(work_dir / "trtfb_run.log")[0]
+    assert captured_inputs == [{"field_input": [1.0, 2.0, 3.0]}]
+    assert predictions["responses"][0]["output_values"] == [1.5, 2.5]
+    assert log_row["sample_id"] == "etth1_011520"
+    assert log_row["command"] == ["trtmc", "solve"]
+
+
+def test_time_series_parity_requires_every_sample_to_pass() -> None:
+    hf = {
+        "responses": [
+            {"sample_id": "a", "output_values": [1.0, 2.0]},
+            {"sample_id": "b", "output_values": [3.0, 4.0]},
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {"sample_id": "a", "output_values": [1.0, 2.0001]},
+            {"sample_id": "b", "output_values": [3.0, 4.1]},
+        ]
+    }
+
+    summary = task_eval.compare_time_series_prediction_sets(
+        hf,
+        trtfb,
+        gates={
+            "max_relative_l2": 1e-3,
+            "max_absolute_error": 1e-3,
+            "min_sample_agreement_rate": 1.0,
+        },
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["passed_count"] == 1
+    assert summary["sample_agreement_rate"] == 0.5
+    assert summary["cases"][0]["passed"] is True
+    assert summary["cases"][1]["passed"] is False
+
+
 def test_default_suites_include_ocrbench_v2_unified() -> None:
     suites = task_eval.load_suites()
     suite = task_eval.suite_by_id(suites, "ocrbench_v2_unified")
@@ -265,6 +474,33 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
     assert "nemotron_speech_streaming" in non_streaming["selectors"]["exclude_families"]
 
 
+def test_default_suites_include_text_generation_gap_models() -> None:
+    suites = task_eval.load_suites()
+    expected = {
+        "humaneval_code_continuation_parity": ["codegen-350m", "starcoder2-3b"],
+        "wikitext103_distilgpt2_continuation_parity": ["distilgpt2"],
+        "newstest2019_en_ru_marian_translation_parity": ["marian-en-ru"],
+        "wmt14_en_de_t5_translation_parity": ["t5-small"],
+        "flores200_en_fr_riva_translation_parity": ["riva-translate-4b"],
+    }
+
+    for suite_id, model_names in expected.items():
+        suite = task_eval.suite_by_id(suites, suite_id)
+        assert suite["dataset"]["kind"] == "text_generation_json"
+        assert suite["scoring"]["scorer"] == "continuation"
+        assert suite["default_model_names"] == model_names
+        assert suite["gates"] == {}
+
+    for suite_id in (
+        "newstest2019_en_ru_marian_translation_parity",
+        "wmt14_en_de_t5_translation_parity",
+        "flores200_en_fr_riva_translation_parity",
+    ):
+        assert task_eval.suite_by_id(suites, suite_id)["scoring"]["task_metric"] == (
+            "sacrebleu"
+        )
+
+
 def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
     suites = task_eval.load_suites()
     suite = task_eval.suite_by_id(suites, "dpg_bench_diffusion_image")
@@ -297,6 +533,50 @@ def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
     }
 
 
+def test_default_suites_include_media_generation_gap_models() -> None:
+    suites = task_eval.load_suites()
+
+    video = task_eval.suite_by_id(suites, "vbench_t2v_diffusion_video")
+    assert video["default_model_names"] == [
+        "ltx-video-l0",
+        "wan21-t2v-1.3b-l0",
+    ]
+    assert video["dataset"]["default_path"] == (
+        "/mnt/data/VBench/vbench_t2v_task_eval.json"
+    )
+    assert video["generation"]["use_shared_initial_latents"] is True
+    assert video["gates"]["min_trt_hf_image_clip_cosine"] == 0.85
+    assert video["gates"]["require_matching_initial_latents"] == 1
+    models = {model["name"]: model for model in task_eval.load_manifest_records()}
+    ltx = task_eval.resolve_suite_for_model(video, models["ltx-video-l0"])
+    wan = task_eval.resolve_suite_for_model(video, models["wan21-t2v-1.3b-l0"])
+    assert ltx["generation"]["text_max_length"] == 128
+    assert wan["generation"]["text_max_length"] == 226
+
+    image_edit = task_eval.suite_by_id(suites, "gedit_bench_image_edit")
+    assert image_edit["default_model_names"] == image_edit["selectors"]["model_names"]
+    assert len(image_edit["default_model_names"]) == 1
+    assert image_edit["dataset"]["asset_fields"] == ["image"]
+    assert image_edit["gates"]["require_matching_initial_latents"] == 1
+
+    world_model = task_eval.suite_by_id(
+        suites, "sana_wm_benchmark_diffusion_video"
+    )
+    assert world_model["default_model_names"] == ["sana-wm-bidirectional"]
+    assert world_model["dataset"]["asset_fields"] == [
+        "image",
+        "prompt_file",
+        "camera_intrinsics_file",
+    ]
+
+    models = task_eval.load_manifest_records()
+    for suite in (video, image_edit, world_model):
+        selected = task_eval.selected_models_for_suite(
+            suite, models, single_device_only=True
+        )
+        assert [model["name"] for model in selected] == suite["default_model_names"]
+
+
 def test_default_suites_include_model_aligned_vision_tasks() -> None:
     suites = task_eval.load_suites()
 
@@ -315,8 +595,106 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
 
     prompted = task_eval.suite_by_id(suites, "coco2017_prompted_segmentation")
     assert prompted["dataset"]["kind"] == "prompted_segmentation_json"
-    assert prompted["default_model_names"] == ["sam-vit-base"]
+    assert prompted["default_model_names"] == ["sam-vit-base", "sam3"]
     assert prompted["model_overrides"]["by_family"]["sam"]["prompt_mode"] == "point"
+    assert prompted["model_overrides"]["by_family"]["sam3"]["prompt_mode"] == "text"
+
+
+def test_default_suites_include_scifact_reranking_parity() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "beir_scifact_reranking")
+    selected = task_eval.selected_models_for_suite(
+        suite, task_eval.load_manifest_records(), single_device_only=True
+    )
+
+    assert suite["dataset"]["kind"] == "reranking_json"
+    assert suite["scoring"]["scorer"] == "reranking_parity"
+    assert [model["name"] for model in selected] == ["nemotron-rerank-vl-1b-v2"]
+    assert suite["gates"]["min_sample_pass_rate"] == 1.0
+
+
+def test_prepare_reranking_dataset_preserves_query_documents_and_gold(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "scifact.json"
+    dataset.write_text(
+        json.dumps(
+            {
+                "dataset": "BEIR SciFact test",
+                "requests": [
+                    {
+                        "id": "scifact-1",
+                        "subset": "test",
+                        "query": "Does the evidence support the claim?",
+                        "documents": ["relevant evidence", "distractor evidence"],
+                        "relevant_document_indices": [0],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "beir_scifact_reranking")
+
+    outputs = task_eval.prepare_reranking_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+    )
+
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    assert prompts[0]["query"] == "Does the evidence support the claim?"
+    assert prompts[0]["documents"] == ["relevant evidence", "distractor evidence"]
+    assert answers["requests"][0]["relevant_document_indices"] == [0]
+
+
+def test_reranking_parity_records_each_low_agreement_sample() -> None:
+    from tests.e2e.models.eagle_vlm.e2e_plugins.comparators.reranking import (
+        RerankingComparator,
+    )
+
+    answers = {
+        "requests": [
+            {"sample_id": "agree", "relevant_document_indices": [0]},
+            {"sample_id": "disagree", "relevant_document_indices": [0]},
+        ]
+    }
+    hf = {
+        "responses": [
+            {"sample_id": "agree", "scores": [0.9, 0.2, 0.1]},
+            {"sample_id": "disagree", "scores": [0.9, 0.2, 0.1]},
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {"sample_id": "agree", "scores": [0.8, 0.3, 0.1]},
+            {"sample_id": "disagree", "scores": [0.1, 0.2, 0.9]},
+        ]
+    }
+
+    summary = task_eval.compare_reranking_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        gates={
+            "pairwise_ordering_agreement": 1.0,
+            "kendall_tau": 1.0,
+            "spearman_rho": 1.0,
+            "score_correlation": 0.95,
+            "min_sample_pass_rate": 1.0,
+        },
+        comparator=RerankingComparator(),
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["sample_pass_rate"] == 0.5
+    assert len(summary["cases"]) == 2
+    disagreement = next(
+        case for case in summary["cases"] if case["sample_id"] == "disagree"
+    )
+    assert disagreement["passed"] is False
+    assert disagreement["metrics"]["pairwise_ordering_agreement"]["value"] < 1.0
 
 
 def test_prepare_vision_datasets_resolves_model_specific_assets(tmp_path: Path) -> None:
@@ -1091,6 +1469,99 @@ def test_prepare_mmlu_writes_answers_and_trtfb_jsonl(tmp_path: Path) -> None:
     assert manifest["request_count"] == 1
 
 
+def test_prepare_text_generation_json_preserves_dataset_sample_id(tmp_path: Path) -> None:
+    dataset = tmp_path / "humaneval.json"
+    dataset.write_text(
+        json.dumps(
+            {
+                "dataset": "OpenAI HumanEval",
+                "requests": [
+                    {
+                        "id": "HumanEval/0",
+                        "prompt": "def add(a, b):\n",
+                        "answer": "    return a + b\n",
+                        "subject": "python",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "humaneval_code_continuation_parity"
+    )
+
+    outputs = task_eval.prepare_task_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=10,
+    )
+
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    assert answers["requests"][0]["sample_id"] == "HumanEval/0"
+    assert prompts[0]["sample_id"] == "HumanEval/0"
+    assert prompts[0]["prompt"] == "def add(a, b):\n"
+    assert manifest["dataset_kind"] == "text_generation_json"
+    assert manifest["limit"] == 10
+
+
+@pytest.mark.parametrize(
+    ("is_encoder_decoder", "expected_model_class"),
+    [(False, "causal"), (True, "seq2seq")],
+)
+def test_load_hf_text_generation_model_selects_configured_auto_class(
+    is_encoder_decoder: bool, expected_model_class: str
+) -> None:
+    calls: list[tuple[str, str, dict]] = []
+
+    class AutoConfig:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            calls.append(("config", model_id, kwargs))
+            return SimpleNamespace(is_encoder_decoder=is_encoder_decoder)
+
+    class Model:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def eval(self):
+            calls.append(("eval", self.kind, {}))
+            return self
+
+    def auto_model(kind):
+        return SimpleNamespace(
+            from_pretrained=lambda model_id, **kwargs: (
+                calls.append((kind, model_id, kwargs)) or Model(kind)
+            )
+        )
+
+    transformers = SimpleNamespace(
+        AutoConfig=AutoConfig,
+        AutoModelForCausalLM=auto_model("causal"),
+        AutoModelForSeq2SeqLM=auto_model("seq2seq"),
+    )
+
+    model, detected_seq2seq = task_eval.load_hf_text_generation_model(
+        transformers,
+        "example/model",
+        model_kwargs={"torch_dtype": "auto"},
+        trust_remote_code=True,
+        local_files_only=True,
+    )
+
+    assert model.kind == expected_model_class
+    assert detected_seq2seq is is_encoder_decoder
+    assert calls[0] == (
+        "config",
+        "example/model",
+        {"trust_remote_code": True, "local_files_only": True},
+    )
+    assert calls[1] == (expected_model_class, "example/model", {"torch_dtype": "auto"})
+
+
 def test_prepare_diffusion_prompts_writes_stable_prompt_rows(tmp_path: Path) -> None:
     dataset = tmp_path / "PartiPrompts.tsv"
     dataset.write_text(
@@ -1167,6 +1638,49 @@ def test_prepare_task_dataset_dispatches_diffusion_prompt_json(tmp_path: Path) -
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
     assert manifest["dataset_kind"] == "diffusion_prompt_json"
     assert manifest["dataset_name"] == "DPG-Bench"
+
+
+def test_prepare_diffusion_json_resolves_declared_sample_assets(
+    tmp_path: Path,
+) -> None:
+    condition = tmp_path / "images" / "condition.png"
+    condition.parent.mkdir()
+    condition.write_bytes(b"condition")
+    dataset = tmp_path / "gedit.json"
+    dataset.write_text(
+        json.dumps(
+            {
+                "dataset": "GEdit-Bench",
+                "requests": [
+                    {
+                        "sample_id": "gedit_000000",
+                        "prompt": "turn the object blue",
+                        "image": "images/condition.png",
+                        "category": "color",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite = {
+        "id": "gedit_bench_image_edit",
+        "dataset": {
+            "kind": "diffusion_prompt_json",
+            "asset_fields": ["image"],
+        },
+    }
+
+    outputs = task_eval.prepare_diffusion_prompt_json_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+    )
+
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    assert answers["requests"][0]["image"] == str(condition.resolve())
+    assert prompts[0]["image"] == str(condition.resolve())
 
 
 def test_prepare_mmlu_applies_gpt_oss_family_override(tmp_path: Path) -> None:
@@ -1662,7 +2176,7 @@ def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
     ]
 
 
-def test_continuation_parity_exact_and_first_divergence() -> None:
+def test_continuation_parity_reports_divergence_severity() -> None:
     hf = {
         "responses": [
             {"sample_id": "a", "output_text": "the cat sat"},
@@ -1679,11 +2193,29 @@ def test_continuation_parity_exact_and_first_divergence() -> None:
     summary = task_eval.compare_continuation_sets(hf, trtfb, tokenize=lambda s: s.split())
 
     assert summary["count"] == 2
+    assert summary["divergence_metric_scope"] == "divergent_samples_only"
+    assert (
+        summary["normalization_denominator"]
+        == "max_hf_trtfb_generated_length"
+    )
     assert summary["exact_match_rate"] == 0.5  # "a" exact, "b" not
     assert summary["samples"][0]["first_divergence"] == 3  # all 3 tokens match
     assert summary["samples"][1]["first_divergence"] == 1  # diverge at token index 1
     # matched prefixes 3 + 1 = 4, ref token counts 3 + 2 = 5
     assert abs(summary["token_prefix_agreement"] - 4 / 5) < 1e-9
+    assert summary["divergent_count"] == 1
+    assert summary["divergence_rate"] == 0.5
+    assert summary["mean_divergent_first_divergence"] == 1.0
+    assert summary["mean_divergent_prefix_ratio"] == 0.5
+    assert summary["min_divergent_prefix_ratio"] == 0.5
+    assert summary["mean_divergent_severity"] == 0.5
+    assert summary["max_divergent_severity"] == 0.5
+    assert summary["samples"][0]["diverged"] is False
+    assert summary["samples"][0]["normalized_first_divergence"] == 1.0
+    assert summary["samples"][0]["divergence_severity"] == 0.0
+    assert summary["samples"][1]["diverged"] is True
+    assert summary["samples"][1]["normalized_first_divergence"] == 0.5
+    assert summary["samples"][1]["divergence_severity"] == 0.5
 
 
 def test_continuation_parity_prefers_generated_token_ids() -> None:
@@ -1709,6 +2241,33 @@ def test_continuation_parity_prefers_generated_token_ids() -> None:
     assert summary["samples"][1]["first_divergence"] == 2
     assert summary["samples"][1]["hf_token_at_divergence"] == 3
     assert summary["samples"][1]["trtfb_token_at_divergence"] == 4
+    assert summary["samples"][1]["normalized_first_divergence"] == 2 / 3
+    assert summary["samples"][1]["divergence_severity"] == 1 / 3
+    assert summary["mean_divergent_prefix_ratio"] == 2 / 3
+    assert summary["mean_divergent_severity"] == 1 / 3
+
+
+def test_continuation_parity_reports_no_divergence_without_empty_means() -> None:
+    predictions = {
+        "responses": [
+            {"sample_id": "a", "output_text": "same", "generated_token_ids": [1, 2]},
+            {"sample_id": "b", "output_text": "", "generated_token_ids": []},
+        ]
+    }
+
+    summary = task_eval.compare_continuation_sets(
+        predictions, predictions, require_token_ids=True
+    )
+
+    assert summary["divergent_count"] == 0
+    assert summary["divergence_rate"] == 0.0
+    assert summary["mean_divergent_first_divergence"] is None
+    assert summary["mean_divergent_prefix_ratio"] is None
+    assert summary["min_divergent_prefix_ratio"] is None
+    assert summary["mean_divergent_severity"] == 0.0
+    assert summary["max_divergent_severity"] == 0.0
+    assert summary["samples"][1]["normalized_first_divergence"] == 1.0
+    assert summary["samples"][1]["divergence_severity"] == 0.0
 
 
 def test_continuation_parity_requires_token_ids_when_requested() -> None:
@@ -1779,7 +2338,108 @@ def test_compare_continuation_cli_writes_json_summary(tmp_path: Path) -> None:
     assert summary["comparison_granularity"] == "generated_token_ids"
     assert summary["exact_match_rate"] == 0.5
     assert summary["token_prefix_agreement"] == 0.75
+    assert summary["divergence_rate"] == 0.5
+    assert summary["mean_divergent_first_divergence"] == 1.0
+    assert summary["mean_divergent_prefix_ratio"] == 0.5
+    assert summary["mean_divergent_severity"] == 0.5
     assert summary["samples"][1]["first_divergence"] == 1
+
+
+def test_continuation_summary_markdown_prioritizes_divergence_severity(
+    tmp_path: Path,
+) -> None:
+    hf = {
+        "responses": [
+            {
+                "sample_id": "exact",
+                "output_text": "same",
+                "generated_token_ids": [1, 2],
+            },
+            {
+                "sample_id": "diverged",
+                "output_text": "left",
+                "generated_token_ids": [3, 4],
+            },
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {
+                "sample_id": "exact",
+                "output_text": "same",
+                "generated_token_ids": [1, 2],
+            },
+            {
+                "sample_id": "diverged",
+                "output_text": "right",
+                "generated_token_ids": [3, 5],
+            },
+        ]
+    }
+    summary = task_eval.compare_continuation_sets(hf, trtfb)
+    output = tmp_path / "summary.md"
+
+    task_eval.write_continuation_summary_markdown(summary, output)
+
+    markdown = output.read_text(encoding="utf-8")
+    assert markdown.startswith("# Continuation Divergence Summary\n")
+    assert "| divergence_metric_scope | divergent_samples_only |" in markdown
+    assert (
+        "| normalization_denominator | max_hf_trtfb_generated_length |"
+        in markdown
+    )
+    assert "| divergence_rate | 0.5000 |" in markdown
+    assert "| mean_divergent_prefix_ratio | 0.5000 |" in markdown
+    assert "| mean_divergent_severity | 0.5000 |" in markdown
+    assert "## Compatibility Diagnostics" in markdown
+    assert "| diverged | 1 | 2 | 2 | 0.5000 | 0.5000 | 4 | 5 |" in markdown
+    assert "| exact |" not in markdown
+
+
+def test_continuation_result_line_prioritizes_divergence_severity() -> None:
+    line = task_eval._format_result_line(
+        {"name": "example"},
+        {
+            "mode": "continuation",
+            "comparison_granularity": "generated_token_ids",
+            "divergent_count": 2,
+            "divergence_rate": 0.2,
+            "mean_divergent_first_divergence": 8.0,
+            "mean_divergent_prefix_ratio": 0.125,
+            "min_divergent_prefix_ratio": 0.109375,
+            "mean_divergent_severity": 0.875,
+            "max_divergent_severity": 0.890625,
+            "hf_reused": True,
+            "bundle_built": False,
+        },
+    )
+
+    assert "divergent_count=2" in line
+    assert "divergence_rate=0.2000" in line
+    assert "mean_divergent_prefix_ratio=0.1250" in line
+    assert "min_divergent_prefix_ratio=0.1094" in line
+    assert "mean_divergent_severity=0.8750" in line
+    assert "max_divergent_severity=0.8906" in line
+    assert "exact=" not in line
+    assert "token_agreement=" not in line
+
+
+def test_dataset_benchmark_serializes_generated_token_ids() -> None:
+    source = (
+        task_eval.REPO_ROOT / "examples" / "trtmc_dataset_benchmark.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert '\\"generated_token_ids\\":[' in source
+
+
+def test_dataset_benchmark_accepts_model_plugin_directory() -> None:
+    source = (
+        task_eval.REPO_ROOT / "examples" / "trtmc_dataset_benchmark.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert 'arg == "--model-plugin-dir"' in source
+    assert "load_options.model_plugin_search_paths.emplace_back" in source
+    assert "result.token_ids[token_idx]" in source
 
 
 def test_convert_trtfb_uses_generated_text_field(tmp_path: Path) -> None:
@@ -2993,6 +3653,114 @@ def test_diffusion_response_preserves_initial_latent_identity() -> None:
     assert response["initial_latents_sha256"] == "abc123"
 
 
+def test_diffusion_sample_inputs_and_response_record_shared_conditions(
+    tmp_path: Path,
+) -> None:
+    from tests.e2e_harness.contracts import E2ECase, StageOutput
+
+    condition = tmp_path / "condition.png"
+    condition.write_bytes(b"condition-image")
+    template = E2ECase(
+        name="image-edit-model",
+        hf_id="example/image-edit-model",
+        family="image_edit_family",
+        runtime_strategy="diffusion_image_edit",
+        task_strategy="diffusion_media_generation",
+        inputs={"image": "/old/image.png", "action": "w-320"},
+    )
+    case = task_eval._diffusion_case_for_prompt(
+        template,
+        {
+            "sample_id": "gedit_000000",
+            "prompt": "turn it blue",
+            "image": str(condition),
+            "action": "w-160,d-160",
+        },
+        {"seed": 42},
+        3,
+    )
+
+    assert case.inputs["image"] == str(condition)
+    assert case.inputs["action"] == "w-160,d-160"
+    assert case.inputs["seed"] == 45
+    response = task_eval._diffusion_response(
+        case.name,
+        "hf",
+        StageOutput(
+            stage_name="end_to_end",
+            data={"returncode": 0, "num_frames": 1},
+        ),
+        case=case,
+    )
+    assert response["seed"] == 45
+    assert response["action"] == "w-160,d-160"
+    assert response["condition_image_sha256"] == task_eval._sha256_file(condition)
+
+
+def test_diffusion_parity_rejects_mismatched_shared_sample_inputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base = {
+        "sample_id": "sample-1",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/frames",
+        "prompt": "a moving object",
+        "seed": 42,
+    }
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_comparator",
+        lambda _work_dir: object(),
+    )
+
+    with pytest.raises(ValueError, match="shared input mismatch.*seed"):
+        task_eval.compare_diffusion_image_predictions(
+            {"responses": [base]},
+            {"responses": [{**base, "seed": 43}]},
+            {"requests": [{"sample_id": "sample-1", "prompt": "a moving object"}]},
+            work_dir=tmp_path,
+            gates={},
+        )
+
+
+def test_diffusion_parity_rejects_dataset_condition_digest_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    row = {
+        "sample_id": "sample-1",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/frames",
+        "prompt": "turn it blue",
+        "condition_image_sha256": "actual-digest",
+    }
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_comparator",
+        lambda _work_dir: object(),
+    )
+
+    with pytest.raises(ValueError, match="dataset input mismatch.*condition_image"):
+        task_eval.compare_diffusion_image_predictions(
+            {"responses": [row]},
+            {"responses": [row]},
+            {
+                "requests": [
+                    {
+                        "sample_id": "sample-1",
+                        "prompt": "turn it blue",
+                        "condition_image_sha256": "declared-digest",
+                    }
+                ]
+            },
+            work_dir=tmp_path,
+            gates={},
+        )
+
+
 def test_diffusion_parity_rejects_mismatched_initial_latents(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -4103,6 +4871,53 @@ def test_eval_parser_accepts_explicit_model_plugin_dir() -> None:
     assert args.model_plugin_dir == "/runtime/models/pixart"
 
 
+def test_eval_accepts_reranking_dataset_kind(tmp_path: Path, monkeypatch) -> None:
+    suite = {"id": "beir_scifact_reranking", "dataset": {"kind": "reranking_json"}}
+    model = {
+        "name": "reranker",
+        "hf_id": "org/reranker",
+        "bundle": "reranker.trtfb",
+    }
+    monkeypatch.setattr(task_eval, "load_suites", lambda *_args, **_kwargs: [suite])
+    monkeypatch.setattr(task_eval, "load_manifest_records", lambda *_args, **_kwargs: [model])
+    monkeypatch.setattr(
+        task_eval,
+        "selected_models_for_suite",
+        lambda *_args, **_kwargs: [model],
+    )
+    monkeypatch.setattr(
+        task_eval,
+        "eval_one_model",
+        lambda **_kwargs: {
+            "suite": suite["id"],
+            "model": model["name"],
+            "mode": "reranking_parity",
+            "sample_pass_rate": 1.0,
+            "mean_pairwise_ordering_agreement": 1.0,
+            "min_pairwise_ordering_agreement": 1.0,
+            "hf_reused": False,
+            "bundle_built": False,
+        },
+    )
+    args = argparse.Namespace(
+        suites="",
+        suite=suite["id"],
+        models_dir="",
+        waives="",
+        waive_platform="",
+        include_waived=False,
+        model=[],
+        single_device_only=True,
+        bundle="",
+        work_root=str(tmp_path / "work"),
+        engine_dir=str(tmp_path / "bundles"),
+        fail_fast=False,
+        disable_model_process_isolation=True,
+    )
+
+    assert task_eval.cmd_eval(args) == 0
+
+
 def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -4401,6 +5216,58 @@ def test_diffusion_text_scores_gold_and_unconditional_quality(monkeypatch) -> No
     assert quality["distinct_1"] == 0.5
 
 
+def test_continuation_translation_reports_bleu_without_gating_task_quality(
+    monkeypatch,
+) -> None:
+    answers = {
+        "requests": [
+            {"sample_id": "translation_0", "answer": "Bonjour.", "subject": "en-fr"}
+        ]
+    }
+    hf = {
+        "responses": [
+            {
+                "sample_id": "translation_0",
+                "output_text": "Bonjour.",
+                "generated_token_ids": [1, 2],
+            }
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {
+                "sample_id": "translation_0",
+                "output_text": "Salut.",
+                "generated_token_ids": [3, 4],
+            }
+        ]
+    }
+    scores = iter(
+        [
+            SimpleNamespace(
+                score=42.0, bp=1.0, sys_len=2, ref_len=2, precisions=[100.0]
+            ),
+            SimpleNamespace(
+                score=37.5, bp=1.0, sys_len=2, ref_len=2, precisions=[75.0]
+            ),
+        ]
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sacrebleu",
+        SimpleNamespace(corpus_bleu=lambda _hypotheses, _references: next(scores)),
+    )
+
+    diagnostics = task_eval.continuation_task_quality_diagnostics(
+        "sacrebleu", hf, trtfb, answers
+    )
+
+    assert diagnostics["hf_corpus_bleu"] == 42.0
+    assert diagnostics["trtfb_corpus_bleu"] == 37.5
+    assert diagnostics["corpus_bleu_abs_delta"] == 4.5
+    assert task_eval.continuation_task_quality_diagnostics("", hf, trtfb, answers) == {}
+
+
 def test_diffusion_text_hf_parity_uses_token_agreement_only() -> None:
     result = task_eval.compare_diffusion_text_prediction_sets(
         {
@@ -4516,3 +5383,352 @@ def test_metric_gates_fail_on_missing_or_out_of_range_metrics() -> None:
         "min_corpus_bleu",
         "max_generation_ppl",
     ]
+
+
+def _ci_suite(*, digest: str = "a" * 64) -> dict:
+    return {
+        "id": "ci_suite",
+        "default_model_names": ["chronos", "timesfm"],
+        "dataset": {
+            "default_path": "/missing/ETTh1.csv",
+            "source": "https://example.com/ETTh1.csv",
+            "sha256": digest,
+        },
+        "ci": {
+            "eligible": True,
+            "lane": "nightly",
+            "limit": 10,
+            "sample_seed": 20260715,
+        },
+    }
+
+
+def test_real_etth1_suite_is_nightly_ci_eligible() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "etth1_time_series_parity")
+
+    ci = task_eval.validate_ci_suite(suite, "nightly")
+
+    assert ci["limit"] == 10
+    assert ci["sample_seed"] == 20260715
+    assert len(suite["default_model_names"]) == 5
+
+
+def test_validate_ci_suite_rejects_wrong_lane() -> None:
+    with pytest.raises(ValueError, match="belongs to lane"):
+        task_eval.validate_ci_suite(_ci_suite(), "premerge")
+
+
+def test_ensure_ci_dataset_downloads_and_verifies_pinned_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b"date,OT\n2026-01-01,1.0\n"
+    digest = hashlib.sha256(content).hexdigest()
+    monkeypatch.setattr(
+        task_eval.urllib.request,
+        "urlopen",
+        lambda _source, timeout: io.BytesIO(content),
+    )
+
+    dataset = task_eval.ensure_ci_dataset(
+        _ci_suite(digest=digest), explicit_path=None, cache_root=tmp_path / "cache"
+    )
+
+    assert dataset.read_bytes() == content
+    assert task_eval._sha256_file(dataset) == digest
+
+
+def test_ensure_ci_dataset_rejects_explicit_checksum_mismatch(tmp_path: Path) -> None:
+    dataset = tmp_path / "ETTh1.csv"
+    dataset.write_text("wrong", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="wrong checksum"):
+        task_eval.ensure_ci_dataset(
+            _ci_suite(), explicit_path=dataset, cache_root=tmp_path / "cache"
+        )
+
+
+def test_configure_ci_eval_uses_suite_models_limit_seed_and_dataset(tmp_path: Path) -> None:
+    dataset = tmp_path / "ETTh1.csv"
+    dataset.write_text("date,OT\n2026-01-01,1.0\n", encoding="utf-8")
+    digest = hashlib.sha256(dataset.read_bytes()).hexdigest()
+    args = argparse.Namespace(
+        ci_lane="nightly",
+        model=[],
+        limit=0,
+        sample_seed=None,
+        single_device_only=False,
+        local_files_only=False,
+        waive_platform="",
+        engine_dir=str(tmp_path / "engines"),
+        dataset=str(dataset),
+        dataset_cache_root=str(tmp_path / "cache"),
+    )
+
+    expected_models = task_eval.configure_ci_eval(args, _ci_suite(digest=digest))
+
+    assert expected_models == ["chronos", "timesfm"]
+    assert args.model == ["chronos", "timesfm"]
+    assert args.limit == 10
+    assert args.sample_seed == 20260715
+    assert args.single_device_only is True
+    assert args.local_files_only is True
+    assert args.waive_platform == "GB300"
+
+
+def test_configure_ci_eval_allows_a_fail_closed_model_subset(tmp_path: Path) -> None:
+    dataset = tmp_path / "ETTh1.csv"
+    dataset.write_text("date,OT\n2026-01-01,1.0\n", encoding="utf-8")
+    args = argparse.Namespace(
+        ci_lane="nightly",
+        model=["timesfm"],
+        limit=0,
+        sample_seed=None,
+        single_device_only=False,
+        local_files_only=False,
+        waive_platform="",
+        engine_dir=str(tmp_path / "engines"),
+        dataset=str(dataset),
+        dataset_cache_root=str(tmp_path / "cache"),
+    )
+
+    expected_models = task_eval.configure_ci_eval(
+        args,
+        _ci_suite(digest=hashlib.sha256(dataset.read_bytes()).hexdigest()),
+    )
+
+    assert expected_models == ["timesfm"]
+    assert args.model == ["timesfm"]
+
+
+def test_validate_eval_summary_fails_closed_on_failed_model() -> None:
+    passed, results = task_eval.validate_eval_summary(
+        {
+            "results": [
+                {"model": "chronos", "status": "passed"},
+                {"model": "timesfm", "status": "failed"},
+            ]
+        },
+        ["chronos", "timesfm"],
+    )
+
+    assert passed is False
+    assert len(results) == 2
+
+
+def test_public_ci_artifacts_omit_private_runner_paths(tmp_path: Path) -> None:
+    work_root = tmp_path / "private-work"
+    numeric = work_root / "ci_suite" / "chronos" / "summary.json"
+    numeric.parent.mkdir(parents=True)
+    numeric.write_text(
+        '{"status":"passed","cases":[],"private_path":"/private/numeric"}\n',
+        encoding="utf-8",
+    )
+    results = [
+        {
+            "suite": "ci_suite",
+            "model": "chronos",
+            "status": "passed",
+            "sample_agreement_rate": 1.0,
+            "work_dir": "/private/runner/work",
+            "bundle": "/private/runner/engine.trtfb",
+        },
+        {"model": "timesfm", "status": "failed", "error": "/private/error"},
+    ]
+    artifact_dir = tmp_path / "public"
+
+    task_eval.write_public_ci_artifacts(
+        suite=_ci_suite(),
+        expected_models=["chronos", "timesfm"],
+        results=results,
+        work_root=work_root,
+        artifact_dir=artifact_dir,
+    )
+
+    public = (artifact_dir / "eval_summary.json").read_text(encoding="utf-8")
+    assert "/private" not in public
+    assert "work_dir" not in public
+    assert "bundle" not in public
+    numeric_public = artifact_dir / "models" / "chronos" / "summary.json"
+    assert "/private" not in numeric_public.read_text(encoding="utf-8")
+
+
+def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> None:
+    source = tmp_path / "VBench_full_info.json"
+    source.write_text(
+        json.dumps(
+            [
+                {
+                    "prompt_en": f"official prompt {index}",
+                    "dimension": [dimension],
+                }
+                for index, dimension in enumerate(prepare_media.VBENCH_DIMENSIONS)
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    output = prepare_media.prepare_vbench(source, tmp_path / "out")
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["request_count"] == 10
+    assert [row["category"] for row in payload["requests"]] == list(
+        prepare_media.VBENCH_DIMENSIONS
+    )
+    assert len({row["prompt"] for row in payload["requests"]}) == 10
+    assert payload["source_info_sha256"]
+    assert payload["license"] == "Apache-2.0"
+
+
+def test_prepare_gedit_writes_task_diverse_static_condition_images(tmp_path: Path) -> None:
+    rows = [
+        {
+            "key": f"sample/{index}",
+            "instruction": f"edit instruction {index}",
+            "instruction_language": "en",
+            "task_type": f"task_{index}",
+            "input_image": Image.new("RGB", (40 + index, 30), (index, 20, 30)),
+            "Intersection_exist": index % 2 == 0,
+        }
+        for index in range(10)
+    ]
+
+    output = prepare_media.prepare_gedit_rows(rows, tmp_path / "GEdit-Bench")
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["request_count"] == 10
+    assert len({row["category"] for row in payload["requests"]}) == 10
+    first = payload["requests"][0]
+    condition = output.parent / first["image"]
+    assert Image.open(condition).size == (1024, 1024)
+    assert first["condition_image_sha256"]
+    assert payload["license"] == "MIT"
+    assert payload["source_revision"] == prepare_media.GEDIT_REVISION
+
+
+def test_prepare_gedit_loads_local_hf_arrow_checkout(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source = tmp_path / "gedit-source"
+    source.mkdir()
+    arrow = source / "data-00000-of-00001.arrow"
+    arrow.touch()
+    rows = [
+        {
+            "key": f"sample-{index}",
+            "instruction": f"edit instruction {index}",
+            "instruction_language": "en",
+            "task_type": f"task_{index}",
+            "input_image": Image.new("RGB", (8, 8)),
+        }
+        for index in range(10)
+    ]
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def fake_load_dataset(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        calls.append((args, kwargs))
+        return rows
+
+    fake_datasets = types.ModuleType("datasets")
+    fake_datasets.load_dataset = fake_load_dataset  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    output = prepare_media.prepare_gedit(str(source), tmp_path / "out")
+
+    assert output.is_file()
+    assert calls == [
+        (("arrow",), {"data_files": [str(arrow.resolve())], "split": "train"})
+    ]
+
+
+def test_prepare_gedit_streams_local_arrow_without_datasets(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    source = tmp_path / "gedit-source"
+    source.mkdir()
+    arrow = source / "data-00000-of-00001.arrow"
+    rows = []
+    for index in range(10):
+        encoded = BytesIO()
+        Image.new("RGB", (8, 8), (index, 20, 30)).save(encoded, format="PNG")
+        rows.append(
+            {
+                "key": f"sample-{index}",
+                "instruction": f"edit instruction {index}",
+                "instruction_language": "en",
+                "task_type": f"task_{index}",
+                "input_image": {"bytes": encoded.getvalue(), "path": None},
+            }
+        )
+    table = pa.Table.from_pylist(rows)
+    with pa.OSFile(str(arrow), "wb") as sink:
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+    monkeypatch.setitem(sys.modules, "datasets", None)
+
+    output = prepare_media.prepare_gedit(str(source), tmp_path / "out")
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["request_count"] == 10
+    assert len(list((output.parent / "images").glob("*.png"))) == 10
+
+
+def _write_sana_split(root: Path, split: str, color_offset: int) -> None:
+    manifest = root / split / "sanawm_export_v2" / "run_manifest.jsonl"
+    manifest.parent.mkdir(parents=True)
+    rows = []
+    categories = ("game_style", "indoor", "outdoor_city", "outdoor_nature")
+    for index in range(12):
+        category = categories[index % len(categories)]
+        scene_id = f"{category}_{index // len(categories) + 1:03d}"
+        image = root / "images" / f"{scene_id}.png"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 6), (index, color_offset, 20)).save(image)
+        camera = root / split / "sanawm_export_v2" / f"{scene_id}.npz"
+        intrinsics = np.repeat(np.eye(3, dtype=np.float32)[None, :, :], 961, axis=0)
+        intrinsics[:, 0, 0] = 800 + index
+        intrinsics[:, 1, 1] = 810 + index
+        intrinsics[:, 0, 2] = 640
+        intrinsics[:, 1, 2] = 352
+        np.savez(
+            camera,
+            c2w=np.zeros((961, 4, 4), dtype=np.float32),
+            intrinsics=intrinsics,
+        )
+        rows.append(
+            {
+                "id": scene_id,
+                "image_path": f"images/{scene_id}.png",
+                "camera_path": f"{split}/sanawm_export_v2/{scene_id}.npz",
+                "prompt": f"official scene prompt {scene_id}",
+            }
+        )
+    manifest.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def test_prepare_sana_wm_uses_official_scene_assets_with_supported_actions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    for offset, split in enumerate(prepare_media.SANA_WM_SPLITS):
+        _write_sana_split(source, split, offset * 5)
+
+    output = prepare_media.prepare_sana_wm(source, tmp_path / "out")
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["request_count"] == 10
+    assert len({row["source_scene_id"] for row in payload["requests"]}) == 10
+    assert "not arbitrary official c2w files" in payload["control_limitation"]
+    assert payload["license"] == "CC-BY-4.0"
+    assert payload["source_revision"] == prepare_media.SANA_WM_REVISION
+    assert set(payload["source_manifest_sha256"]) == set(prepare_media.SANA_WM_SPLITS)
+    first = payload["requests"][0]
+    assert (output.parent / first["image"]).is_file()
+    assert (output.parent / first["prompt_file"]).is_file()
+    intrinsics = np.load(output.parent / first["camera_intrinsics_file"])
+    assert intrinsics.shape == (3, 3)
+    for action in (row["action"] for row in payload["requests"]):
+        assert sum(int(segment.rsplit("-", 1)[1]) for segment in action.split(",")) == 320
