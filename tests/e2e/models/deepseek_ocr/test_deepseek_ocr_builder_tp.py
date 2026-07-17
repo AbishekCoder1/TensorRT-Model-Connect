@@ -18,7 +18,11 @@ try:
     deepseek_ocr_module = importlib.import_module(
         "tensorrt_model_connect.families.deepseek_ocr.plugin")
     from tensorrt_model_connect.checkpoint_mapper import WeightDict
-    from tensorrt_model_connect.families.deepseek_ocr import tp_builder
+    from tensorrt_model_connect import trt_compat
+    from tensorrt_model_connect.families.deepseek_ocr import graph_ops, tp_builder
+    from tensorrt_model_connect.families.deepseek_ocr.prefill_config import (
+        sequence_prefill_profile_lengths,
+    )
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
@@ -257,4 +261,46 @@ def test_deepseek_ocr_uses_official_768_single_view_contract() -> None:
     assert vl_config is not None
     assert vl_config["fixed_image_size"] == 768
     assert vl_config["num_image_pad_tokens"] == 145
+    assert vl_config["prefill_max_length"] == 256
     assert vl_config["preprocessor_type"] == "simple_chw"
+
+
+@pytest.mark.parametrize(
+    ("max_cache_length", "expected"),
+    [(4096, (64, 256)), (128, (64, 128)), (32, (32, 32))],
+)
+def test_deepseek_ocr_bounds_sequence_prefill_profile(
+    max_cache_length: int, expected: tuple[int, int]
+) -> None:
+    assert sequence_prefill_profile_lengths(max_cache_length) == expected
+
+
+def test_deepseek_ocr_decomposes_multirow_sequence_attention() -> None:
+    trt = trt_compat.get_trt()
+    builder = trt.Builder(trt.Logger(trt.Logger.ERROR))
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    head_dim = 128
+    hidden_size = 2 * head_dim
+    q = network.add_input("q", trt.float16, (2, hidden_size))
+    k = network.add_input("k", trt.float16, (5, hidden_size))
+    v = network.add_input("v", trt.float16, (5, hidden_size))
+    mask = network.add_input("mask", trt.float16, (2, 5))
+    mask_4d = graph_ops.add_2d_mask_to_4d(network, mask)
+
+    output = graph_ops.add_attention_from_rows(
+        network, q, k, v,
+        num_heads=2,
+        num_kv_heads=2,
+        head_dim=head_dim,
+        q_seq=2,
+        kv_seq=5,
+        mask=mask_4d,
+        fp32_accumulation=True,
+    )
+
+    assert output.shape == (2, hidden_size)
+    layer_types = [
+        network.get_layer(idx).type for idx in range(network.num_layers)
+    ]
+    assert layer_types.count(trt.LayerType.MATRIX_MULTIPLY) == 2
