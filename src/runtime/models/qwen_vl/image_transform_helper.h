@@ -23,7 +23,8 @@ enum class ImageTransformLayout { kSimpleChw, kMergeGroupChw };
 
 struct ImageTransformParams {
     ImageTransformLayout layout{ImageTransformLayout::kSimpleChw};
-    int32_t target_size{0};
+    int32_t target_height{0};
+    int32_t target_width{0};
     int32_t channels{3};
     int32_t patch_size{14};
     int32_t merge_size{2};
@@ -77,12 +78,12 @@ inline void copy_merge_patch_chw(const std::vector<float>& input_chw,
                     const std::size_t src =
                         static_cast<std::size_t>(c) * pixel_count +
                         static_cast<std::size_t>(orig_h * params.patch_size + py) *
-                            params.target_size +
+                            params.target_width +
                         (orig_w * params.patch_size + px);
                     const std::size_t dst =
                         static_cast<std::size_t>(out_ch) * pixel_count +
                         static_cast<std::size_t>(dst_h * params.patch_size + py) *
-                            params.target_size +
+                            params.target_width +
                         (dst_w * params.patch_size + px);
                     out_values[dst] = input_chw[src];
                 }
@@ -113,16 +114,33 @@ inline void copy_merge_group_chw(const std::vector<float>& input_chw,
     }
 }
 
+inline bool valid_transform_dimensions(const ImageTransformParams& params) {
+    return params.target_height > 0 && params.target_width > 0 && params.channels > 0;
+}
+
+inline bool valid_merge_parameters(const ImageTransformParams& params) {
+    if (params.patch_size <= 0 || params.merge_size <= 0 || params.temporal_patch_size <= 0)
+        return false;
+    return true;
+}
+
+inline bool valid_merge_grid(const ImageTransformParams& params, int32_t grid_h, int32_t grid_w) {
+    if (params.target_height % params.patch_size != 0 ||
+        params.target_width % params.patch_size != 0)
+        return false;
+    return grid_h % params.merge_size == 0 && grid_w % params.merge_size == 0;
+}
+
 inline bool transform_chw_layout(const std::vector<float>& input_chw,
                                  const ImageTransformParams& params, std::vector<float>& out_values,
                                  int32_t& out_channels) {
     out_channels = 0;
-    if (params.target_size <= 0 || params.channels <= 0) {
+    if (!valid_transform_dimensions(params)) {
         return false;
     }
 
     const std::size_t pixel_count =
-        static_cast<std::size_t>(params.target_size) * params.target_size;
+        static_cast<std::size_t>(params.target_height) * params.target_width;
     const std::size_t required_size = static_cast<std::size_t>(params.channels) * pixel_count;
     if (input_chw.size() < required_size) {
         return false;
@@ -134,12 +152,13 @@ inline bool transform_chw_layout(const std::vector<float>& input_chw,
         return true;
     }
 
-    if (params.patch_size <= 0 || params.merge_size <= 0 || params.temporal_patch_size <= 0) {
+    if (!valid_merge_parameters(params))
+        return false;
+    const int32_t grid_h = params.target_height / params.patch_size;
+    const int32_t grid_w = params.target_width / params.patch_size;
+    if (!valid_merge_grid(params, grid_h, grid_w)) {
         return false;
     }
-
-    const int32_t grid_h = params.target_size / params.patch_size;
-    const int32_t grid_w = params.target_size / params.patch_size;
     const int32_t merge_h = grid_h / params.merge_size;
     const int32_t merge_w = grid_w / params.merge_size;
     const int32_t total_channels = params.channels * params.temporal_patch_size;
