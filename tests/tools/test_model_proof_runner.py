@@ -294,6 +294,7 @@ def _run_test_selection(
     suite: str,
     *,
     lease_env: dict[str, str] | None = None,
+    projection_setup: Callable[[Path, dict[str, object]], None] | None = None,
 ) -> dict:
     source = tmp_path / f"{family}-{suite}"
     e2e_source = REPO_ROOT / "tests" / "e2e" / "models" / family
@@ -317,17 +318,15 @@ def _run_test_selection(
     else:
         family_root.mkdir(parents=True)
     revision = "a" * 40
-    (source / ".trtmc-model-projection.json").write_text(
-        json.dumps(
-            {
-                "revision": revision,
-                "model": family,
-                "runtime_model": "fixture_runtime",
-                "e2e_family": family,
-            }
-        ),
-        encoding="utf-8",
-    )
+    projection: dict[str, object] = {
+        "revision": revision,
+        "model": family,
+        "runtime_model": "fixture_runtime",
+        "e2e_family": family,
+    }
+    if projection_setup is not None:
+        projection_setup(source, projection)
+    (source / ".trtmc-model-projection.json").write_text(json.dumps(projection), encoding="utf-8")
     selection_path = tmp_path / f"{family}-{suite}-selection.json"
     env = os.environ.copy()
     for name in (
@@ -487,6 +486,59 @@ def test_selection_includes_every_owned_python_family_test(
     assert expected_family_tests <= set(selection["python_tests"])
 
 
+def _selection_with_nested_adapter_and_unselected_sibling(
+    tmp_path: Path,
+) -> tuple[dict, str, str]:
+    selected_root = "tests/e2e/models/flux/optimized_adapter"
+    sibling_root = "tests/e2e/models/sibling_model/optimized_adapter"
+
+    def project_adapter_tests(source: Path, _projection: dict[str, object]) -> None:
+        selected_tests = source / selected_root
+        selected_tests.mkdir(parents=True)
+        for name in ("test_capsule.py", "test_runtime_contract.py", "test_adapter_e2e.py"):
+            (selected_tests / name).write_text("# projected fixture\n", encoding="utf-8")
+        sibling_tests = source / sibling_root
+        sibling_tests.mkdir(parents=True)
+        (sibling_tests / "test_sibling_capsule.py").write_text(
+            "def test_sibling_capsule(): pass\n", encoding="utf-8"
+        )
+
+    return (
+        _run_test_selection(
+            tmp_path,
+            "flux",
+            "premerge",
+            projection_setup=project_adapter_tests,
+        ),
+        selected_root,
+        sibling_root,
+    )
+
+
+def test_selection_includes_nested_model_owned_adapter_tests(
+    tmp_path: Path,
+) -> None:
+    selection, selected_root, _ = _selection_with_nested_adapter_and_unselected_sibling(tmp_path)
+
+    selected = set(selection["python_tests"])
+    expected_adapter_tests = {
+        f"{selected_root}/{name}" for name in ("test_capsule.py", "test_runtime_contract.py")
+    }
+    assert expected_adapter_tests == {
+        path for path in selected if path.startswith(f"{selected_root}/")
+    }
+    assert expected_adapter_tests
+    assert f"{selected_root}/test_adapter_e2e.py" not in selected
+
+
+def test_selection_excludes_unselected_sibling_model_tests(
+    tmp_path: Path,
+) -> None:
+    selection, _, sibling_root = _selection_with_nested_adapter_and_unselected_sibling(tmp_path)
+
+    assert not any(path.startswith(f"{sibling_root}/") for path in selection["python_tests"])
+
+
 def test_sana_selection_declares_its_pinned_model_reference_cache(
     tmp_path: Path,
 ) -> None:
@@ -509,6 +561,7 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
     assert 'payload["python_tests"]' in inner
     assert "self.source / path" in inner
     assert 'glob("test_*.py")' in selector
+    assert '"TRTMC_BINARY": str(self.work / "build/trtmc")' in inner
 
 
 @pytest.mark.parametrize(

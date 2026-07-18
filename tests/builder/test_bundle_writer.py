@@ -13,6 +13,7 @@ Postconditions: Bundle magic bytes, header JSON, section offsets/sizes, and payl
 
 from __future__ import annotations
 
+import inspect
 import json
 import struct
 
@@ -24,6 +25,7 @@ from tensorrt_model_connect.bundle_writer import (
     BUNDLE_MAGIC,
     BundleInfo,
     BundleSection,
+    _bundle_section_from_file,
     write_bundle,
 )
 
@@ -34,6 +36,11 @@ class TestBundleMagic:
     def test_magic_bytes(self):
         assert BUNDLE_MAGIC == b"TRTFB\x00\x01\x00"
         assert len(BUNDLE_MAGIC) == 8
+
+
+def test_bundle_section_public_constructor_remains_name_and_bytes_only():
+    assert tuple(inspect.signature(BundleSection).parameters) == ("name", "data")
+    assert not hasattr(BundleSection, "from_file")
 
 
 class TestWriteBundle:
@@ -135,6 +142,50 @@ class TestWriteBundle:
 
         _, sdata = self._read_bundle(out_path)
         assert sdata["engine_plan"] == binary_data
+
+    def test_file_backed_section_is_streamed(self, tmp_path, monkeypatch):
+        source = tmp_path / "llm.engine"
+        payload = b"edge-engine" * 131072
+        source.write_bytes(payload)
+        monkeypatch.setattr(
+            type(source),
+            "read_bytes",
+            lambda _self: (_ for _ in ()).throw(
+                AssertionError("file-backed sections must not call read_bytes")
+            ),
+        )
+
+        out_path = tmp_path / "file-backed.trtfb"
+        write_bundle(
+            out_path,
+            BundleInfo(model_id="edge"),
+            [_bundle_section_from_file("edge/artifacts/llm.engine", source)],
+        )
+
+        header, sections = self._read_bundle(str(out_path))
+        assert header["sections"]["edge/artifacts/llm.engine"]["size"] == len(payload)
+        assert sections["edge/artifacts/llm.engine"] == payload
+
+    def test_file_backed_digest_mismatch_is_not_published(self, tmp_path):
+        source = tmp_path / "mutable.engine"
+        source.write_bytes(b"engine")
+        destination = tmp_path / "must-not-exist.trtfb"
+
+        with pytest.raises(RuntimeError, match="changed after validation"):
+            write_bundle(
+                destination,
+                BundleInfo(model_id="edge"),
+                [
+                    _bundle_section_from_file(
+                        "edge/llm.engine",
+                        source,
+                        expected_sha256="0" * 64,
+                    )
+                ],
+            )
+
+        assert not destination.exists()
+        assert not list(tmp_path.glob(f".{destination.name}.tmp.*"))
 
     def test_all_info_fields(self, tmp_path):
         info = BundleInfo(

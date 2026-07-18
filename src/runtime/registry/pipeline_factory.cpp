@@ -9,6 +9,7 @@
 #include "runtime/backend/backend_loader.h"
 #include "runtime/backend/trt_version.h"
 #include "runtime/core/trt_common.h"
+#include "runtime/providers/optimized_runtime_host.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/config/schema_registry.h"
@@ -193,6 +194,16 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                                                         const std::string& hf_python,
                                                         const std::string& runtime_cache_path,
                                                         bool cuda_graphs) {
+    LoadOptions optimized_options;
+    optimized_options.hf_python = hf_python;
+    optimized_options.runtime_cache_path = runtime_cache_path;
+    optimized_options.cuda_graphs = cuda_graphs;
+    const BundleInfo header = ReadBundleHeader(bundle_path);
+    if (auto optimized_runtime_pipeline =
+            try_make_optimized_runtime_pipeline(bundle_path, header, optimized_options)) {
+        return optimized_runtime_pipeline;
+    }
+
     BundleFile bundle = ReadBundleFile(bundle_path);
     if (bundle.sections.empty())
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
@@ -250,6 +261,11 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
 
 std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
                                                         const LoadOptions& options) {
+    const BundleInfo header = ReadBundleHeader(bundle_path);
+    if (auto optimized_runtime_pipeline =
+            try_make_optimized_runtime_pipeline(bundle_path, header, options)) {
+        return optimized_runtime_pipeline;
+    }
     BundleFile bundle = ReadBundleFile(bundle_path);
     if (bundle.sections.empty())
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
@@ -298,6 +314,12 @@ std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::strin
                                                                 const LoadOptions& options) {
     if (pool_size == 0)
         throw std::invalid_argument("Pipeline pool size must be positive");
+
+    const BundleInfo header = ReadBundleHeader(bundle_path);
+    if (is_optimized_runtime_bundle(header))
+        throw std::invalid_argument(
+            "PipelineFactory::from_bundle_pool does not support optimized-runtime bundles; use "
+            "from_bundle because the delegated runtime owns batching and scheduling");
 
     BundleFile bundle = ReadBundleFile(bundle_path);
     if (bundle.sections.empty())

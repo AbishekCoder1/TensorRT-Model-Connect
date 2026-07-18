@@ -889,6 +889,47 @@ class TestDeclarativeClassificationRules:
 # ---------------------------------------------------------------------------
 
 
+class TestModelOwnedAdapterIsolation:
+    @pytest.mark.parametrize(
+        ("path", "expected_rule", "expected_tier", "rebuild"),
+        (
+            (
+                "python/tensorrt_model_connect/families/decoder_family/optimized_adapter/adapter.py",
+                "family_package",
+                "builder",
+                False,
+            ),
+            (
+                "src/runtime/models/decoder_family/optimized_adapter/adapter.cpp",
+                "cpp_runtime_model",
+                "cpp",
+                True,
+            ),
+            (
+                "tests/e2e/models/decoder_family/optimized_adapter/test_contract.py",
+                "e2e_model_owned_test",
+                None,
+                False,
+            ),
+        ),
+    )
+    def test_adapter_subtrees_use_existing_model_family_ownership(
+        self,
+        imap,
+        path,
+        expected_rule,
+        expected_tier,
+        rebuild,
+    ):
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == expected_rule
+        assert sorted(match.models) == ["decoder-large", "decoder-small"]
+        assert "decoder-peer" not in match.models
+        assert match.rebuild_cpp is rebuild
+        if expected_tier is not None:
+            assert expected_tier in match.unit_tiers
+
 class TestFamilyPlugin:
     def test_family_only_change(self, imap):
         """families/decoder_family/plugin.py -> exactly decoder_family models."""
@@ -1004,9 +1045,16 @@ class TestSharedModules:
         assert result.cap_applied
         assert sorted(result.e2e_models) == sorted(imap.core_models)
 
-    def test_engine_builder_all_models(self, imap):
-        """engine_builder.py -> all models."""
-        match = test_impact.classify_file("python/tensorrt_model_connect/engine_builder.py", imap)
+    @pytest.mark.parametrize(
+        "path",
+        (
+            "python/tensorrt_model_connect/build_cli.py",
+            "python/tensorrt_model_connect/engine_builder.py",
+        ),
+    )
+    def test_public_build_dispatch_remains_an_all_model_boundary(self, imap, path):
+        """Public dispatch changes cover delegated and native fallback builds."""
+        match = test_impact.classify_file(path, imap)
         assert match.rule == "shared_builder_module"
         assert len(match.models) == len(imap.all_model_names)
 
@@ -3239,6 +3287,49 @@ class TestCoverageMapIntegration:
             "tests/e2e/models/decoder_family/test_decoder_family_builder.py",
         ]
         assert "builder" not in result.fallback_tiers
+
+    def test_changed_nested_model_owned_unit_test_runs_directly(self, mock_repo):
+        """Nested adapter tests remain direct targets inside one family."""
+        adapter_tests = (
+            mock_repo / "tests" / "e2e" / "models" / "decoder_family" / "optimized_adapter"
+        )
+        adapter_tests.mkdir(parents=True)
+        test_path = adapter_tests / "test_contract.py"
+        test_path.write_text("def test_contract():\n    assert True\n", encoding="utf-8")
+        imap = test_impact.build_impact_map(mock_repo)
+        relative = test_path.relative_to(mock_repo).as_posix()
+
+        result = test_impact.analyze_impact(
+            [relative],
+            imap,
+            coverage_map={},
+            repo_root=mock_repo,
+        )
+
+        assert result.builder_tests == [relative]
+        assert sorted(result.e2e_models) == ["decoder-large", "decoder-small"]
+        assert "builder" not in result.fallback_tiers
+
+    def test_changed_nested_e2e_test_is_not_selected_as_a_unit_test(self, mock_repo):
+        """The _e2e.py suffix remains an execution boundary at every depth."""
+        test_path = (
+            mock_repo
+            / "tests"
+            / "e2e"
+            / "models"
+            / "decoder_family"
+            / "optimized_adapter"
+            / "test_adapter_e2e.py"
+        )
+        test_path.parent.mkdir(parents=True)
+        test_path.write_text("def test_adapter_e2e():\n    assert True\n", encoding="utf-8")
+        imap = test_impact.build_impact_map(mock_repo)
+        relative = test_path.relative_to(mock_repo).as_posix()
+
+        result = test_impact.analyze_impact([relative], imap, repo_root=mock_repo)
+
+        assert result.builder_tests == []
+        assert sorted(result.e2e_models) == ["decoder-large", "decoder-small"]
 
     def test_no_coverage_map_no_test_lists(self, imap):
         """Without coverage map, test lists are empty and fallback_tiers empty."""

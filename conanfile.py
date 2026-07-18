@@ -17,6 +17,42 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+_ADAPTER_PACKAGE_EXCLUDES = (
+    "__pycache__/*",
+    "**/__pycache__/**",
+    "*.pyc",
+    ".runtime-build/*",
+    "**/.runtime-build/**",
+    "dependencies/*",
+    "**/dependencies/**",
+    "tests/*",
+    "**/tests/**",
+)
+
+
+def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, str, Path, Path], ...]:
+    """Locate model-owned adapter source trees without interpreting their contents."""
+
+    source = Path(source_folder)
+    families_root = source / "python" / "tensorrt_model_connect" / "families"
+    runtime_root = source / "src" / "runtime" / "models"
+    adapters: list[tuple[str, str, Path, Path]] = []
+    if not families_root.is_dir():
+        return ()
+    for manifest in sorted(families_root.glob("*/*/IMPLEMENTATION.toml")):
+        builder = manifest.parent
+        family = builder.parent.name
+        adapter = builder.name
+        runtime = runtime_root / family / adapter
+        if not runtime.is_dir():
+            raise ConanException(
+                "Model-owned build adapter "
+                f"{family}/{adapter} has no matching runtime source directory: {runtime}"
+            )
+        adapters.append((family, adapter, builder, runtime))
+    return tuple(adapters)
+
+
 class TensorRTModelConnectConan(ConanFile):
     name = "tensorrt-model-connect"
     version = "0.1.0"
@@ -66,6 +102,7 @@ class TensorRTModelConnectConan(ConanFile):
 
     def package(self) -> None:
         package_bin = Path(self.package_folder) / "tensorrt_model_connect" / "bin"
+        package_module = Path(self.package_folder) / "tensorrt_model_connect"
         wheel_data_scripts = (
             Path(self.package_folder)
             / f"{self.name.replace('-', '_')}-{self.version}.data"
@@ -98,6 +135,44 @@ class TensorRTModelConnectConan(ConanFile):
                 dst=str(package_bin),
                 keep_path=False,
             )
+
+        # Each model family owns its build adapter and matching runtime source.
+        # They remain inert package data until that family selects the adapter;
+        # no downstream runtime is built or linked while packaging Model Connect.
+        for family, adapter, builder_source, runtime_source in _model_owned_adapters(
+            self.source_folder
+        ):
+            packaged_adapter = package_module / "families" / family / adapter
+            copy(
+                self,
+                "*",
+                src=str(builder_source),
+                dst=str(packaged_adapter),
+                excludes=_ADAPTER_PACKAGE_EXCLUDES,
+            )
+            copy(
+                self,
+                "*",
+                src=str(runtime_source),
+                dst=str(packaged_adapter / "runtime"),
+                excludes=_ADAPTER_PACKAGE_EXCLUDES,
+            )
+
+        private_sdk = package_module / "runtime_provider" / "_sdk" / "include"
+        copy(
+            self,
+            "optimized_runtime_factory.h",
+            src=str(Path(self.source_folder) / "src" / "runtime" / "providers"),
+            dst=str(private_sdk / "runtime" / "providers"),
+            keep_path=False,
+        )
+        copy(
+            self,
+            "pipeline.h",
+            src=str(Path(self.source_folder) / "include" / "trtmc"),
+            dst=str(private_sdk / "trtmc"),
+            keep_path=False,
+        )
 
         native = package_bin / "trtmc"
         installed_script = wheel_data_scripts / "trtmc"

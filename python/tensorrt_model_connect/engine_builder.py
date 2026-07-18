@@ -28,6 +28,8 @@ from .families import (
     find_plugin,
     find_diffusion_plugin,
     resolve_config_from_model_dir,
+    _resolve_diffusion_family_id,
+    resolve_family_id,
     resolve_family_model_dir,
     resolve_nemo_archive_model_dir,
 )
@@ -1619,7 +1621,7 @@ def _build_diffusion_bundle(
           file=sys.stderr)
 
 
-def build(
+def _build_native_impl(
     model_id_or_path: str,
     output_path: str,
     max_cache_length: int = 256,
@@ -1695,3 +1697,133 @@ def build(
                  diffusion_overrides=diffusion_overrides,
                  build_timing_path=build_timing_path,
                  max_batch_size=max_batch_size)
+
+
+def _optimized_request_value(value):
+    """Normalize one existing build option for a capsule-owned adapter.
+
+    The shared router deliberately does not interpret option names or values.
+    It only converts the established Python API's value types into the JSON
+    data accepted by the isolated build-adapter protocol.
+    """
+
+    if value is None or isinstance(value, (bool, str, int, float)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, ParallelConfig):
+        return value.to_config_dict()
+    if isinstance(value, dict):
+        return {
+            str(key): _optimized_request_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_optimized_request_value(item) for item in value]
+    raise TypeError(
+        "Build option cannot be represented for an optimized-runtime adapter: "
+        f"{type(value).__name__}"
+    )
+
+
+def _try_build_optimized_runtime(
+    model_id_or_path: str,
+    output_path: str | Path,
+    public_options: dict,
+):
+    """Try a model-family-owned integration for the current platform.
+
+    The model is resolved before dispatch so discovery is bounded to its one
+    owning family. Every interpretation of ``public_options`` remains inside
+    the selected model adapter.
+    """
+
+    from .runtime_provider.orchestrator import try_build_optimized_runtime
+
+    resolved_model_ref = model_id_or_path
+    try:
+        resolved_model_ref = _resolve_model(model_id_or_path)
+        model_dir = Path(resolved_model_ref)
+        if (model_dir / "model_index.json").exists():
+            model_index = json.loads((model_dir / "model_index.json").read_text())
+            selected_family = str(
+                _resolve_diffusion_family_id(
+                    str(model_index.get("_class_name", "") or "")
+                )
+                or ""
+            )
+        else:
+            selected_family = str(resolve_family_id(ModelConfig.from_dir(model_dir)) or "")
+    except Exception:
+        # Optimized dispatch is optional. Preserve the native path's exact
+        # model-resolution behavior and diagnostics when family discovery
+        # cannot resolve the request in this environment.
+        return None
+    if not selected_family:
+        return None
+
+    return try_build_optimized_runtime(
+        resolved_model_ref,
+        output_path,
+        family_name=selected_family,
+        parameters={
+            "public_options": {
+                key: _optimized_request_value(value)
+                for key, value in sorted(public_options.items())
+            }
+        },
+    )
+
+
+def build(
+    model_id_or_path: str,
+    output_path: str,
+    max_cache_length: int = 256,
+    *,
+    decoder_engine_layout: str = "split",
+    dynamic_kv_cache: bool = False,
+    dynamic_kv_profile_rows_override: list[int] | None = None,
+    precision: str = "fp32",
+    fp32_layers: list[int] | None = None,
+    quantize: str | None = None,
+    quant_scales: str | None = None,
+    quant_calibration_samples: int = 512,
+    verbose: bool = False,
+    fp8_scales: dict | str | None = None,
+    save_fp8_scales: str | None = None,
+    rtx: bool = False,
+    triattention_stats_path: str | None = None,
+    triattention_kv_budget: int | None = None,
+    triattention_divide_length: int = 128,
+    triattention_recent_window: int = 128,
+    triattention_score_aggregation: str = "mean",
+    triattention_count_prompt_tokens: bool = True,
+    triattention_protect_prefill: bool = True,
+    triattention_disable_mlr: bool = False,
+    triattention_disable_trig: bool = False,
+    family_build_options: dict | None = None,
+    parallel_config: ParallelConfig | None = None,
+    diffusion_overrides: dict | None = None,
+    build_timing_path: str | None = None,
+    max_batch_size: int = 1,
+) -> None:
+    """Build through a matching model capsule, otherwise use the native path.
+
+    This preserves the established public API exactly. Optimized-runtime
+    selection uses the active platform and forwards the normalized effective
+    public options as opaque data; the model-owned adapter owns all translation.
+    """
+
+    build_arguments = dict(locals())
+    public_options = {
+        name: value
+        for name, value in build_arguments.items()
+        if name not in {"model_id_or_path", "output_path"}
+    }
+    if _try_build_optimized_runtime(
+        model_id_or_path,
+        output_path,
+        public_options,
+    ) is not None:
+        return
+    _build_native_impl(**build_arguments)

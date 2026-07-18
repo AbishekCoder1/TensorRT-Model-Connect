@@ -2004,7 +2004,7 @@ def _explicit_tools_test_targets(changed_files: List[str]) -> List[str]:
 def _is_model_owned_python_unit_test(path: str) -> bool:
     """Return True for model-owned pytest files that are safe as unit targets."""
     normalized = path.replace("\\", "/").strip("/")
-    if not re.match(r"^tests/e2e/models/[^/]+/test_[^/]+\.py$", normalized):
+    if not re.match(r"^tests/e2e/models/[^/]+/(?:.+/)?test_[^/]+\.py$", normalized):
         return False
     return not Path(normalized).name.endswith("_e2e.py")
 
@@ -2034,7 +2034,7 @@ def _model_owned_python_test_targets(
     for family in _model_families_for_models(models, imap):
         model_test_dir = repo_root / "tests" / "e2e" / "models" / family
         if model_test_dir.is_dir():
-            for test_path in sorted(model_test_dir.glob("test_*.py")):
+            for test_path in sorted(model_test_dir.rglob("test_*.py")):
                 if test_path.name.endswith("_e2e.py"):
                     continue
                 targets.add(_repo_relative(test_path, repo_root))
@@ -2043,7 +2043,7 @@ def _model_owned_python_test_targets(
             repo_root / "python" / "tensorrt_model_connect" / "families" / family / "tests"
         )
         if family_package_tests.is_dir():
-            for test_path in sorted(family_package_tests.glob("test_*.py")):
+            for test_path in sorted(family_package_tests.rglob("test_*.py")):
                 targets.add(_repo_relative(test_path, repo_root))
 
     return sorted(targets)
