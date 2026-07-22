@@ -7,7 +7,9 @@ import base64
 import csv
 import hashlib
 import io
+import json
 import re
+import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
@@ -68,7 +70,77 @@ def build_sdist(
     config_settings: dict[str, Any] | None = None,
 ) -> str:
     conan_build = _conan_build_backend()
-    return conan_build.build_sdist(sdist_directory, config_settings)
+    filename = conan_build.build_sdist(sdist_directory, config_settings)
+    _append_benchmark_catalog_to_sdist(Path(sdist_directory) / filename)
+    return filename
+
+
+def _append_benchmark_catalog_to_sdist(sdist_path: Path) -> None:
+    """Add the minimal canonical benchmark catalog to a source archive."""
+
+    catalog_root = Path.cwd() / "tests" / "e2e" / "models"
+    descriptors = sorted(catalog_root.glob("*/MODEL.toml"))
+    manifests = sorted(catalog_root.glob("*/manifests/*.json"))
+    assets = set(catalog_root.glob("*/data/Recording.wav"))
+    if not descriptors or not manifests:
+        raise RuntimeError(f"benchmark model catalog is empty or unavailable: {catalog_root}")
+    for manifest in manifests:
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot read benchmark manifest {manifest}: {exc}") from exc
+        references = [("fp8_scales", raw.get("fp8_scales"))]
+        for index, testcase in enumerate(raw.get("testcases", [])):
+            if isinstance(testcase, dict) and "test_image" in testcase:
+                references.append((f"testcases[{index}].test_image", testcase["test_image"]))
+        for field, declared in references:
+            if declared is None:
+                continue
+            if not isinstance(declared, str) or not declared.strip():
+                raise RuntimeError(f"{field} in benchmark manifest {manifest} must be a path")
+            family = manifest.parent.parent.resolve()
+            declared_path = Path(declared)
+            asset = (family / declared_path).resolve()
+            source_prefix = Path("tests/e2e/models") / family.name
+            if not asset.is_file() and declared_path.is_relative_to(source_prefix):
+                asset = (family / declared_path.relative_to(source_prefix)).resolve()
+            if not asset.is_relative_to(family) or not asset.is_file():
+                raise RuntimeError(
+                    f"{field} in benchmark manifest {manifest} is missing or outside {family}: "
+                    f"{asset}"
+                )
+            assets.add(asset)
+    assets = sorted(assets)
+
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{sdist_path.name}.", suffix=".tmp", dir=sdist_path.parent, delete=False
+    ) as temporary:
+        temporary_path = Path(temporary.name)
+    try:
+        with tarfile.open(sdist_path, "r:gz") as source:
+            members = source.getmembers()
+            if not members:
+                raise RuntimeError(f"source archive is empty: {sdist_path}")
+            archive_root = members[0].name.partition("/")[0]
+            catalog_names = {
+                f"{archive_root}/{path.relative_to(Path.cwd()).as_posix()}"
+                for path in (*descriptors, *manifests, *assets)
+            }
+            existing = {member.name for member in members}
+            pending = catalog_names - existing
+
+            with tarfile.open(temporary_path, "w:gz", format=tarfile.PAX_FORMAT) as destination:
+                for member in members:
+                    stream = source.extractfile(member) if member.isfile() else None
+                    destination.addfile(member, stream)
+                for path in (*descriptors, *manifests, *assets):
+                    archive_name = f"{archive_root}/{path.relative_to(Path.cwd()).as_posix()}"
+                    if archive_name in pending:
+                        destination.add(path, arcname=archive_name, recursive=False)
+        temporary_path.replace(sdist_path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def prepare_metadata_for_build_editable(
@@ -159,8 +231,7 @@ def _project_metadata() -> dict[str, Any]:
 def _write_dist_info(parent: Path) -> Path:
     project = _project_metadata()
     dist_info = (
-        parent
-        / f"{_wheel_distribution_name(project['name'])}-{project['version']}.dist-info"
+        parent / f"{_wheel_distribution_name(project['name'])}-{project['version']}.dist-info"
     )
     dist_info.mkdir(parents=True, exist_ok=True)
     (dist_info / "METADATA").write_text(_metadata_text(project), encoding="utf-8")

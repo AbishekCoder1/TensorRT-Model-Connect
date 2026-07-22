@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -53,6 +54,93 @@ def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, str, Pa
     return tuple(adapters)
 
 
+def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, package: Path) -> None:
+    """Copy canonical E2E model descriptors into the installed Python package."""
+
+    source = Path(source_folder) / "tests" / "e2e" / "models"
+    descriptors = sorted(source.glob("*/MODEL.toml"))
+    manifests = sorted(source.glob("*/manifests/*.json"))
+    benchmark_assets = set(source.glob("*/data/Recording.wav"))
+    if not descriptors or not manifests:
+        raise ConanException(f"benchmark model catalog is empty or unavailable: {source}")
+    missing_descriptors = [
+        manifest for manifest in manifests if not (manifest.parent.parent / "MODEL.toml").is_file()
+    ]
+    if missing_descriptors:
+        paths = ", ".join(str(path) for path in missing_descriptors)
+        raise ConanException(f"benchmark manifests have no family MODEL.toml: {paths}")
+    for manifest in manifests:
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ConanException(f"cannot read benchmark manifest {manifest}: {exc}") from exc
+        references = [("fp8_scales", raw.get("fp8_scales"))]
+        for index, testcase in enumerate(raw.get("testcases", [])):
+            if isinstance(testcase, dict) and "test_image" in testcase:
+                references.append((f"testcases[{index}].test_image", testcase["test_image"]))
+        for field, declared in references:
+            if declared is None:
+                continue
+            if not isinstance(declared, str) or not declared.strip():
+                raise ConanException(f"{field} in benchmark manifest {manifest} must be a path")
+            family = manifest.parent.parent.resolve()
+            declared_path = Path(declared)
+            asset = (family / declared_path).resolve()
+            source_prefix = Path("tests/e2e/models") / family.name
+            if not asset.is_file() and declared_path.is_relative_to(source_prefix):
+                asset = (family / declared_path.relative_to(source_prefix)).resolve()
+            if not asset.is_relative_to(family) or not asset.is_file():
+                raise ConanException(
+                    f"{field} in benchmark manifest {manifest} is missing or outside {family}: "
+                    f"{asset}"
+                )
+            benchmark_assets.add(asset)
+    benchmark_assets = sorted(benchmark_assets)
+
+    destination = package / "benchmark" / "_catalog"
+    for source_path in (*descriptors, *manifests, *benchmark_assets):
+        relative = source_path.relative_to(source)
+        copy(
+            recipe,
+            source_path.name,
+            src=str(source_path.parent),
+            dst=str(destination / relative.parent),
+            keep_path=False,
+        )
+
+    packaged_descriptors = sorted(destination.glob("*/MODEL.toml"))
+    packaged_manifests = sorted(destination.glob("*/manifests/*.json"))
+    missing_assets = [
+        source_path
+        for source_path in benchmark_assets
+        if not (destination / source_path.relative_to(source)).is_file()
+    ]
+    if (
+        len(packaged_descriptors) != len(descriptors)
+        or len(packaged_manifests) != len(manifests)
+        or missing_assets
+    ):
+        raise ConanException(
+            "benchmark model catalog staging is incomplete: "
+            f"descriptors={len(packaged_descriptors)}/{len(descriptors)}, "
+            f"manifests={len(packaged_manifests)}/{len(manifests)}, "
+            f"assets={len(benchmark_assets) - len(missing_assets)}/{len(benchmark_assets)}"
+        )
+
+
+def _set_wheel_python_shebang(script: Path) -> None:
+    """Mark a wheel data script for installer-specific interpreter rewriting."""
+
+    try:
+        source = script.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConanException(f"cannot read wheel script {script}: {exc}") from exc
+    first_line, separator, body = source.partition("\n")
+    if not separator or not first_line.startswith("#!"):
+        raise ConanException(f"wheel script has no executable shebang: {script}")
+    script.write_text(f"#!python\n{body}", encoding="utf-8")
+
+
 class TensorRTModelConnectConan(ConanFile):
     name = "tensorrt-model-connect"
     version = "0.1.0"
@@ -74,7 +162,7 @@ class TensorRTModelConnectConan(ConanFile):
         toolchain.cache_variables["TRTMC_BUILD_TESTS"] = _env_flag(
             "TRTMC_CONAN_ENABLE_TEST_TARGETS"
         )
-        toolchain.cache_variables["TRTMC_BUILD_BENCHMARKS"] = False
+        toolchain.cache_variables["TRTMC_BUILD_BENCHMARKS"] = True
         toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False
 
         for name in (
@@ -108,8 +196,23 @@ class TensorRTModelConnectConan(ConanFile):
             / f"{self.name.replace('-', '_')}-{self.version}.data"
             / "scripts"
         )
+        _stage_benchmark_catalog(self, self.source_folder, package_module)
         copy(self, "trtmc", src=self.build_folder, dst=str(package_bin), keep_path=False)
         copy(self, "trtmc", src=self.build_folder, dst=str(wheel_data_scripts), keep_path=False)
+        copy(
+            self,
+            "trtmc_benchmark_worker",
+            src=self.build_folder,
+            dst=str(package_bin),
+            keep_path=False,
+        )
+        copy(
+            self,
+            "trtmc-bench",
+            src=str(Path(self.source_folder) / "scripts"),
+            dst=str(wheel_data_scripts),
+            keep_path=False,
+        )
         for destination in (package_bin, wheel_data_scripts):
             copy(
                 self,
@@ -176,6 +279,8 @@ class TensorRTModelConnectConan(ConanFile):
 
         native = package_bin / "trtmc"
         installed_script = wheel_data_scripts / "trtmc"
+        benchmark_worker = package_bin / "trtmc_benchmark_worker"
+        benchmark_script = wheel_data_scripts / "trtmc-bench"
         package_cores = sorted(package_bin.glob("libtrtmc_core.so*"))
         script_cores = sorted(wheel_data_scripts.glob("libtrtmc_core.so*"))
         backends = sorted(package_bin.glob("libtrtmc_backend_trt*.so*"))
@@ -184,6 +289,11 @@ class TensorRTModelConnectConan(ConanFile):
             raise ConanException("TRTMC native executable was not staged into the wheel package")
         if not installed_script.is_file():
             raise ConanException("TRTMC native executable was not staged as the wheel script")
+        if not benchmark_worker.is_file():
+            raise ConanException("TRTMC benchmark worker was not staged into the wheel package")
+        if not benchmark_script.is_file():
+            raise ConanException("trtmc-bench was not staged as the wheel script")
+        _set_wheel_python_shebang(benchmark_script)
         if not package_cores:
             raise ConanException("TRTMC core DSO was not staged into the wheel package")
         if not script_cores:
@@ -193,6 +303,6 @@ class TensorRTModelConnectConan(ConanFile):
         if not model_plugins:
             raise ConanException("TRTMC model plugin DSOs were not staged into the wheel package")
 
-        for executable in (native, installed_script):
+        for executable in (native, installed_script, benchmark_worker, benchmark_script):
             mode = executable.stat().st_mode
             executable.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
