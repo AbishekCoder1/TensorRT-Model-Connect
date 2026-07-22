@@ -53,6 +53,21 @@ static void check(bool condition, const char* test_name) {
 
 static trtmc::TrtLogger g_logger;
 
+namespace trtmc {
+
+class TrtModuleImplTestPeer {
+  public:
+    static void set_execution_context_name(TrtModuleImpl& module, const char* name) {
+        module.ctx_->setName(name);
+    }
+
+    static std::string execution_context_name(const TrtModuleImpl& module) {
+        return module.ctx_->getName();
+    }
+};
+
+} // namespace trtmc
+
 class MockTokenizer final : public trtmc::ITokenizer {
   public:
     std::vector<int32_t> encode(const std::string& text) const override {
@@ -313,6 +328,74 @@ static void test_zero_max_tokens() {
     cudaStreamDestroy(stream);
 }
 
+static void test_kv_reset_is_logical_and_masks_stale_rows() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    trtmc::LlamaKvCache cache(1, 8, 4, stream);
+    std::vector<float> stale_k(32, 3.25F);
+    std::vector<float> stale_v(32, -7.5F);
+    check(cache.cache_k(0).copy_from_host(stale_k.data()), "upload stale K cache rows");
+    check(cache.cache_v(0).copy_from_host(stale_v.data()), "upload stale V cache rows");
+    cache.set_position(5);
+
+    cache.reset();
+
+    std::vector<float> actual_k(stale_k.size());
+    std::vector<float> actual_v(stale_v.size());
+    check(cache.cache_k(0).copy_to_host(actual_k.data()), "download stale K cache rows");
+    check(cache.cache_v(0).copy_to_host(actual_v.data()), "download stale V cache rows");
+    check(actual_k == stale_k, "logical reset preserves allocated K cache storage");
+    check(actual_v == stale_v, "logical reset preserves allocated V cache storage");
+    check(cache.position() == 0, "logical reset clears the visible cache length");
+
+    trtmc::TensorMap inputs;
+    cache.prepare_step(inputs);
+    const auto mask_it = inputs.find("attention_mask");
+    check(mask_it != inputs.end(), "logical reset creates an attention mask");
+    if (mask_it != inputs.end()) {
+        const auto& mask = mask_it->second;
+        check(mask.shape == std::vector<int64_t>{9}, "logical reset mask covers cache and token");
+        const auto* values = static_cast<const float*>(mask.data);
+        bool stale_rows_hidden = values != nullptr;
+        for (int32_t i = 0; stale_rows_hidden && i < 8; ++i)
+            stale_rows_hidden = values[i] < -1000.0F;
+        check(stale_rows_hidden, "logical reset masks every stale cache row");
+        check(values != nullptr && values[8] == 0.0F,
+              "logical reset keeps the current token visible");
+    }
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_generation_reset_reuses_execution_context() {
+    auto engine = build_mock_decoder();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto* ctx = engine->createExecutionContext();
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
+    trtmc::TrtModuleImplTestPeer::set_execution_context_name(module, "generation-context");
+
+    module.reset_execution_context();
+
+    check(trtmc::TrtModuleImplTestPeer::execution_context_name(module) == "generation-context",
+          "generation reset reuses the loaded execution context");
+
+    int32_t token_id = 7;
+    std::vector<float> attention_mask(8, 0.0F);
+    trtmc::TensorMap inputs;
+    inputs["token_id"] = trtmc::Tensor{&token_id, {1}, trtmc::DType::kInt32};
+    inputs["attention_mask"] = trtmc::Tensor{attention_mask.data(), {8}, trtmc::DType::kFloat32};
+    auto outputs = module.forward(inputs);
+    check(outputs.count("logits") == 1, "reused execution context remains executable");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_stop_on_boxed_answer() {
     auto engine = build_mock_decoder();
     if (!engine)
@@ -355,6 +438,8 @@ int main() {
     test_generate_stops_at_eos();
     test_generate_max_tokens();
     test_zero_max_tokens();
+    test_kv_reset_is_logical_and_masks_stale_rows();
+    test_generation_reset_reuses_execution_context();
     test_stop_on_boxed_answer();
 
     if (failures > 0)
