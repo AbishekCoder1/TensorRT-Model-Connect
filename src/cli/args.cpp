@@ -215,6 +215,7 @@ void print_usage() {
            "stdout.\n"
            "  trtmc generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] "
            "[--guidance-scale S] [--initial-latents-raw PATH]\n"
+           "                        [--negative-prompt \"text\"] [--height N] [--width N]\n"
            "  trtmc embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"

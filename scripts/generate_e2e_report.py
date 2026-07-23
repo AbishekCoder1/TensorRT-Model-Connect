@@ -2293,11 +2293,42 @@ def _uses_external_reference(result: Dict[str, Any]) -> bool:
     return backend != "invariant_only" and not oracle_level.startswith("L4")
 
 
+def _native_visual_acceptance(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    cc = result.get("case_config") or {}
+    metadata = cc.get("metadata") or {}
+    policy = metadata.get("native_acceptance")
+    if not isinstance(policy, dict):
+        return None
+    expected = {
+        "kind": "native_visual_semantic_acceptance",
+        "reference_role": "diagnostic",
+        "requires_nightly_vlm": True,
+        "vlm_frame_samples": 6,
+    }
+    if any(policy.get(key) != value for key, value in expected.items()):
+        return None
+    if not isinstance(policy.get("rationale"), str) or not policy["rationale"].strip():
+        return None
+    return policy
+
+
 def _render_oracle_context(result: Dict[str, Any]) -> str:
     cc = result.get("case_config") or {}
     backend = str(cc.get("reference_backend") or "unspecified")
     oracle_level = str(result.get("oracle_level") or cc.get("oracle_level") or "unspecified")
     css_class = "oracle-external" if _uses_external_reference(result) else "oracle-invariant"
+    native_acceptance = _native_visual_acceptance(result)
+    if native_acceptance is not None:
+        rationale = str(native_acceptance["rationale"])
+        return (
+            f'<div class="oracle-context {css_class}">'
+            "<strong>Native visual semantic acceptance policy</strong><br>"
+            f"Oracle: {_esc(oracle_level)} via {_esc(backend)}<br>"
+            "Official reference pixel parity: diagnostic, not claimed.<br>"
+            "All-frame temporal activity/cadence alignment: required.<br>"
+            "Six-frame Nightly VLM semantic gate: required.<br>"
+            f"Rationale: {_esc(rationale)}</div>"
+        )
     note = "External/reference output comparison is configured."
     if not _uses_external_reference(result):
         ref_audio = _find_output_media(
@@ -2790,7 +2821,7 @@ def _proof_context(
         "staged_model_dso_count", "engine_builds_per_model", "engine_build_count",
         "engine_build_verification", "gpu_id", "gpu_resource_class",
         "gpu_slot_ids", "gpu_slots_per_device", "gpu_lease_evidence",
-        "network", "plugin_search", "passed",
+        "network", "plugin_search", "passed", "e2e_proof_kind",
     ):
         if key in proof:
             context[key] = proof[key]
@@ -2919,6 +2950,25 @@ def validate_proof_context(
     if not selection.get("e2e_test") or not selection.get("e2e_cases"):
         issues.append("Test selection does not identify an E2E test and case")
 
+    e2e_proof_kind = proof.get("e2e_proof_kind")
+    if e2e_proof_kind not in {
+        "reference",
+        "snapshot_regression",
+        "functional_invariant",
+    }:
+        issues.append("Final proof JSON has no valid E2E proof-kind classification")
+    if status.get("e2e_proof_kind") != e2e_proof_kind:
+        issues.append("E2E proof kind does not match model-proof status")
+    e2e_reference = (status.get("steps") or {}).get("e2e_reference")
+    expected_reference_status = (
+        "passed" if e2e_proof_kind == "reference" else "skipped"
+    )
+    if (
+        not isinstance(e2e_reference, dict)
+        or e2e_reference.get("status") != expected_reference_status
+    ):
+        issues.append(f"Validation step e2e_reference must be {expected_reference_status}")
+
     for name, step in (status.get("steps") or {}).items():
         if name == "html_report" or not isinstance(step, dict):
             continue
@@ -2997,6 +3047,8 @@ def render_proof_section(context: Dict[str, Any]) -> str:
         ("GPU lease evidence", context.get("gpu_lease_evidence")),
         ("Container network", context.get("network")),
         ("Plugin search", context.get("plugin_search")),
+        ("E2E proof kind", context.get("e2e_proof_kind")),
+        ("E2E reference parity claimed", context.get("e2e_proof_kind") == "reference"),
     )
     for label, value in fields:
         if value is None or value == "":
@@ -3185,7 +3237,7 @@ def validate_evidence(
             ref_frames = _resolve_frame_paths(
                 artifacts.get("ref_frames", []), art_dir, "ref_frames")
             require(bool(trt_frames), "missing TRT/base image or video frames")
-            if external_reference:
+            if external_reference or _native_visual_acceptance(result) is not None:
                 require(bool(ref_frames), "missing reference image or video frames")
             require(all(_embeddable(path) for path in _select_frames(
                 trt_frames, _MAX_DIFFUSION_FRAMES)),
