@@ -16,9 +16,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -75,9 +77,36 @@ _ORACLE_PROOF_KINDS = {
     "L4_invariants": "functional_invariant",
 }
 
+_RECOVERY_FIELDS = frozenset(
+    {
+        "attempt",
+        "returncode",
+        "signal",
+        "builder_pid",
+        "started_at",
+        "recovered_at",
+    }
+)
+
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _utc_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None or timestamp.utcoffset() != timedelta(0):
+        return None
+    return timestamp
+
+
+def _positive_pid(value: object) -> bool:
+    return type(value) is int and value > 0
 
 
 def _toml_string(text: str, key: str) -> str:
@@ -665,10 +694,129 @@ def _optional_stage_names(result: dict[str, object]) -> set[str]:
     }
 
 
+def _load_verified_build_records(
+    report_path: Path,
+    expected_models: set[str],
+) -> dict[str, dict[str, object]]:
+    try:
+        report = json.loads(_read_text(report_path))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"Build verification report could not be read: {report_path}: {exc}"
+        ) from exc
+    if not isinstance(report, dict) or report.get("passed") is not True:
+        raise SystemExit("Build verification report is not a passing object")
+    raw_records = report.get("records")
+    if not isinstance(raw_records, list):
+        raise SystemExit("Build verification report records is not a list")
+
+    records: dict[str, dict[str, object]] = {}
+    for index, raw_record in enumerate(raw_records):
+        if (
+            not isinstance(raw_record, dict)
+            or raw_record.get("passed") is not True
+            or not isinstance(raw_record.get("record"), dict)
+        ):
+            raise SystemExit(
+                f"Build verification report records[{index}] is not a passing record"
+            )
+        record = raw_record["record"]
+        identity = record.get("identity")
+        if (
+            not isinstance(identity, str)
+            or not identity
+            or raw_record.get("identity") != identity
+            or identity in records
+        ):
+            raise SystemExit(
+                f"Build verification report records[{index}] has an invalid identity"
+            )
+        records[identity] = record
+    if set(records) != expected_models:
+        raise SystemExit(
+            "Build verification report identities do not match selected models"
+        )
+    return records
+
+
+def _command_verification_errors(
+    commands: object,
+    build_record: dict[str, object] | None,
+) -> list[str]:
+    if commands is None and build_record is None:
+        return []
+    if not isinstance(commands, list):
+        return ["commands is not a list"]
+
+    errors: list[str] = []
+    verified_prefix_length = 0
+    if build_record is not None:
+        build_command = build_record.get("command")
+        if (
+            not isinstance(build_command, list)
+            or not build_command
+            or not all(isinstance(item, str) and item for item in build_command)
+        ):
+            errors.append("verified build command is not a non-empty string list")
+            build_command = []
+        attempt_count = build_record.get("attempt_count")
+        expected_prefix = (
+            [
+                ("build_recovery_attempt_1", -signal.SIGSEGV),
+                ("build", 0),
+            ]
+            if type(attempt_count) is int and attempt_count == 2
+            else [("build", 0)]
+            if type(attempt_count) is int and attempt_count == 1
+            else []
+        )
+        if not expected_prefix:
+            errors.append(
+                f"verified build attempt_count is {attempt_count!r}, expected 1 or 2"
+            )
+        verified_prefix_length = len(expected_prefix)
+        for index, (expected_label, expected_returncode) in enumerate(expected_prefix):
+            command = commands[index] if index < len(commands) else None
+            valid = (
+                isinstance(command, dict)
+                and command.get("label") == expected_label
+                and command.get("command") == build_command
+                and type(command.get("returncode")) is int
+                and command["returncode"] == expected_returncode
+            )
+            if not valid:
+                errors.append(
+                    f"commands[{index}] does not match verified "
+                    f"{expected_label!r} build evidence"
+                )
+
+    for index, command in enumerate(
+        commands[verified_prefix_length:],
+        start=verified_prefix_length,
+    ):
+        if not isinstance(command, dict):
+            errors.append(f"commands[{index}] is not an object")
+            continue
+        if build_record is not None and command.get("label") in {
+            "build",
+            "build_recovery_attempt_1",
+        }:
+            errors.append(
+                f"commands[{index}].label is reserved for verified build evidence"
+            )
+        returncode = command.get("returncode")
+        if type(returncode) is not int or returncode != 0:
+            errors.append(
+                f"commands[{index}].returncode is {returncode!r}, expected 0"
+            )
+    return errors
+
+
 def _verify_model_result(
     model_name: str,
     result_case: str,
     artifacts_dir: Path,
+    build_record: dict[str, object] | None = None,
 ) -> dict[str, object]:
     result_path = artifacts_dir / result_case / "result.json"
     errors: list[str] = []
@@ -733,17 +881,9 @@ def _verify_model_result(
             if not isinstance(metrics, dict):
                 errors.append(f"stage {stage_name!r} metrics is not an object")
 
-    commands = result.get("commands")
-    if commands is not None and not isinstance(commands, list):
-        errors.append("commands is not a list")
-    elif isinstance(commands, list):
-        for index, command in enumerate(commands):
-            if not isinstance(command, dict):
-                errors.append(f"commands[{index}] is not an object")
-            elif command.get("returncode") != 0:
-                errors.append(
-                    f"commands[{index}].returncode is {command.get('returncode')!r}, expected 0"
-                )
+    errors.extend(
+        _command_verification_errors(result.get("commands"), build_record)
+    )
 
     errors.extend(_returncode_failures(result.get("stage_outputs", {}), "stage_outputs"))
     errors = list(dict.fromkeys(errors))
@@ -769,12 +909,21 @@ def command_verify_results(args: argparse.Namespace) -> int:
         raise SystemExit(
             "No E2E manifest found for selected model(s): " + ", ".join(missing_models)
         )
+    build_records = (
+        _load_verified_build_records(
+            args.build_verification_report.resolve(),
+            model_names,
+        )
+        if args.build_verification_report is not None
+        else {}
+    )
 
     results = [
         _verify_model_result(
             model_name,
             manifests[model_name].result_case,
             artifacts_dir,
+            build_records.get(model_name),
         )
         for model_name in sorted(model_names)
     ]
@@ -825,17 +974,77 @@ def command_verify_builds(args: argparse.Namespace) -> int:
         record_errors: list[str] = []
         if not identity:
             record_errors.append("identity is missing")
-        if record.get("invocation_count") != 1:
+        schema_version = record.get("schema_version")
+        if type(schema_version) is not int or schema_version != 1:
             record_errors.append(
-                f"invocation_count is {record.get('invocation_count')!r}, expected 1"
+                f"schema_version is {schema_version!r}, expected 1"
             )
+        invocation_count = record.get("invocation_count")
+        if type(invocation_count) is not int or invocation_count != 1:
+            record_errors.append(
+                f"invocation_count is {invocation_count!r}, expected 1"
+            )
+        attempt_count = record.get("attempt_count")
+        valid_attempt_count = (
+            type(attempt_count) is int and 1 <= attempt_count <= 2
+        )
+        if not valid_attempt_count:
+            record_errors.append(f"attempt_count is {attempt_count!r}, expected 1 or 2")
+        builder_pid = record.get("builder_pid")
+        if not _positive_pid(builder_pid):
+            record_errors.append(
+                f"builder_pid is {builder_pid!r}, expected a positive integer"
+            )
+        started_at = record.get("started_at")
+        started_at_time = _utc_timestamp(started_at)
+        if started_at_time is None:
+            record_errors.append(
+                f"started_at is {started_at!r}, expected a UTC timestamp"
+            )
+        recovery_attempts = record.get("recovery_attempts")
+        expected_recoveries = attempt_count - 1 if valid_attempt_count else -1
+        if not isinstance(recovery_attempts, list) or len(recovery_attempts) != expected_recoveries:
+            record_errors.append("recovery_attempts does not match attempt_count")
+        elif any(
+            not isinstance(recovery, dict)
+            or type(recovery.get("attempt")) is not int
+            or recovery["attempt"] != index
+            or type(recovery.get("returncode")) is not int
+            or recovery["returncode"] != -signal.SIGSEGV
+            or type(recovery.get("signal")) is not int
+            or recovery["signal"] != signal.SIGSEGV
+            for index, recovery in enumerate(recovery_attempts, start=1)
+        ):
+            record_errors.append("recovery_attempts must contain only ordered SIGSEGV recoveries")
+        elif recovery_attempts:
+            recovery = recovery_attempts[0]
+            recovery_started_at = _utc_timestamp(recovery.get("started_at"))
+            recovered_at = recovery.get("recovered_at")
+            recovered_at_time = _utc_timestamp(recovered_at)
+            complete_fresh_process_evidence = (
+                frozenset(recovery) == _RECOVERY_FIELDS
+                and _positive_pid(recovery.get("builder_pid"))
+                and _positive_pid(builder_pid)
+                and recovery.get("builder_pid") != builder_pid
+                and recovery_started_at is not None
+                and recovered_at_time is not None
+                and recovered_at == started_at
+                and started_at_time == recovered_at_time
+                and recovery_started_at <= recovered_at_time
+            )
+            if not complete_fresh_process_evidence:
+                record_errors.append(
+                    "recovery_attempts must contain complete ordered "
+                    "fresh-process SIGSEGV evidence"
+                )
         if record.get("status") != "passed":
             record_errors.append(
                 f"status is {record.get('status')!r}, expected 'passed'"
             )
-        if record.get("returncode") != 0:
+        returncode = record.get("returncode")
+        if type(returncode) is not int or returncode != 0:
             record_errors.append(
-                f"returncode is {record.get('returncode')!r}, expected 0"
+                f"returncode is {returncode!r}, expected 0"
             )
         if expected_revision and record.get("source_revision") != expected_revision:
             record_errors.append(
@@ -1039,6 +1248,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_selection_options(verify_results)
     verify_results.add_argument("--artifacts-dir", type=Path, required=True)
+    verify_results.add_argument("--build-verification-report", type=Path)
     verify_results.add_argument("--report", type=Path)
     verify_results.set_defaults(func=command_verify_results)
 
