@@ -271,10 +271,11 @@ def test_component_builder_emits_four_native_plans(
         "build_native_umt5_encoder_engine",
         lambda *_args, **_kwargs: b"text-plan",
     )
+    denoiser_calls = []
     monkeypatch.setattr(
         trt_builder,
         "build_dit_engine",
-        lambda *_args, **_kwargs: b"dit-plan",
+        lambda *_args, **kwargs: denoiser_calls.append(kwargs) or b"dit-plan",
     )
     monkeypatch.setattr(
         trt_builder,
@@ -297,6 +298,100 @@ def test_component_builder_emits_four_native_plans(
     assert components["vae_decoder"] == b"vae-recurrent"
     assert components["vae_decoder_first_frame"] == b"vae-first"
     assert components["tokenizer_json"] == tokenizer_payload
+    assert denoiser_calls[0]["profile"] is WAN22_TI2V_5B
+    assert denoiser_calls[0]["ffn_fp8_scales"] is None
+    assert denoiser_calls[0]["cross_qo_fp8_scales"] is None
+
+    trt_builder.build_wan22_components(
+        str(tmp_path),
+        config=_runtime_config(
+            video_width=672,
+            video_height=384,
+            video_num_frames=5,
+            num_inference_steps=15,
+        ),
+        weights=weights,
+    )
+    assert denoiser_calls[1]["profile"] is WAN22_TI2V_5B_L0
+    assert denoiser_calls[1]["ffn_fp8_scales"] is None
+    assert denoiser_calls[1]["cross_qo_fp8_scales"] is None
+
+    ffn_scales = {
+        name: {"input_scale": 0.125}
+        for index in range(WAN22_TI2V_5B.num_layers)
+        for name in (
+            f"blocks.{index}.ffn.net.0.proj",
+            f"blocks.{index}.ffn.net.2",
+        )
+    }
+    trt_builder.build_wan22_components(
+        str(tmp_path),
+        config=_runtime_config(),
+        weights=weights,
+        fp8_scales=ffn_scales,
+    )
+    assert denoiser_calls[2]["profile"] is WAN22_TI2V_5B
+    assert denoiser_calls[2]["ffn_fp8_scales"] is ffn_scales
+    assert denoiser_calls[2]["cross_qo_fp8_scales"] is None
+
+    cross_qo_scales = {
+        name: {"input_scale": 0.25}
+        for index in range(WAN22_TI2V_5B.num_layers)
+        for name in (
+            f"blocks.{index}.attn2.to_q",
+            f"blocks.{index}.attn2.to_out.0",
+        )
+    }
+    combined_scales = {**ffn_scales, **cross_qo_scales}
+    trt_builder.build_wan22_components(
+        str(tmp_path),
+        config=_runtime_config(),
+        weights=weights,
+        fp8_scales=combined_scales,
+    )
+    assert denoiser_calls[3]["ffn_fp8_scales"] == ffn_scales
+    assert denoiser_calls[3]["cross_qo_fp8_scales"] == cross_qo_scales
+
+    with pytest.raises(ValueError, match="complete FFN\\+cross-Q/O"):
+        trt_builder.build_wan22_components(
+            str(tmp_path),
+            config=_runtime_config(),
+            weights=weights,
+            fp8_scales=cross_qo_scales,
+        )
+
+    incomplete_scales = dict(combined_scales)
+    incomplete_scales.pop("blocks.0.attn2.to_q")
+    with pytest.raises(ValueError, match="missing_cross_qo="):
+        trt_builder.build_wan22_components(
+            str(tmp_path),
+            config=_runtime_config(),
+            weights=weights,
+            fp8_scales=incomplete_scales,
+        )
+
+    unqualified_scales = dict(combined_scales)
+    unqualified_scales["blocks.0.attn1.to_out.0"] = {"input_scale": 0.25}
+    with pytest.raises(ValueError, match="unexpected="):
+        trt_builder.build_wan22_components(
+            str(tmp_path),
+            config=_runtime_config(),
+            weights=weights,
+            fp8_scales=unqualified_scales,
+        )
+
+    with pytest.raises(ValueError, match="FP8 scales are qualified only"):
+        trt_builder.build_wan22_components(
+            str(tmp_path),
+            config=_runtime_config(
+                video_width=672,
+                video_height=384,
+                video_num_frames=5,
+                num_inference_steps=15,
+            ),
+            weights=weights,
+            fp8_scales=ffn_scales,
+        )
 
 
 def test_runtime_config_supports_only_qualified_profiles_and_seed_range() -> None:
