@@ -16,6 +16,7 @@ import math
 import os
 import random
 import re
+import shlex
 import shutil
 import struct
 import traceback
@@ -28,7 +29,7 @@ import warnings
 from collections import Counter, defaultdict
 from itertools import product
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,7 @@ from tests.e2e_harness.registry import (  # noqa: E402
 DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
 DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
+REFERENCE_RUNNER = REPO_ROOT / "tools" / "trtmc_reference.py"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
 CHOICE_LETTERS = set("ABCDEFGHIJ")
 GPT_OSS_MMLU_SYSTEM_PROMPT = "You are a helpful assistant. Answer with only the option letter."
@@ -449,6 +451,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "name": model_name,
         "manifest": str(path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path),
         "hf_id": raw.get("hf_id") or raw.get("model_id", ""),
+        "hf_revision": str(raw.get("hf_revision", "") or ""),
         "bundle": raw.get("bundle", f"{path.stem}.trtfb"),
         "family": raw.get("family", ""),
         "runtime_strategy": runtime_strategy,
@@ -2756,9 +2759,9 @@ def prepare_task_dataset(
     raise ValueError(f"Unsupported task-eval dataset kind {dataset_kind!r}")
 
 
-def load_jsonl(path: Path) -> list[dict[str, Any]]:
+def load_jsonl(path: Path, *, errors: str = "strict") -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8", errors=errors) as f:
         for line in f:
             line = line.strip()
             if line:
@@ -2965,6 +2968,17 @@ def predictions_file_valid(
     return True
 
 
+def reference_cache_metadata(work_dir: Path) -> dict[str, Any]:
+    path = work_dir / "hf_cache.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _parse_generated_token_ids(text: str) -> list[int] | None:
     for line in str(text or "").splitlines():
         if not line.strip().startswith("tokens:"):
@@ -2986,7 +3000,7 @@ def _parse_transcribe_stdout(text: str) -> str:
 
 def convert_trtfb_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -> None:
     rows = []
-    for row in load_jsonl(raw_path):
+    for row in load_jsonl(raw_path, errors="replace"):
         rows.append(
             {
                 "sample_id": row.get("sample_id", ""),
@@ -3002,6 +3016,93 @@ def convert_trtfb_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -
 
 def _trtmc_binary_from_args(args: argparse.Namespace) -> str:
     return str(getattr(args, "trtmc_binary", "") or "build/trtmc")
+
+
+def _write_dataset_benchmark_reproduction(
+    work_dir: Path,
+    command: list[str],
+) -> None:
+    template = list(command)
+    template[2] = "{input_jsonl}"
+    template[3] = "{trtmc_raw_jsonl}"
+    base_seed = None
+    if "--seed" in template:
+        seed_index = template.index("--seed") + 1
+        base_seed = int(template[seed_index])
+        template[seed_index] = "{sample_seed}"
+    payload = {
+        "schema_version": "trtmc.native-trtmc-reproduction/v1",
+        "backend": "trtmc_dataset_benchmark",
+        "command": template,
+    }
+    if base_seed is not None:
+        payload["base_seed"] = base_seed
+    (work_dir / "trtfb_repro.json").write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+
+_NATIVE_TRTMC_COMMANDS = "trtfb_native_commands.jsonl"
+
+
+def _reset_native_trtmc_commands(work_dir: Path) -> None:
+    (work_dir / _NATIVE_TRTMC_COMMANDS).write_text("", encoding="utf-8")
+
+
+def _append_native_trtmc_command(
+    work_dir: Path,
+    sample_id: str,
+    command: Sequence[Any],
+) -> None:
+    tokens = [str(token) for token in command]
+    if not tokens:
+        return
+    with (work_dir / _NATIVE_TRTMC_COMMANDS).open("a", encoding="utf-8") as output:
+        output.write(
+            json.dumps(
+                {"sample_id": sample_id, "command": tokens},
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+
+def _command_tokens(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)) and value and all(
+        isinstance(token, (str, int, float, Path)) for token in value
+    ):
+        return [str(token) for token in value]
+    if isinstance(value, str):
+        tokens = shlex.split(value)
+        if len(tokens) > 1:
+            return tokens
+    return []
+
+
+def _native_command_from_metadata(metadata: Any) -> list[str]:
+    if not isinstance(metadata, Mapping):
+        return []
+    command = _command_tokens(metadata.get("command"))
+    if command:
+        return command
+    for value in metadata.values():
+        nested = _native_command_from_metadata(value)
+        if nested:
+            return nested
+    return []
+
+
+def _record_output_native_command(
+    work_dir: Path,
+    sample_id: str,
+    output: Any,
+) -> None:
+    raw_metadata = getattr(output, "metadata", {})
+    metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+    command = _native_command_from_metadata(metadata)
+    if command:
+        _append_native_trtmc_command(work_dir, sample_id, command)
 
 
 def run_vlm_trtfb(args: argparse.Namespace) -> None:
@@ -3032,6 +3133,7 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
 
     rows: list[dict[str, Any]] = []
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_output.open("w", encoding="utf-8") as raw_f,
         log_path.open("w", encoding="utf-8") as log_f,
@@ -3076,6 +3178,11 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
             if not bool(defaults.get("enable_thinking", True)):
                 cmd.append("--no-thinking")
 
+            _append_native_trtmc_command(
+                work_dir,
+                str(prompt_row.get("sample_id", f"vlm_{idx:06d}")),
+                cmd,
+            )
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
             proc = subprocess.run(
@@ -3135,6 +3242,7 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
 
     rows: list[dict[str, Any]] = []
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_output.open("w", encoding="utf-8") as raw_f,
         log_path.open("w", encoding="utf-8") as log_f,
@@ -3156,6 +3264,11 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
                 cmd.extend(["--hf-python", args.hf_python])
             cmd.extend(_asr_runtime_flags(prompt_row, defaults))
 
+            _append_native_trtmc_command(
+                work_dir,
+                str(prompt_row.get("sample_id", f"asr_{idx:06d}")),
+                cmd,
+            )
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
             proc = subprocess.run(
@@ -4648,7 +4761,10 @@ def _first_token_divergence(reference: list[int], actual: list[int]) -> int:
 def _diffusion_text_shared_sampling_inputs(row: dict[str, Any]) -> dict[str, str]:
     explicit = row.get("shared_sampling_inputs", {})
     if isinstance(explicit, dict) and explicit:
-        return {str(key): str(value) for key, value in explicit.items()}
+        return {
+            str(key): str(Path(str(value)).resolve())
+            for key, value in explicit.items()
+        }
     shared_dir = str(row.get("shared_inputs_dir", "") or "")
     if not shared_dir:
         return {}
@@ -6641,6 +6757,7 @@ def run_time_series_trtfb(args: argparse.Namespace) -> None:
     log_path = work_dir / (args.log or "trtfb_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_path.open("w", encoding="utf-8") as raw_file,
         log_path.open("w", encoding="utf-8") as log_file,
@@ -6658,6 +6775,7 @@ def run_time_series_trtfb(args: argparse.Namespace) -> None:
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
             output = runner.run_stage(case, _time_series_full_inference_stage(case), context)
+            _record_output_native_command(work_dir, case.name, output)
             log_file.write(
                 json.dumps(
                     {
@@ -6862,6 +6980,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
     pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with raw_path.open("w", encoding="utf-8") as raw_file:
         for index, prompt_row in enumerate(prompt_rows):
             case = _vision_case_for_request(template, prompt_row, task_eval_config, index)
@@ -6878,6 +6997,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
             output = runner.run_stage(
                 case, _vision_full_inference_stage(case), context
             )
+            _record_output_native_command(work_dir, case.name, output)
             response = _vision_response(
                 case=case,
                 source="trtfb",
@@ -7036,6 +7156,7 @@ def run_reranking_trtfb(args: argparse.Namespace) -> None:
     metadata_path = work_dir / (args.log or "trtfb_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_path.open("w", encoding="utf-8") as raw_file,
         metadata_path.open("w", encoding="utf-8") as metadata_file,
@@ -7055,6 +7176,7 @@ def run_reranking_trtfb(args: argparse.Namespace) -> None:
             output = runner.run_stage(
                 case, _reranking_full_inference_stage(case), context
             )
+            _record_output_native_command(work_dir, case.name, output)
             response = _reranking_response(
                 case=case, source="trtfb", output=output, prompt_row=prompt_row
             )
@@ -7618,9 +7740,14 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
     pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    log_path = work_dir / (getattr(args, "log", "") or "trtfb_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
-    with raw_path.open("w", encoding="utf-8") as raw_file:
+    _reset_native_trtmc_commands(work_dir)
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        log_path.open("w", encoding="utf-8") as log_file,
+    ):
         for index, prompt_row in enumerate(prompt_rows):
             case = _diffusion_case_for_prompt(template, prompt_row, generation, index)
             case.bundle = bundle_path.name
@@ -7636,6 +7763,19 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
             output = runner.run_stage(
                 case, _diffusion_end_to_end_stage(case), context
             )
+            _record_output_native_command(work_dir, case.name, output)
+            command = (
+                output.metadata.get("command")
+                if isinstance(output.metadata, dict)
+                else None
+            )
+            if isinstance(command, list) and command:
+                log_file.write(
+                    f"$ {shlex.join(str(token) for token in command)}\n"
+                )
+            elif isinstance(command, str) and command:
+                log_file.write(f"$ {command}\n")
+            log_file.flush()
             response = _diffusion_response(case.name, "trtfb", output, case=case)
             response["prompt"] = str(prompt_row["prompt"])
             if response["returncode"] != 0 or response["num_frames"] < 1:
@@ -7705,6 +7845,7 @@ def run_diffusion_text_trtfb(args: argparse.Namespace) -> None:
     bundle_path = Path(args.bundle).resolve()
     base_seed = int(generation.get("seed", 42))
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with raw_path.open("w", encoding="utf-8") as raw_file:
         for index, prompt_row in enumerate(prompt_rows):
             case = copy.deepcopy(template)
@@ -7757,6 +7898,7 @@ def run_diffusion_text_trtfb(args: argparse.Namespace) -> None:
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
             output = runner.run_stage(case, StageSpec(name="decoded_text", required=True), context)
+            _record_output_native_command(work_dir, sample_id, output)
             generated_samples = output.data.get("generated_samples", [])
             generated = generated_samples[0] if generated_samples else {}
             output_text = str(
@@ -7926,6 +8068,7 @@ def run_tts_trtfb(args: argparse.Namespace) -> None:
     if args.cuda_visible_devices:
         env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_output.open("w", encoding="utf-8") as raw_f,
         log_path.open("w", encoding="utf-8") as log_f,
@@ -7955,6 +8098,7 @@ def run_tts_trtfb(args: argparse.Namespace) -> None:
                 sample_set_tokens.append(f"audio_bark.seed={seed + idx}")
             for token in sample_set_tokens:
                 cmd.extend(["--set", token])
+            _append_native_trtmc_command(work_dir, sample_id, cmd)
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
             proc = subprocess.run(cmd, check=False, text=True, capture_output=True, env=env)
@@ -8018,6 +8162,7 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
     pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
     log_path = work_dir / (args.log or "trtfb_run.log")
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     env = os.environ.copy()
     if args.cuda_visible_devices:
         env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
@@ -8043,6 +8188,11 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
                 cmd.extend(["--config", args.config])
             for token in args.set or []:
                 cmd.extend(["--set", token])
+            _append_native_trtmc_command(
+                work_dir,
+                str(prompt_row["sample_id"]),
+                cmd,
+            )
             start = time.perf_counter()
             proc = subprocess.run(cmd, check=False, text=True, capture_output=True, env=env)
             wall_ms = (time.perf_counter() - start) * 1000.0
@@ -8156,11 +8306,14 @@ def run_trtfb(args: argparse.Namespace) -> None:
     if not bool(defaults.get("enable_thinking", True)):
         cmd.append("--no-thinking")
 
+    _write_dataset_benchmark_reproduction(work_dir, cmd)
     env = os.environ.copy()
     if args.cuda_visible_devices:
         env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
     log_path = work_dir / (args.log or "trtfb_run.log")
     with log_path.open("w", encoding="utf-8") as log_f:
+        log_f.write(f"$ {shlex.join(cmd)}\n")
+        log_f.flush()
         proc = subprocess.run(
             cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env
         )
@@ -8197,6 +8350,30 @@ def _manifest_tensor_parallel_size(build_args: dict[str, Any]) -> int | None:
     return None
 
 
+def _model_asset_path(model: dict[str, Any], value: str) -> Path:
+    asset = Path(value)
+    if asset.is_absolute():
+        return asset
+    manifest = Path(str(model.get("manifest", "") or ""))
+    if manifest:
+        if not manifest.is_absolute():
+            manifest = REPO_ROOT / manifest
+        model_dir = (
+            manifest.parent.parent
+            if manifest.parent.name == "manifests"
+            else manifest.parent
+        )
+        if asset.parts[:3] == ("tests", "e2e", "data"):
+            candidate = model_dir / "data" / asset.name
+        elif asset.parts and asset.parts[0] == "data":
+            candidate = model_dir / asset
+        else:
+            candidate = model_dir / "data" / asset
+        if candidate.is_file():
+            return candidate
+    return REPO_ROOT / "tests" / "e2e" / "data" / asset
+
+
 def build_bundle_command(
     model: dict[str, Any],
     *,
@@ -8210,11 +8387,16 @@ def build_bundle_command(
         trtmc_binary,
         "build",
         str(model["hf_id"]),
+    ]
+    hf_revision = str(model.get("hf_revision", "") or "")
+    if hf_revision:
+        cmd.extend(["--model-revision", hf_revision])
+    cmd.extend([
         "-o",
         str(bundle_path),
         "--max-cache-length",
         str(cache_length),
-    ]
+    ])
     build_args = model.get("build_args", {})
     method = _manifest_build_method(build_args)
     if method:
@@ -8255,7 +8437,7 @@ def build_bundle_command(
             cmd.extend([flag, str(value)])
     fp8_scales = model.get("fp8_scales")
     if fp8_scales:
-        scales_path = REPO_ROOT / "tests" / "e2e" / "data" / str(fp8_scales)
+        scales_path = _model_asset_path(model, str(fp8_scales))
         if scales_path.is_file():
             cmd.extend(["--fp8-scales", str(scales_path)])
     if extra_build_args:
@@ -8277,7 +8459,10 @@ def requested_build_max_cache_length(
     return max(model_cache, suite_cache, prompt_cache)
 
 
-def bundle_max_cache_length(bundle_path: Path, trtmc_binary: str) -> int | None:
+def bundle_inspection(
+    bundle_path: Path,
+    trtmc_binary: str,
+) -> dict[str, str]:
     try:
         proc = subprocess.run(
             [trtmc_binary, "inspect", str(bundle_path)],
@@ -8287,13 +8472,58 @@ def bundle_max_cache_length(bundle_path: Path, trtmc_binary: str) -> int | None:
             timeout=60,
         )
     except Exception:
-        return None
+        return {}
     if proc.returncode != 0:
+        return {}
+    values = {}
+    for label, value in re.findall(r"^([^:\n]+):\s+(.+?)\s*$", proc.stdout, re.MULTILINE):
+        values[label.strip()] = value.strip()
+    return values
+
+
+def bundle_max_cache_length(bundle_path: Path, trtmc_binary: str) -> int | None:
+    value = bundle_inspection(bundle_path, trtmc_binary).get("Max cache length")
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
         return None
-    match = re.search(r"^Max cache length:\s+(\d+)\s*$", proc.stdout, re.MULTILINE)
-    if not match:
-        return None
-    return int(match.group(1))
+
+
+def runtime_tensorrt_abi() -> str:
+    try:
+        import tensorrt
+    except Exception:
+        return ""
+    parts = str(tensorrt.__version__).split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else ""
+
+
+def _bundle_can_be_reused(
+    inspection: Mapping[str, str],
+    *,
+    max_cache_length: int | None,
+    allow_unknown: bool,
+) -> bool:
+    if not inspection:
+        return allow_unknown
+    raw_cache = inspection.get("Max cache length")
+    if max_cache_length is not None and raw_cache is not None:
+        try:
+            if int(raw_cache) < max_cache_length:
+                return False
+        except ValueError:
+            return False
+    bundle_abi = inspection.get("TRT ABI", "")
+    runtime_abi = runtime_tensorrt_abi()
+    return not bundle_abi or not runtime_abi or bundle_abi == runtime_abi
+
+
+def _remove_bundle_before_or_after_replacement(
+    bundle_path: Path,
+    replace_existing: bool,
+) -> None:
+    if replace_existing and (bundle_path.exists() or bundle_path.is_symlink()):
+        bundle_path.unlink()
 
 
 def ensure_bundle(
@@ -8303,16 +8533,23 @@ def ensure_bundle(
     trtmc_binary: str,
     max_cache_length: int | None = None,
     force_build: bool = False,
+    replace_existing: bool = False,
     extra_build_args: list[str] | None = None,
     log_path: Path | None = None,
 ) -> tuple[Path, bool]:
     if bundle_path.is_file() and not force_build:
-        if max_cache_length is None:
-            return bundle_path, False
-        existing_cache = bundle_max_cache_length(bundle_path, trtmc_binary)
-        if existing_cache is None or existing_cache >= max_cache_length:
+        inspection = bundle_inspection(bundle_path, trtmc_binary)
+        if _bundle_can_be_reused(
+            inspection,
+            max_cache_length=max_cache_length,
+            allow_unknown=not replace_existing,
+        ):
             return bundle_path, False
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    _remove_bundle_before_or_after_replacement(
+        bundle_path,
+        replace_existing,
+    )
     cmd = build_bundle_command(
         model,
         trtmc_binary=trtmc_binary,
@@ -8323,8 +8560,14 @@ def ensure_bundle(
     log_path = log_path or bundle_path.with_suffix(".build.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log_f:
+        log_f.write(f"$ {shlex.join(cmd)}\n")
+        log_f.flush()
         proc = subprocess.run(cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
+        _remove_bundle_before_or_after_replacement(
+            bundle_path,
+            replace_existing,
+        )
         raise RuntimeError(
             f"Bundle build failed for {model['name']} rc={proc.returncode}; see {log_path}"
         )
@@ -8382,6 +8625,7 @@ def _namespace_for_run_hf(
 ) -> argparse.Namespace:
     return argparse.Namespace(
         model=model["hf_id"],
+        model_revision=str(model.get("hf_revision", "") or ""),
         family=model.get("family", ""),
         reference_family=model.get("reference_family", ""),
         work_dir=str(work_dir),
@@ -8458,8 +8702,8 @@ def run_hf_reference_subprocess(
     hf_python = model_reference_python(model, base_python)
     cmd = [
         hf_python,
-        str(Path(__file__).resolve()),
-        "run-hf",
+        str(REFERENCE_RUNNER),
+        "run",
         "--model",
         str(hf_args.model),
         "--family",
@@ -8477,6 +8721,13 @@ def run_hf_reference_subprocess(
         "--device",
         str(hf_args.device),
     ]
+    if hf_args.model_revision:
+        cmd.extend(["--model-revision", str(hf_args.model_revision)])
+    reference_cache_dir = str(
+        getattr(args, "reference_cache_dir", "") or ""
+    )
+    if reference_cache_dir:
+        cmd.extend(["--cache-dir", reference_cache_dir])
     if hf_args.device_map:
         cmd.extend(["--device-map", str(hf_args.device_map)])
     if hf_args.attn_impl:
@@ -8491,6 +8742,8 @@ def run_hf_reference_subprocess(
         cmd.append("--apply-chat-template")
     if hf_args.elf_reference_repo:
         cmd.extend(["--elf-reference-repo", str(hf_args.elf_reference_repo)])
+    if bool(getattr(args, "force_hf", False)):
+        cmd.append("--force")
     for flag, value in (
         ("--max-new-tokens", hf_args.max_new_tokens),
         ("--temperature", hf_args.temperature),
@@ -8506,6 +8759,8 @@ def run_hf_reference_subprocess(
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     with log_path.open("w", encoding="utf-8") as log_f:
+        log_f.write(f"$ {shlex.join(cmd)}\n")
+        log_f.flush()
         proc = subprocess.run(
             cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env
         )
@@ -9396,20 +9651,14 @@ def eval_one_model(
         )
 
     answers_path = work_dir / "answers.json"
-    hf_predictions = work_dir / "hf_predictions.json"
-    prompts_changed = bool(
-        prompt_normalization and prompt_normalization.get("truncated_count", 0)
-    )
-    hf_reused = (
-        not no_hf_reference
-        and predictions_file_valid(hf_predictions, answers_path)
-        and not args.force_hf
-        and not prompts_changed
-    )
-    if not no_hf_reference and not hf_reused:
+    hf_reused = False
+    if not no_hf_reference:
         # Run HF in its own process so its GPU memory is fully reclaimed before
         # the TRT bundle build and TRTFB inference for this model.
         run_hf_reference_subprocess(args, model, work_dir)
+    hf_cache = reference_cache_metadata(work_dir)
+    if hf_cache.get("status") in {"reused", "adopted"}:
+        hf_reused = True
 
     if args.bundle:
         if len(args.model or []) != 1:
@@ -9468,6 +9717,9 @@ def eval_one_model(
         trtmc_binary=args.trtmc_binary,
         max_cache_length=max_cache_length,
         force_build=args.force_build,
+        replace_existing=bool(
+            getattr(args, "replace_bundle_on_build", False)
+        ),
         extra_build_args=args.extra_build_arg,
         log_path=work_dir / "build.log",
     )
@@ -9491,6 +9743,8 @@ def eval_one_model(
         if hf_reused
         else "ran",
         "hf_reused": hf_reused,
+        "hf_cache_status": str(hf_cache.get("status", "") or ""),
+        "hf_cache_key": str(hf_cache.get("key", "") or ""),
         "bundle_built": built,
         "model_plugin_dir": str(getattr(args, "model_plugin_dir", "") or ""),
     }
@@ -10406,24 +10660,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--subject", default="")
     p.add_argument("--sample-seed", type=int)
 
-    p = sub.add_parser("run-hf")
-    p.add_argument("--model", required=True)
-    p.add_argument("--family", default="")
-    p.add_argument("--reference-family", default="")
-    p.add_argument("--work-dir", required=True)
-    p.add_argument("--predictions")
-    p.add_argument("--raw-output")
-    p.add_argument("--dtype", choices=["auto", "float16", "bfloat16"], default="auto")
-    p.add_argument("--device", default="cuda")
-    p.add_argument("--device-map", default="")
-    p.add_argument("--attn-impl", default="")
-    p.add_argument("--trust-remote-code", action="store_true")
-    p.add_argument("--local-files-only", action="store_true")
-    p.add_argument("--do-sample", action="store_true")
-    p.add_argument("--apply-chat-template", action="store_true")
-    p.add_argument("--elf-reference-repo", default="")
-    add_generation_args(p)
-
     p = sub.add_parser("run-trtfb")
     p.add_argument("--bundle", required=True)
     p.add_argument("--work-dir", required=True)
@@ -10536,7 +10772,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--subject", default="")
     p.add_argument("--sample-seed", type=int)
     p.add_argument("--force-hf", action="store_true", help="Regenerate HF reference outputs.")
+    p.add_argument(
+        "--reference-cache-dir",
+        default="",
+        help="Shared setting-keyed cache managed by tools/trtmc_reference.py.",
+    )
     p.add_argument("--force-build", action="store_true", help="Rebuild the .trtfb bundle.")
+    p.add_argument(
+        "--replace-bundle-on-build",
+        action="store_true",
+        help="Remove the existing bundle before rebuilding it at the same path.",
+    )
     p.add_argument(
         "--require-prebuilt-bundles",
         action="store_true",
@@ -11091,9 +11337,6 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_prepare_media(args)
     if args.cmd == "prepare-ci-dataset":
         return cmd_prepare_ci_dataset(args)
-    if args.cmd == "run-hf":
-        run_hf_reference(args)
-        return 0
     if args.cmd == "run-trtfb":
         run_trtfb(args)
         return 0

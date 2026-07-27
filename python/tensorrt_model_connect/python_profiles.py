@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 try:
     import tomllib
@@ -142,6 +142,12 @@ def _exact_pinned_requirements(requirements_text: str) -> dict[str, str]:
     return pinned
 
 
+def _pinned_version_matches(expected: str, actual: str) -> bool:
+    if actual == expected:
+        return True
+    return "+" not in expected and actual.partition("+")[0] == expected
+
+
 def _verify_exact_requirements(
     profile_name: str,
     profile_python: str,
@@ -151,10 +157,12 @@ def _verify_exact_requirements(
         return
     script = (
         "import importlib.metadata as m, json, sys; "
+        "from tensorrt_model_connect.python_profiles "
+        "import _pinned_version_matches as matches; "
         "expected=json.loads(sys.argv[1]); "
         "actual={name:m.version(name) for name in expected}; "
         "bad={name:(expected[name], actual[name]) for name in expected "
-        "if actual[name] != expected[name]}; "
+        "if not matches(expected[name], actual[name])}; "
         "assert not bad, f'exact profile pins do not match: {bad}'"
     )
     _run_profile_command(
@@ -322,6 +330,8 @@ def _materialize_venv_profile(
     profile_name: str,
     spec: Mapping[str, Any],
     base_python: str,
+    *,
+    on_create: Callable[[str], None] | None = None,
 ) -> str:
     base_python = _absolute_python(base_python)
     if not base_python:
@@ -385,6 +395,9 @@ def _materialize_venv_profile(
         if ready_path.is_file() and python_path.is_file():
             return str(python_path.absolute())
 
+        if on_create is not None:
+            on_create(profile_name)
+
         tmp_dir = Path(tempfile.mkdtemp(prefix=f"{profile_name}-", dir=str(root)))
         tmp_python = tmp_dir / "bin" / "python"
         requirements_file = tmp_dir / "requirements.lock.txt"
@@ -447,7 +460,12 @@ def _materialize_venv_profile(
     return str(python_path.absolute())
 
 
-def resolve_profile_python(profile_name: str, base_python: str) -> str:
+def resolve_profile_python(
+    profile_name: str,
+    base_python: str,
+    *,
+    on_create: Callable[[str], None] | None = None,
+) -> str:
     """Resolve a symbolic profile name to a Python executable path."""
     name = _normalize_profile_name(profile_name)
     if name == DEFAULT_PROFILE:
@@ -472,7 +490,12 @@ def resolve_profile_python(profile_name: str, base_python: str) -> str:
         raise ValueError(
             f"Execution profile {name!r} declares unsupported kind {kind!r}"
         )
-    return _materialize_venv_profile(name, spec, base_python)
+    return _materialize_venv_profile(
+        name,
+        spec,
+        base_python,
+        on_create=on_create,
+    )
 
 
 def resolve_case_profile_names(case: Any) -> dict[str, str]:

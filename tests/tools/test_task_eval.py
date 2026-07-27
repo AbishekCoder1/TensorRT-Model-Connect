@@ -1275,6 +1275,7 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
             {
                 "name": "example-decoder",
                 "hf_id": "example-org/example-decoder",
+                "hf_revision": "0123456789abcdef",
                 "bundle": "example-decoder.trtfb",
                 "family": "example_decoder",
                 "runtime_strategy": "example_decoder_decoder_kv_cache",
@@ -1293,6 +1294,7 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
 
     assert [record["name"] for record in records] == ["example-decoder"]
     assert records[0]["manifest"].endswith("example_decoder/manifests/example-decoder.json")
+    assert records[0]["hf_revision"] == "0123456789abcdef"
     assert records[0]["task_eval"] == {
         "vlm_fallback_prompt_template": "<image>{prompt}",
     }
@@ -2469,6 +2471,23 @@ def test_convert_trtfb_uses_generated_text_field(tmp_path: Path) -> None:
     assert payload["responses"][0]["source"] == "trtfb"
 
 
+def test_convert_trtfb_replaces_invalid_utf8_in_generated_text(
+    tmp_path: Path,
+) -> None:
+    raw = tmp_path / "trtfb_raw.jsonl"
+    raw.write_bytes(
+        b'{"sample_id":"sample-0","text":"bad \x88 text",'
+        b'"generated_token_ids":[7]}\n'
+    )
+    predictions = tmp_path / "predictions.json"
+
+    task_eval.convert_trtfb_jsonl_to_predictions(raw, predictions)
+
+    payload = json.loads(predictions.read_text(encoding="utf-8"))
+    assert payload["responses"][0]["output_text"] == "bad \ufffd text"
+    assert payload["responses"][0]["generated_token_ids"] == [7]
+
+
 def test_score_and_compare_mmlu_predictions(tmp_path: Path) -> None:
     dataset = tmp_path / "mmlu.json"
     _write_mmlu(dataset)
@@ -3125,6 +3144,27 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
     assert "--verbose" in cmd
 
 
+def test_build_bundle_command_passes_manifest_hf_revision(tmp_path: Path) -> None:
+    model = {
+        "name": "case",
+        "hf_id": "org/model",
+        "hf_revision": "0123456789abcdef",
+        "max_cache_length": 256,
+        "precision": "fp32",
+    }
+
+    cmd = task_eval.build_bundle_command(
+        model,
+        trtmc_binary="build/trtmc",
+        bundle_path=tmp_path / "case.trtfb",
+    )
+
+    assert cmd[cmd.index("--model-revision") : cmd.index("--model-revision") + 2] == [
+        "--model-revision",
+        "0123456789abcdef",
+    ]
+
+
 def test_build_bundle_command_passes_manifest_fp32_layers(tmp_path: Path) -> None:
     """Reduced-precision selectors must reach the build, matching the E2E harness."""
     model = {
@@ -3160,6 +3200,151 @@ def test_build_bundle_command_omits_fp32_layers_when_absent(tmp_path: Path) -> N
     )
 
     assert "--fp32-layers" not in cmd
+
+
+def test_ensure_bundle_replaces_existing_file_before_build(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle.parent.mkdir()
+    bundle.write_bytes(b"old")
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **_kwargs):
+        output = Path(command[command.index("-o") + 1])
+        assert not output.exists()
+        output.write_bytes(b"new")
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+
+    result, built = task_eval.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        force_build=True,
+        replace_existing=True,
+    )
+
+    assert result == bundle
+    assert built is True
+    assert bundle.read_bytes() == b"new"
+
+
+def test_ensure_bundle_removes_partial_replacement_after_failed_build(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle.parent.mkdir()
+    bundle.write_bytes(b"old")
+
+    class Result:
+        returncode = 1
+
+    def fake_run(command, **_kwargs):
+        Path(command[command.index("-o") + 1]).write_bytes(b"partial")
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Bundle build failed"):
+        task_eval.ensure_bundle(
+            {
+                "name": "model",
+                "hf_id": "org/model",
+                "precision": "fp32",
+            },
+            bundle_path=bundle,
+            trtmc_binary="trtmc",
+            force_build=True,
+            replace_existing=True,
+        )
+
+    assert not bundle.exists()
+
+
+def test_ensure_bundle_replaces_dangling_shared_bundle_symlink(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle.parent.mkdir()
+    bundle.symlink_to(tmp_path / "missing.trtfb")
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **_kwargs):
+        output = Path(command[command.index("-o") + 1])
+        assert not output.is_symlink()
+        output.write_bytes(b"new")
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+
+    task_eval.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        replace_existing=True,
+    )
+
+    assert not bundle.is_symlink()
+    assert bundle.read_bytes() == b"new"
+
+
+def test_ensure_bundle_replaces_incompatible_tensorrt_abi(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle.parent.mkdir()
+    bundle.write_bytes(b"old")
+    commands: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = "TRT ABI:            11.0\nMax cache length:   256\n"
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[1] == "inspect":
+            return Result()
+        output = Path(command[command.index("-o") + 1])
+        assert not output.exists()
+        output.write_bytes(b"new")
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+    monkeypatch.setattr(task_eval, "runtime_tensorrt_abi", lambda: "11.2")
+
+    _, built = task_eval.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        max_cache_length=256,
+        replace_existing=True,
+    )
+
+    assert built is True
+    assert bundle.read_bytes() == b"new"
+    assert [command[1] for command in commands] == ["inspect", "build"]
 
 
 def test_suite_build_cache_minimum_overrides_manifest_cache() -> None:
@@ -3208,6 +3393,7 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
 
     args = argparse.Namespace(
         hf_python="/opt/deepseek-hf/bin/python3",
+        reference_cache_dir=str(tmp_path / "references"),
         hf_dtype="auto",
         hf_device="cuda",
         hf_device_map="",
@@ -3223,12 +3409,22 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
         min_p=None,
         seed=None,
     )
-    model = {"hf_id": "org/model", "trust_remote_code": False}
+    model = {
+        "hf_id": "org/model",
+        "hf_revision": "0123456789abcdef",
+        "trust_remote_code": False,
+    }
 
     task_eval.run_hf_reference_subprocess(args, model, work_dir)
 
     assert captured["cmd"][0] == "/opt/deepseek-hf/bin/python3"
-    assert captured["cmd"][1:3] == [str(Path(task_eval.__file__).resolve()), "run-hf"]
+    assert captured["cmd"][1:3] == [str(task_eval.REFERENCE_RUNNER), "run"]
+    assert captured["cmd"][captured["cmd"].index("--model-revision") + 1] == (
+        "0123456789abcdef"
+    )
+    assert captured["cmd"][captured["cmd"].index("--cache-dir") + 1] == str(
+        tmp_path / "references"
+    )
 
 
 def test_run_hf_reference_subprocess_passes_asr_family_metadata(
@@ -3481,6 +3677,85 @@ def test_run_trtfb_dispatches_diffusion_prompt_workdir(
     assert calls == ["diffusion"]
 
 
+def test_dataset_benchmark_reproduction_is_direct_and_uses_single_input(
+    tmp_path: Path,
+) -> None:
+    command = [
+        "/workspace/build/trtmc_dataset_benchmark",
+        "/runs/engines/model.trtfb",
+        "/runs/work/prompts.jsonl",
+        "/runs/work/trtfb_raw.jsonl",
+        "--max-new-tokens",
+        "8",
+    ]
+
+    task_eval._write_dataset_benchmark_reproduction(tmp_path, command)
+
+    payload = json.loads(
+        (tmp_path / "trtfb_repro.json").read_text(encoding="utf-8")
+    )
+    assert payload["backend"] == "trtmc_dataset_benchmark"
+    assert payload["command"][0] == "/workspace/build/trtmc_dataset_benchmark"
+    assert payload["command"][2] == "{input_jsonl}"
+    assert payload["command"][3] == "{trtmc_raw_jsonl}"
+    assert "task_eval.py" not in " ".join(payload["command"])
+
+
+def test_dataset_benchmark_reproduction_preserves_per_sample_seed(
+    tmp_path: Path,
+) -> None:
+    command = [
+        "/workspace/build/trtmc_dataset_benchmark",
+        "/runs/engines/model.trtfb",
+        "/runs/work/prompts.jsonl",
+        "/runs/work/trtfb_raw.jsonl",
+        "--seed",
+        "42",
+    ]
+
+    task_eval._write_dataset_benchmark_reproduction(tmp_path, command)
+
+    payload = json.loads(
+        (tmp_path / "trtfb_repro.json").read_text(encoding="utf-8")
+    )
+    assert payload["base_seed"] == 42
+    assert payload["command"][payload["command"].index("--seed") + 1] == (
+        "{sample_seed}"
+    )
+
+
+def test_native_trtmc_command_recorder_extracts_nested_model_command(
+    tmp_path: Path,
+) -> None:
+    task_eval._reset_native_trtmc_commands(tmp_path)
+    output = SimpleNamespace(
+        metadata={
+            "cpp": {
+                "command": [
+                    "/workspace/build/trtmc",
+                    "run",
+                    "/runs/engines/model.trtfb",
+                    "--prompt",
+                    "hello",
+                ]
+            }
+        }
+    )
+
+    task_eval._record_output_native_command(
+        tmp_path,
+        "sample-7",
+        output,
+    )
+
+    row = json.loads(
+        (tmp_path / "trtfb_native_commands.jsonl").read_text(encoding="utf-8")
+    )
+    assert row["sample_id"] == "sample-7"
+    assert row["command"][0:2] == ["/workspace/build/trtmc", "run"]
+    assert "task_eval.py" not in " ".join(row["command"])
+
+
 def test_run_diffusion_trtfb_writes_image_artifact_predictions(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -3514,6 +3789,15 @@ def test_run_diffusion_trtfb_writes_image_artifact_predictions(
                     "frame_stats": {"mean": 0.5, "std": 0.2},
                     "prompt": case.inputs["prompt"],
                 },
+                metadata={
+                    "command": [
+                        "build/trtmc",
+                        "generate-video",
+                        str(tmp_path / "bundles" / "flux-schnell-l0.trtfb"),
+                        "--prompt",
+                        case.inputs["prompt"],
+                    ]
+                },
                 timing_s=0.5,
             )
 
@@ -3546,6 +3830,11 @@ def test_run_diffusion_trtfb_writes_image_artifact_predictions(
     assert seen == [("a red cube", "build/trtmc", "flux-schnell-l0.trtfb")]
     assert predictions["responses"][0]["source"] == "trtfb"
     assert predictions["responses"][0]["num_frames"] == 1
+    assert (work_dir / "trtfb_run.log").read_text(encoding="utf-8") == (
+        "$ build/trtmc generate-video "
+        f"{tmp_path / 'bundles' / 'flux-schnell-l0.trtfb'} "
+        "--prompt 'a red cube'\n"
+    )
 
 
 def test_compare_diffusion_image_predictions_aggregates_model_comparator_metrics(
@@ -4061,6 +4350,27 @@ def test_flux_task_eval_build_command_preserves_diffusion_shape(tmp_path: Path) 
     assert command[command.index("--num-inference-steps") + 1] == "20"
 
 
+def test_flux_fp8_build_command_resolves_model_owned_scales(tmp_path: Path) -> None:
+    model = next(
+        model
+        for model in task_eval.load_manifest_records()
+        if model["name"] == "flux-2-dev-fp8"
+    )
+
+    command = task_eval.build_bundle_command(
+        model,
+        trtmc_binary="build/trtmc",
+        bundle_path=tmp_path / "flux-2-dev-fp8.trtfb",
+    )
+
+    scales = Path(command[command.index("--fp8-scales") + 1])
+    assert scales == (
+        task_eval.REPO_ROOT
+        / "tests/e2e/models/flux/data/flux2-fp8-scales.json"
+    )
+    assert scales.is_file()
+
+
 def test_eval_one_model_diffusion_uses_clip_parity_summary(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -4314,7 +4624,7 @@ def test_run_deepseek_ocr_hf_reference_writes_predictions(tmp_path: Path) -> Non
     assert payload["responses"][0]["generated_token_ids"] == [1, 2]
 
 
-def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
+def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
     tmp_path: Path, monkeypatch
 ) -> None:
     dataset = tmp_path / "mmlu.json"
@@ -4350,9 +4660,12 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
     )
     calls: list[str] = []
 
-    def fake_run_hf(_args):
-        calls.append("hf")
-        raise AssertionError("HF should be reused")
+    def fake_run_hf(_args, _model, reference_work_dir):
+        calls.append("hf-cache")
+        (reference_work_dir / "hf_cache.json").write_text(
+            json.dumps({"status": "reused", "key": "abc123"}),
+            encoding="utf-8",
+        )
 
     monkeypatch.setattr(task_eval, "max_prompt_token_length", lambda **_kwargs: 405)
 
@@ -4378,7 +4691,7 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(task_eval, "run_hf_reference", fake_run_hf)
+    monkeypatch.setattr(task_eval, "run_hf_reference_subprocess", fake_run_hf)
     monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
     monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
 
@@ -4423,8 +4736,9 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
 
     result = task_eval.eval_one_model(suite=suite, model=model, args=args)
 
-    assert calls == ["build", "trtfb-seed=123"]
+    assert calls == ["hf-cache", "build", "trtfb-seed=123"]
     assert result["hf_reused"] is True
+    assert result["hf_cache_key"] == "abc123"
     assert result["bundle_built"] is True
     assert result["trtfb_accuracy"] == 0.5
     assert (work_dir / "summary.json").is_file()
@@ -5296,6 +5610,46 @@ def test_diffusion_text_hf_parity_uses_token_agreement_only() -> None:
     assert result["shared_sampling_inputs_match_rate"] == 1.0
     assert "normalized_text_exact_match_rate" not in result
     assert "text_ned" not in result["samples"][0]
+
+
+def test_diffusion_text_shared_inputs_match_through_reference_cache_symlink(
+    tmp_path: Path,
+) -> None:
+    cached_dir = tmp_path / "cache" / "hf_shared_inputs" / "sample"
+    cached_dir.mkdir(parents=True)
+    cached_input = cached_dir / "initial_latents.f32"
+    cached_input.write_bytes(b"latents")
+    materialized_root = tmp_path / "work" / "hf_shared_inputs"
+    materialized_root.parent.mkdir()
+    materialized_root.symlink_to(cached_dir.parent, target_is_directory=True)
+    materialized_input = materialized_root / "sample" / "initial_latents.f32"
+
+    result = task_eval.compare_diffusion_text_prediction_sets(
+        {
+            "responses": [
+                {
+                    "sample_id": "sample",
+                    "generated_token_ids": [1],
+                    "shared_sampling_inputs": {
+                        "initial_latents": str(cached_input),
+                    },
+                }
+            ]
+        },
+        {
+            "responses": [
+                {
+                    "sample_id": "sample",
+                    "generated_token_ids": [1],
+                    "shared_sampling_inputs": {
+                        "initial_latents": str(materialized_input),
+                    },
+                }
+            ]
+        },
+    )
+
+    assert result["shared_sampling_inputs_match_rate"] == 1.0
 
 
 def test_diffusion_text_hf_parity_requires_token_ids() -> None:

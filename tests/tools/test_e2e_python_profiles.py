@@ -119,12 +119,26 @@ def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path
         },
     )
 
-    python = shared_profiles.resolve_profile_python("custom", sys.executable)
+    created = []
+    python = shared_profiles.resolve_profile_python(
+        "custom",
+        sys.executable,
+        on_create=created.append,
+    )
     ready = Path(python).parent.parent / ".ready"
 
     assert Path(python).is_file()
     assert ready.is_file()
-    assert shared_profiles.resolve_profile_python("custom", sys.executable) == python
+    assert created == ["custom"]
+    assert (
+        shared_profiles.resolve_profile_python(
+            "custom",
+            sys.executable,
+            on_create=created.append,
+        )
+        == python
+    )
+    assert created == ["custom"]
 
 
 def test_family_profile_registry_is_fully_exact_pinned():
@@ -140,6 +154,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "personaplex_reference",
         "phi4_multimodal",
         "sana_wm_reference",
+        "reference_common",
     }
     profiles = shared_profiles.load_python_profile_registry()["profiles"]
 
@@ -160,6 +175,19 @@ def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
         shared_profiles._exact_pinned_requirements(
             "huggingface-hub==0.28.1\nhuggingface_hub==0.28.1\n"
         )
+
+
+def test_exact_profile_pin_accepts_only_local_builds_of_same_public_version():
+    assert shared_profiles._pinned_version_matches(
+        "3.1.0",
+        "3.1.0+c9040511b",
+    )
+    assert shared_profiles._pinned_version_matches("3.1.0", "3.1.0")
+    assert not shared_profiles._pinned_version_matches("3.1.0", "3.1.1")
+    assert not shared_profiles._pinned_version_matches(
+        "3.1.0+expected",
+        "3.1.0+different",
+    )
 
 
 def test_prebuilt_only_profile_fails_before_creating_a_runtime_cache(
