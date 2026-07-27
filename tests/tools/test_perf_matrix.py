@@ -10,7 +10,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
@@ -308,6 +308,21 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert by_id["magpie_tts.generate_audio"]["baseline"]["adapter_options"] == {
         "speaker_encoder_revision": "e9124b5364a2c3e9b4f78da429a33cbca8f8c22b"
     }
+    assert (
+        by_id["bark.generate_audio"]["workload"]["request"]["max_new_tokens"]
+        == 128
+    )
+    assert (
+        by_id["magpie_tts.generate_audio"]["workload"]["request"]["max_new_tokens"]
+        == 256
+    )
+    for case_id in (
+        "bark.generate_audio",
+        "magpie_tts.generate_audio",
+        "personaplex.speak",
+        "qwen3_omni.generate_audio",
+    ):
+        assert by_id[case_id]["baseline"]["output_contract"] == "audio-shape"
     assert by_id["personaplex.speak"]["baseline"]["adapter_options"] == {
         "reference_commit": "3428dfd95309a7f3c84fd93259ded0f810d1ff91"
     }
@@ -1320,6 +1335,35 @@ def test_source_revision_can_be_injected_without_git(monkeypatch) -> None:
     monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
 
     assert perf_matrix._git_commit() == "tested-commit"
+
+
+def test_task_reference_request_seed_is_explicit_and_strict() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+
+    assert runner["_request_seed"]({"seed": 0}) == 0
+    assert runner["_request_seed"]({}, 42) == 42
+    for invalid in (True, 0.5, "42"):
+        with pytest.raises(ValueError, match="request seed must be an integer"):
+            runner["_request_seed"]({"seed": invalid})
+
+
+def test_bark_reference_maps_public_token_cap_to_semantic_stage() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+
+    assert runner["_bark_generation_options"]({"max_new_tokens": 128}) == {
+        "semantic_max_new_tokens": 128
+    }
+    assert runner["_bark_generation_options"]({"max_new_tokens": 0}) == {}
+
+
+def test_magpie_reference_maps_public_token_cap_to_decoder_steps() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    inference_parameters = SimpleNamespace(max_decoder_steps=750)
+    model = SimpleNamespace(inference_parameters=inference_parameters)
+
+    runner["_apply_magpie_generation_options"](model, {"max_new_tokens": 256})
+
+    assert inference_parameters.max_decoder_steps == 256
 
 
 def test_task_reference_runner_measures_loaded_public_operation(

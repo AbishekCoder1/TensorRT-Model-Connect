@@ -183,6 +183,30 @@ def _seed_all(torch_module: Any, seed: int) -> None:
         torch_module.cuda.manual_seed_all(seed)
 
 
+def _request_seed(request: Mapping[str, Any], fallback: Any = 42) -> int:
+    value = request.get("seed", fallback)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("reference request seed must be an integer")
+    return value
+
+
+def _bark_generation_options(request: Mapping[str, Any]) -> dict[str, int]:
+    max_new_tokens = request.get("max_new_tokens", 0)
+    if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
+        raise ValueError("Bark request max_new_tokens must be an integer")
+    if max_new_tokens <= 0:
+        return {}
+    return {"semantic_max_new_tokens": max_new_tokens}
+
+
+def _apply_magpie_generation_options(model: Any, request: Mapping[str, Any]) -> None:
+    max_new_tokens = request.get("max_new_tokens", 0)
+    if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
+        raise ValueError("Magpie request max_new_tokens must be an integer")
+    if max_new_tokens > 0:
+        model.inference_parameters.max_decoder_steps = max_new_tokens
+
+
 def _load_kwargs(arguments: argparse.Namespace, torch_module: Any) -> dict[str, Any]:
     values: dict[str, Any] = {
         "trust_remote_code": arguments.trust_remote_code,
@@ -395,7 +419,11 @@ def _load_tts(
             local_files_only=arguments.local_files_only,
         )
         model = MagpieTTSModel.restore_from(restore_path=model_archive).eval().to(device)
-        seed = int(_runtime_config(arguments).get("audio_magpie.seed", 42))
+        _apply_magpie_generation_options(model, request)
+        seed = _request_seed(
+            request,
+            _runtime_config(arguments).get("audio_magpie.seed", 42),
+        )
 
         def invoke() -> Mapping[str, Any]:
             _seed_all(torch, seed)
@@ -414,11 +442,16 @@ def _load_tts(
             .to(device)
         )
         inputs = _to_device(processor(prompt, return_tensors="pt"), device)
+        seed = _request_seed(
+            request,
+            _runtime_config(arguments).get("audio_bark.seed", 42),
+        )
+        generation_options = _bark_generation_options(request)
 
         def invoke() -> Mapping[str, Any]:
-            _seed_all(torch, 42)
+            _seed_all(torch, seed)
             with torch.inference_mode():
-                audio = model.generate(**inputs)
+                audio = model.generate(**inputs, **generation_options)
             return {
                 "audio_samples": int(audio.numel()),
                 "sample_rate": int(model.generation_config.sample_rate),
@@ -1798,9 +1831,10 @@ def _load_qwen3_omni(
     inputs = _qwen3_omni_chat_inputs(processor, conversation).to(model.device)
     thinker_tokens = int(request.get("max_new_tokens", 16))
     talker_tokens = int(options.get("talker_max_new_tokens", 32))
+    seed = _request_seed(request)
 
     def invoke() -> Mapping[str, Any]:
-        _seed_all(torch, 42)
+        _seed_all(torch, seed)
         with torch.inference_mode():
             text_ids, audio = model.generate(
                 **inputs,
