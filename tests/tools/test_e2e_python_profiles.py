@@ -132,10 +132,14 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "chronos",
         "deepseek_ocr",
         "elf_flow",
+        "elf_flow_reference",
         "internlm",
+        "lance_reference",
         "magpie_tts_reference",
         "nemotron_h_reference",
+        "personaplex_reference",
         "phi4_multimodal",
+        "sana_wm_reference",
     }
     profiles = shared_profiles.load_python_profile_registry()["profiles"]
 

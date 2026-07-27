@@ -27,7 +27,7 @@ from tensorrt_model_connect.benchmark.metrics import reduce_metrics
 from tensorrt_model_connect.benchmark.operations import registered_operations
 from tensorrt_model_connect.benchmark.task_adapters import registered_task_adapters
 from tensorrt_model_connect.benchmark.types import BenchmarkError
-from tensorrt_model_connect.benchmark.worker import worker_backend_abi
+from tensorrt_model_connect.benchmark.worker import worker_backend_abi, worker_metadata
 
 
 pytestmark = pytest.mark.unit
@@ -44,7 +44,13 @@ def _worker(tmp_path: Path) -> Path:
     worker = tmp_path / "trtmc_benchmark_worker"
     worker.write_text(
         """#!/usr/bin/env python3
-import argparse, json
+import argparse, json, sys
+if sys.argv[1:] == ['--metadata']:
+    print(json.dumps({
+      'schema_version': 'trtmc.benchmark-worker-metadata/v1',
+      'build': {'configuration': 'Release', 'source_revision': 'test-revision'},
+    }))
+    raise SystemExit(0)
 p = argparse.ArgumentParser()
 p.add_argument('--request', required=True)
 p.add_argument('--output', required=True)
@@ -62,6 +68,8 @@ json.dump({
   'schema_version': 'trtmc.benchmark-worker-result/v1',
   'status': 'completed',
   'case_digest': r['case_digest'],
+  'timing_scope': r['measurement']['timing_scope'],
+  'asset_loading_included': r['measurement']['asset_loading_included'],
   'pipeline_type': 'fake',
   'load_ms': 10.0,
   'observations': o,
@@ -79,6 +87,12 @@ def _failing_worker(tmp_path: Path) -> Path:
     worker.write_text(
         """#!/usr/bin/env python3
 import argparse, json, sys
+if sys.argv[1:] == ['--metadata']:
+    print(json.dumps({
+      'schema_version': 'trtmc.benchmark-worker-metadata/v1',
+      'build': {'configuration': 'Release', 'source_revision': 'test-revision'},
+    }))
+    raise SystemExit(0)
 p = argparse.ArgumentParser()
 p.add_argument('--request', required=True)
 p.add_argument('--output', required=True)
@@ -208,6 +222,15 @@ def test_native_worker_has_a_runner_for_every_advertised_operation() -> None:
 
     for operation in registered_operations():
         assert f'{{"{operation.name}", run_' in worker_source, operation.name
+
+    for replay_input in (
+        "initial_latents_path",
+        "sampling_steps_path",
+        "condition_latents_path",
+        "condition_mask_path",
+        "sde_noises_path",
+    ):
+        assert replay_input in worker_source
 
 
 def test_default_catalog_falls_back_to_installed_package_data(
@@ -781,10 +804,17 @@ def test_text_generation_distinguishes_testcase_and_operation_defaults(
 
     overridden = benchmark_catalog.apply_overrides(
         case,
-        {"request.temperature": 0.5, "measurement.iterations": 7},
+        {
+            "request.temperature": 0.5,
+            "measurement.iterations": 7,
+            "measurement.timing_scope": "model_call_wall",
+            "measurement.asset_loading_included": False,
+        },
     )
     assert overridden.sources["request.temperature"] == "user override"
     assert overridden.sources["measurement.iterations"] == "user override"
+    assert overridden.measurement.timing_scope == "model_call_wall"
+    assert overridden.measurement.asset_loading_included is False
 
 
 def test_all_advertised_defaults_explain_every_request_field(tmp_path: Path) -> None:
@@ -1262,3 +1292,13 @@ def test_worker_backend_abi_uses_packaged_alias(tmp_path: Path) -> None:
     worker = _worker(tmp_path)
     (tmp_path / "libtrtmc_backend_trt_10_15.so").touch()
     assert worker_backend_abi(worker) == "10.15"
+
+
+def test_worker_metadata_reports_build_provenance(tmp_path: Path) -> None:
+    assert worker_metadata(_worker(tmp_path)) == {
+        "schema_version": "trtmc.benchmark-worker-metadata/v1",
+        "build": {
+            "configuration": "Release",
+            "source_revision": "test-revision",
+        },
+    }

@@ -57,6 +57,34 @@ def worker_backend_abi(worker: Path) -> str | None:
     return next(iter(values), None)
 
 
+def worker_metadata(worker: Path) -> dict[str, Any]:
+    """Read immutable build provenance from a native benchmark worker."""
+    try:
+        completed = subprocess.run(
+            [str(worker.expanduser().resolve()), "--metadata"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BenchmarkError(f"cannot query benchmark worker metadata: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit code {completed.returncode}"
+        raise BenchmarkError(f"cannot query benchmark worker metadata: {detail}")
+    try:
+        value = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise BenchmarkError(f"benchmark worker returned invalid metadata: {exc}") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != "trtmc.benchmark-worker-metadata/v1"
+        or not isinstance(value.get("build"), dict)
+    ):
+        raise BenchmarkError("benchmark worker returned unsupported metadata")
+    return value
+
+
 def run_worker(case: ResolvedCase, case_dir: Path, worker: Path) -> dict[str, Any]:
     request_path = case_dir / "worker-request.json"
     result_path = case_dir / "worker-result.json"
@@ -88,8 +116,17 @@ def run_worker(case: ResolvedCase, case_dir: Path, worker: Path) -> dict[str, An
         raise BenchmarkError("worker result case_digest does not match the resolved case")
     if result.get("operation") not in {None, case.operation}:
         raise BenchmarkError("worker result operation does not match the resolved case")
-    if result.get("timing_scope") not in {None, "public_pipeline_call_wall"}:
-        raise BenchmarkError("worker result has an unsupported timing_scope")
+    if result.get("timing_scope") != case.measurement.timing_scope:
+        raise BenchmarkError(
+            "worker result timing_scope does not match measurement.timing_scope"
+        )
+    if (
+        result.get("asset_loading_included")
+        is not case.measurement.asset_loading_included
+    ):
+        raise BenchmarkError(
+            "worker result asset_loading_included does not match measurement policy"
+        )
     observations = result.get("observations")
     if not isinstance(observations, list) or len(observations) != case.measurement.iterations:
         raise BenchmarkError("worker observation count does not match measurement.iterations")
