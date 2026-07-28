@@ -144,6 +144,7 @@ def _add_bart_tp_decoder_layer(
     cross_k,
     cross_v,
     attention_mask,
+    cross_attention_mask,
     eps,
     weights,
     prefix: str,
@@ -155,6 +156,7 @@ def _add_bart_tp_decoder_layer(
     max_cache_length: int,
     max_enc_seq: int,
     tp_size: int,
+    activation_function: str = "gelu",
 ):
     attention_window = max_cache_length + 1
 
@@ -233,10 +235,13 @@ def _add_bart_tp_decoder_layer(
         weights[f"{prefix}.cross_b_v"],
     )
 
+    cross_mask_4d = network.add_shuffle(cross_attention_mask)
+    cross_mask_4d.reshape_dims = (1, 1, 1, max_enc_seq)
     ccf = graph_ops.add_attention_from_rows(
         network, cq, ck_proj, cv_proj,
         num_heads=local_heads, head_dim=head_dim,
-        q_seq=1, kv_seq=max_enc_seq)
+        q_seq=1, kv_seq=max_enc_seq,
+        mask=cross_mask_4d.get_output(0))
     ca = graph_ops.add_matmul_rhs_constant(
         network, ccf, local_attention_size, hidden_size, weights[f"{prefix}.cross_w_o"])
     ca = _add_row_parallel_bias(
@@ -255,7 +260,7 @@ def _add_bart_tp_decoder_layer(
         local_ffn_dim,
         weights[f"{prefix}.fc1_bias"],
     )
-    act = graph_ops.add_activation(network, fc1, "gelu_new")
+    act = graph_ops.add_activation(network, fc1, activation_function)
     fc2 = graph_ops.add_matmul_rhs_constant(
         network, act, local_ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"])
     fc2 = _add_row_parallel_bias(
@@ -299,6 +304,7 @@ def build_bart_tp_decoder_engine(
     local_ffn_dim = dec_ffn // parallel.tp_size
     attention_window = max_cache_length + 1
     max_enc_seq = max_cache_length
+    activation_function = config.hidden_act or "gelu"
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -311,6 +317,8 @@ def build_bart_tp_decoder_engine(
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
     attention_mask = network.add_input("attention_mask", trt.float32, (attention_window,))
+    cross_attention_mask = network.add_input(
+        "cross_attention_mask", trt.float32, (max_enc_seq,))
 
     cache_k_inputs, cache_v_inputs = [], []
     for layer_idx in range(dec_layers):
@@ -365,6 +373,7 @@ def build_bart_tp_decoder_engine(
             cross_k=cross_k_inputs[layer_idx],
             cross_v=cross_v_inputs[layer_idx],
             attention_mask=attention_mask,
+            cross_attention_mask=cross_attention_mask,
             eps=config.rms_norm_eps,
             weights=rank_weights,
             prefix=prefix,
@@ -376,6 +385,7 @@ def build_bart_tp_decoder_engine(
             max_cache_length=max_cache_length,
             max_enc_seq=max_enc_seq,
             tp_size=parallel.tp_size,
+            activation_function=activation_function,
         )
         hidden_state = result["hidden"]
         present_k_outputs.append(result["present_k"])
