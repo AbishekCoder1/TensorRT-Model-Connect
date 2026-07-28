@@ -8679,7 +8679,7 @@ def _namespace_for_run_hf(
         work_dir=str(work_dir),
         predictions="hf_predictions.json",
         raw_output="hf_raw.jsonl",
-        dtype=args.hf_dtype,
+        dtype=resolve_hf_reference_dtype(args, model, work_dir),
         device=args.hf_device,
         device_map=args.hf_device_map,
         attn_impl=args.hf_attn_impl,
@@ -8695,6 +8695,159 @@ def _namespace_for_run_hf(
         seed=args.seed,
         elf_reference_repo=getattr(args, "elf_reference_repo", ""),
     )
+
+
+_REFERENCE_PRECISION_TO_DTYPE = {
+    "fp16": "float16",
+    "float16": "float16",
+    "bf16": "bfloat16",
+    "bfloat16": "bfloat16",
+    "fp32": "float32",
+    "float32": "float32",
+}
+_REFERENCE_DTYPE_TO_PRECISION = {
+    dtype: precision
+    for precision, dtype in (
+        ("fp16", "float16"),
+        ("bf16", "bfloat16"),
+        ("fp32", "float32"),
+    )
+}
+_NATIVE_PRECISION_DATASET_KINDS = {
+    "asr_chat_json",
+    "mmlu_five_shot_json",
+    "seedtts_json",
+    "text_generation_json",
+    "sts_pair_jsonl",
+    "vlm_chat_json",
+    "vlm_unified_json",
+}
+
+
+def _canonical_reference_precision(value: Any, *, field: str) -> str:
+    normalized = str(value or "").strip().lower()
+    dtype = _REFERENCE_PRECISION_TO_DTYPE.get(normalized)
+    if dtype is None:
+        supported = ", ".join(("fp16", "bf16", "fp32"))
+        raise ValueError(f"{field} must be one of {supported}; got {value!r}")
+    return _REFERENCE_DTYPE_TO_PRECISION[dtype]
+
+
+def _model_quantization_format(model: Mapping[str, Any]) -> str:
+    quantization = model.get("quantization", {})
+    if isinstance(quantization, Mapping):
+        quant_format = str(quantization.get("format", "") or "").strip().lower()
+        if quant_format and quant_format != "none":
+            return quant_format
+    if model.get("fp8_scales"):
+        return "fp8"
+    return ""
+
+
+def _configured_reference_precision(
+    model: Mapping[str, Any],
+    work_dir: Path,
+) -> str:
+    task_config = model.get("task_eval", {})
+    configured = (
+        task_config.get("reference_precision")
+        if isinstance(task_config, Mapping)
+        else None
+    )
+    manifest_path = work_dir / "manifest.json"
+    if manifest_path.is_file():
+        work_config = work_manifest(work_dir).get("task_eval", {})
+        if isinstance(work_config, Mapping):
+            configured = work_config.get("reference_precision", configured)
+    if configured in (None, ""):
+        return ""
+    return _canonical_reference_precision(
+        configured,
+        field="task_eval.reference_precision",
+    )
+
+
+def resolve_reference_precision_contract(
+    args: argparse.Namespace,
+    model: Mapping[str, Any],
+    work_dir: Path,
+) -> dict[str, str]:
+    """Resolve the declared TRTMC/reference precision relationship."""
+
+    base_precision = _canonical_reference_precision(
+        model.get("precision", "fp32"),
+        field="TRTMC base precision",
+    )
+    quantization = _model_quantization_format(model)
+    configured = _configured_reference_precision(model, work_dir)
+    requested_dtype = str(getattr(args, "hf_dtype", "auto") or "auto")
+    requested = (
+        ""
+        if requested_dtype == "auto"
+        else _canonical_reference_precision(
+            requested_dtype,
+            field="--hf-dtype",
+        )
+    )
+
+    if quantization and not configured:
+        model_name = str(model.get("name", "") or "quantized model")
+        raise ValueError(
+            f"{model_name} uses {quantization.upper()} quantization and requires "
+            "task_eval.reference_precision"
+        )
+    if requested and configured and requested != configured:
+        raise ValueError(
+            f"--hf-dtype {requested} conflicts with "
+            f"task_eval.reference_precision {configured}"
+        )
+
+    reference_precision = requested or configured
+    if not reference_precision:
+        reference_precision = (
+            base_precision
+            if _work_dataset_kind(work_dir) in _NATIVE_PRECISION_DATASET_KINDS
+            else "auto"
+        )
+
+    if not quantization and reference_precision not in {"auto", base_precision}:
+        raise ValueError(
+            f"reference precision {reference_precision} does not match "
+            f"TRTMC base precision {base_precision}"
+        )
+
+    comparison = (
+        "quantized_vs_unquantized_reference"
+        if quantization
+        else "aligned"
+        if reference_precision == base_precision
+        else "reference_defined"
+    )
+    return {
+        "trtmc_base_precision": base_precision,
+        "trtmc_quantization": quantization or "none",
+        "reference_precision": reference_precision,
+        "reference_dtype": (
+            _REFERENCE_PRECISION_TO_DTYPE[reference_precision]
+            if reference_precision != "auto"
+            else "auto"
+        ),
+        "comparison": comparison,
+    }
+
+
+def resolve_hf_reference_dtype(
+    args: argparse.Namespace,
+    model: Mapping[str, Any],
+    work_dir: Path,
+) -> str:
+    """Resolve the reference dtype for native Transformers parity workloads."""
+
+    return resolve_reference_precision_contract(
+        args,
+        model,
+        work_dir,
+    )["reference_dtype"]
 
 
 def _namespace_for_run_trtfb(
@@ -8733,6 +8886,181 @@ def model_reference_python(model: dict[str, Any], base_python: str) -> str:
         reference_backend=str(model.get("reference_backend", "") or ""),
     )
     return resolve_profile_python(profiles["reference"], base_python)
+
+
+def _read_bundle_section(bundle_path: Path, section_name: str) -> bytes:
+    max_header_size = 100 * 1024 * 1024
+    with bundle_path.open("rb") as bundle:
+        if bundle.read(8) != b"TRTFB\x00\x01\x00":
+            raise ValueError(f"{bundle_path} is not a TRTMC bundle")
+        raw_header_size = bundle.read(8)
+        if len(raw_header_size) != 8:
+            raise ValueError(f"{bundle_path} has a truncated header size")
+        header_size = struct.unpack("<Q", raw_header_size)[0]
+        if header_size > max_header_size:
+            raise ValueError(
+                f"{bundle_path} header exceeds {max_header_size} bytes"
+            )
+        raw_header = bundle.read(header_size)
+        if len(raw_header) != header_size:
+            raise ValueError(f"{bundle_path} has a truncated JSON header")
+        header = json.loads(raw_header)
+        sections = header.get("sections", {})
+        section = sections.get(section_name) if isinstance(sections, dict) else None
+        if not isinstance(section, dict):
+            raise ValueError(f"{bundle_path} has no {section_name!r} section")
+        offset = int(section.get("offset", -1))
+        size = int(section.get("size", -1))
+        data_start = 16 + header_size
+        if offset < 0 or size < 0 or data_start + offset + size > bundle_path.stat().st_size:
+            raise ValueError(
+                f"{bundle_path} has an invalid {section_name!r} section range"
+            )
+        bundle.seek(data_start + offset)
+        data = bundle.read(size)
+        if len(data) != size:
+            raise ValueError(f"{bundle_path} has a truncated {section_name!r} section")
+        return data
+
+
+def _load_text_input_contract(
+    *,
+    model: Mapping[str, Any],
+    bundle_path: Path,
+    local_files_only: bool,
+    trust_remote_code: bool,
+) -> tuple[Any, Any, dict[str, Any]]:
+    from tokenizers import Tokenizer
+    from transformers import AutoTokenizer
+
+    tokenizer_kwargs = {
+        "local_files_only": local_files_only,
+        "trust_remote_code": trust_remote_code,
+    }
+    revision = str(model.get("hf_revision", "") or "")
+    if revision:
+        tokenizer_kwargs["revision"] = revision
+    hf_tokenizer = AutoTokenizer.from_pretrained(
+        str(model["hf_id"]),
+        **tokenizer_kwargs,
+    )
+    bundle_tokenizer = Tokenizer.from_str(
+        _read_bundle_section(bundle_path, "tokenizer.json").decode("utf-8")
+    )
+    bundle_config = json.loads(
+        _read_bundle_section(bundle_path, "config.json").decode("utf-8")
+    )
+    if not isinstance(bundle_config, dict):
+        raise ValueError(f"{bundle_path} config.json must contain an object")
+    return hf_tokenizer, bundle_tokenizer, bundle_config
+
+
+def _token_ids_sha256(token_ids: Sequence[int]) -> str:
+    payload = json.dumps(
+        [int(token_id) for token_id in token_ids],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _first_token_difference(left: Sequence[int], right: Sequence[int]) -> int | None:
+    for index, (left_id, right_id) in enumerate(zip(left, right, strict=False)):
+        if int(left_id) != int(right_id):
+            return index
+    if len(left) != len(right):
+        return min(len(left), len(right))
+    return None
+
+
+def validate_text_input_token_contract(
+    *,
+    model: Mapping[str, Any],
+    work_dir: Path,
+    bundle_path: Path,
+    local_files_only: bool,
+    trust_remote_code: bool,
+) -> None:
+    """Fail before inference when HF and the bundle would consume different IDs."""
+
+    hf_tokenizer, bundle_tokenizer, bundle_config = _load_text_input_contract(
+        model=model,
+        bundle_path=bundle_path,
+        local_files_only=local_files_only,
+        trust_remote_code=trust_remote_code,
+    )
+    has_exact_frame = (
+        "tokenizer_special_prefix_ids" in bundle_config
+        or "tokenizer_special_suffix_ids" in bundle_config
+    )
+    prefix = [
+        int(token_id)
+        for token_id in bundle_config.get("tokenizer_special_prefix_ids", [])
+    ]
+    suffix = [
+        int(token_id)
+        for token_id in bundle_config.get("tokenizer_special_suffix_ids", [])
+    ]
+    bundle_add_special_tokens = bool(
+        bundle_config.get("tokenizer_add_special_tokens", False)
+    )
+
+    samples: list[dict[str, Any]] = []
+    first_mismatch: dict[str, Any] | None = None
+    for index, row in enumerate(load_jsonl(work_dir / "prompts.jsonl")):
+        sample_id = str(row.get("sample_id", f"sample-{index}"))
+        prompt = str(row.get("prompt", ""))
+        hf_ids = [int(token_id) for token_id in hf_tokenizer(prompt).input_ids]
+        bundle_encoding = bundle_tokenizer.encode(
+            prompt,
+            add_special_tokens=False if has_exact_frame else bundle_add_special_tokens,
+        )
+        bundle_ids = [int(token_id) for token_id in bundle_encoding.ids]
+        if has_exact_frame:
+            bundle_ids = prefix + bundle_ids + suffix
+        first_difference = _first_token_difference(hf_ids, bundle_ids)
+        sample = {
+            "sample_id": sample_id,
+            "hf_token_count": len(hf_ids),
+            "trtmc_token_count": len(bundle_ids),
+            "hf_token_sha256": _token_ids_sha256(hf_ids),
+            "trtmc_token_sha256": _token_ids_sha256(bundle_ids),
+        }
+        if first_difference is not None:
+            window_start = max(0, first_difference - 4)
+            window_end = first_difference + 12
+            sample.update(
+                {
+                    "first_difference": first_difference,
+                    "hf_token_window": hf_ids[window_start:window_end],
+                    "trtmc_token_window": bundle_ids[window_start:window_end],
+                }
+            )
+            if first_mismatch is None:
+                first_mismatch = sample
+        samples.append(sample)
+
+    artifact = {
+        "schema_version": "trtmc.input-token-contract/v1",
+        "model": str(model.get("name", "")),
+        "hf_id": str(model.get("hf_id", "")),
+        "bundle": str(bundle_path),
+        "status": "mismatch" if first_mismatch else "aligned",
+        "samples": samples,
+    }
+    (work_dir / "input_token_contract.json").write_text(
+        json.dumps(artifact, indent=2),
+        encoding="utf-8",
+    )
+    if first_mismatch is not None:
+        raise RuntimeError(
+            "HF/TRTMC input token contract mismatch: "
+            f"model={model.get('name', '')}, "
+            f"sample={first_mismatch['sample_id']}, "
+            f"first_difference={first_mismatch['first_difference']}, "
+            f"HF={first_mismatch['hf_token_window']}, "
+            f"TRTMC={first_mismatch['trtmc_token_window']}; "
+            f"see {work_dir / 'input_token_contract.json'}"
+        )
 
 
 def run_hf_reference_subprocess(
@@ -9701,6 +10029,11 @@ def eval_one_model(
         sample_seed=args.sample_seed,
         task_eval_config=task_eval_config,
     )
+    precision_contract = (
+        None
+        if no_hf_reference
+        else resolve_reference_precision_contract(args, model, work_dir)
+    )
 
     prompt_token_limit = int(task_eval_config.get("prompt_token_limit", 0) or 0)
     prompt_normalization: dict[str, Any] | None = None
@@ -9797,6 +10130,23 @@ def eval_one_model(
         log_path=work_dir / "build.log",
     )
 
+    if (
+        scorer == "continuation"
+        and dataset_kind in {"mmlu_five_shot_json", "text_generation_json"}
+        and not args.apply_chat_template
+        and not bool(generation.get("apply_chat_template", False))
+    ):
+        validate_text_input_token_contract(
+            model=model,
+            work_dir=work_dir,
+            bundle_path=bundle_path,
+            local_files_only=args.local_files_only,
+            trust_remote_code=(
+                args.trust_remote_code
+                or bool(model.get("trust_remote_code", False))
+            ),
+        )
+
     # TRT inference intentionally runs every eval invocation so runtime changes
     # are never hidden behind stale predictions.
     run_trtfb(_namespace_for_run_trtfb(args, bundle_path, work_dir))
@@ -9822,6 +10172,9 @@ def eval_one_model(
         "bundle_built": built,
         "model_plugin_dir": str(getattr(args, "model_plugin_dir", "") or ""),
     }
+    if precision_contract is not None:
+        base_result["reference_dtype"] = precision_contract["reference_dtype"]
+        base_result["precision_contract"] = precision_contract
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 
@@ -10901,7 +11254,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument("--local-files-only", action="store_true")
     p.add_argument("--do-sample", action="store_true")
-    p.add_argument("--hf-dtype", choices=["auto", "float16", "bfloat16"], default="auto")
+    p.add_argument(
+        "--hf-dtype",
+        choices=["auto", "float16", "bfloat16", "float32"],
+        default="auto",
+    )
     p.add_argument("--hf-device", default="cuda")
     p.add_argument("--hf-device-map", default="")
     p.add_argument("--hf-attn-impl", default="")
