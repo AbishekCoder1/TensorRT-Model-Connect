@@ -950,6 +950,84 @@ def test_prompted_segmentation_uses_family_prompt_semantics(tmp_path: Path) -> N
     assert text["mean_backend_mask_iou"] == 1.0
 
 
+def test_prompted_segmentation_empty_prediction_is_a_comparison_failure(
+    tmp_path: Path,
+) -> None:
+    ground = np.array([[1, 1], [0, 0]], dtype=np.uint8)
+    ground_path = tmp_path / "ground.npy"
+    hf_path = tmp_path / "hf.npy"
+    np.save(ground_path, ground)
+    np.save(hf_path, ground[None, ...])
+    answers = {
+        "requests": [
+            {
+                "sample_id": "prompt",
+                "category_mask": str(ground_path),
+                "text_prompt": "object",
+            }
+        ]
+    }
+    hf = {
+        "responses": [
+            {
+                "sample_id": "prompt",
+                "masks_path": str(hf_path),
+                "mask_scores": [0.9],
+            }
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {
+                "sample_id": "prompt",
+                "masks_path": "",
+                "mask_scores": [],
+                "num_masks": 0,
+                "empty_prediction": True,
+                "returncode": 1,
+            }
+        ]
+    }
+
+    summary = task_eval.compare_prompted_segmentation_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        gates={},
+        prompt_mode="text",
+        ground_truth_mask_field="category_mask",
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["valid_count"] == 1
+    assert summary["mean_backend_mask_iou"] == 0.0
+    assert summary["cases"][0]["trtfb_empty_prediction"] is True
+
+
+def test_vision_response_preserves_prompted_segmentation_empty_prediction(
+    tmp_path: Path,
+) -> None:
+    response = task_eval._vision_response(
+        case=SimpleNamespace(name="prompt"),
+        source="trtfb",
+        output=SimpleNamespace(
+            data={"masks": [], "num_masks": 0},
+            metadata={
+                "returncode": 1,
+                "stderr": "Error: prompted segmentation produced no masks",
+            },
+            timing_s=0.1,
+        ),
+        dataset_kind="prompted_segmentation_json",
+        prompt_row={"image": "image.jpg", "text_prompt": "train"},
+        artifact_dir=tmp_path,
+    )
+
+    assert response["returncode"] == 1
+    assert response["num_masks"] == 0
+    assert response["empty_prediction"] is True
+
+
 @pytest.mark.parametrize(
     ("result", "expected"),
     [
@@ -3512,6 +3590,7 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
     args = argparse.Namespace(
         hf_python="/opt/deepseek-hf/bin/python3",
         reference_cache_dir=str(tmp_path / "references"),
+        reference_cache_identity="org/model/reference-contract-v1",
         hf_dtype="auto",
         hf_device="cuda",
         hf_device_map="",
@@ -3543,6 +3622,9 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
     assert captured["cmd"][captured["cmd"].index("--cache-dir") + 1] == str(
         tmp_path / "references"
     )
+    assert captured["cmd"][
+        captured["cmd"].index("--reference-cache-identity") + 1
+    ] == "org/model/reference-contract-v1"
 
 
 def test_run_hf_reference_subprocess_passes_asr_family_metadata(
@@ -3770,6 +3852,24 @@ def test_run_diffusion_hf_reference_writes_image_artifact_predictions(
     assert predictions["responses"][0]["sample_id"] == "partiprompts_000000"
     assert predictions["responses"][0]["num_frames"] == 1
     assert predictions["responses"][0]["source"] == "hf"
+
+
+def test_captured_utf8_subprocess_replaces_invalid_native_output() -> None:
+    result = task_eval._run_captured_utf8_subprocess(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os; "
+                "os.write(1, b'answer:\\x93A'); "
+                "os.write(2, b'warning:\\xff')"
+            ),
+        ]
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "answer:\ufffdA"
+    assert result.stderr == "warning:\ufffd"
 
 
 def test_run_trtfb_dispatches_diffusion_prompt_workdir(

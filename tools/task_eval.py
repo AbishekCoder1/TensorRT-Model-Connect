@@ -431,10 +431,22 @@ def manifest_record(path: Path) -> dict[str, Any]:
             raw = {**raw, **canonical, "name": model_name}
     build_args = raw.get("build_args", {})
     task_eval_config = raw.get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
     runtime_strategy = str(raw.get("runtime_strategy") or "")
     task_strategy = str(raw.get("task_strategy") or runtime_strategy)
-    reference_family = infer_reference_family(raw)
-    reference_backend = str(raw.get("reference_backend", "") or "")
+    # A model's E2E testcase may exercise a different contract from its
+    # dataset-backed validation workload (for example seeded top-p sampling
+    # versus deterministic MMLU). Keep the E2E fields intact and let the
+    # task-eval section declare validation-specific reference semantics.
+    reference_family = str(
+        task_eval_config.get("reference_family") or infer_reference_family(raw)
+    )
+    reference_backend = str(
+        task_eval_config.get("reference_backend")
+        or raw.get("reference_backend", "")
+        or ""
+    )
     if not reference_backend:
         try:
             with warnings.catch_warnings():
@@ -442,7 +454,10 @@ def manifest_record(path: Path) -> dict[str, Any]:
                 reference_backend = load_manifest(path).reference_backend
         except Exception:
             reference_backend = "hf_transformers"
-    user_contract = infer_user_contract(raw, reference_family)
+    user_contract = str(
+        task_eval_config.get("user_contract")
+        or infer_user_contract(raw, reference_family)
+    )
     distributed = raw.get("distributed_runtime", {})
     requires_multi_device = bool(distributed.get("enabled")) or (
         str(raw.get("ci_tier", "")) == "multi_device"
@@ -484,7 +499,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "video_height": raw.get("video_height"),
         "video_width": raw.get("video_width"),
         "num_inference_steps": raw.get("num_inference_steps"),
-        "task_eval": task_eval_config if isinstance(task_eval_config, dict) else {},
+        "task_eval": task_eval_config,
         "runtime_config": raw.get("runtime_config", {})
         if isinstance(raw.get("runtime_config", {}), dict)
         else {},
@@ -2990,6 +3005,20 @@ def _parse_generated_token_ids(text: str) -> list[int] | None:
     return None
 
 
+def _run_captured_utf8_subprocess(
+    command: Sequence[str],
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(command),
+        check=False,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        **kwargs,
+    )
+
+
 def _parse_transcribe_stdout(text: str) -> str:
     for line in str(text or "").splitlines():
         cleaned = re.sub(r"<\|[^|]+\|>", "", line).strip()
@@ -3185,11 +3214,8 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
             )
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
-            proc = subprocess.run(
+            proc = _run_captured_utf8_subprocess(
                 cmd,
-                check=False,
-                text=True,
-                capture_output=True,
                 env=env,
             )
             wall_ms = (time.perf_counter() - start) * 1000.0
@@ -3271,11 +3297,8 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
             )
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
-            proc = subprocess.run(
+            proc = _run_captured_utf8_subprocess(
                 cmd,
-                check=False,
-                text=True,
-                capture_output=True,
                 env=env,
             )
             wall_ms = (time.perf_counter() - start) * 1000.0
@@ -6901,14 +6924,20 @@ def _vision_response(
             masks_path = _persist_numpy_output(
                 masks, artifact_dir / case.name / f"{source}_masks.npy"
             )
-        if not masks_path or not Path(masks_path).is_file():
+        num_masks = int(data.get("num_masks", len(masks) if masks is not None else 0))
+        stderr = str(metadata.get("stderr", "") or "")
+        empty_prediction = num_masks == 0 and (
+            masks is not None or "produced no masks" in stderr.lower()
+        )
+        if (not masks_path or not Path(masks_path).is_file()) and not empty_prediction:
             raise RuntimeError(f"{source} prompted segmentation produced no masks")
         scores = data.get("mask_scores") or data.get("iou_scores") or data.get("scores") or []
         response.update(
             {
                 "masks_path": masks_path,
                 "mask_scores": [float(value) for value in scores],
-                "num_masks": int(data.get("num_masks", 0)),
+                "num_masks": num_masks,
+                "empty_prediction": empty_prediction,
                 "point_x": prompt_row.get("point_x"),
                 "point_y": prompt_row.get("point_y"),
                 "text_prompt": str(prompt_row.get("text_prompt", "")),
@@ -7006,7 +7035,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
                 prompt_row=prompt_row,
                 artifact_dir=artifacts_dir,
             )
-            if response["returncode"] != 0:
+            if response["returncode"] != 0 and not response.get("empty_prediction"):
                 raise RuntimeError(
                     f"TRT vision run failed for {case.name}: "
                     f"returncode={response['returncode']}"
@@ -8747,6 +8776,13 @@ def run_hf_reference_subprocess(
     )
     if reference_cache_dir:
         cmd.extend(["--cache-dir", reference_cache_dir])
+    reference_cache_identity = str(
+        getattr(args, "reference_cache_identity", "") or ""
+    )
+    if reference_cache_identity:
+        cmd.extend(
+            ["--reference-cache-identity", reference_cache_identity]
+        )
     if hf_args.device_map:
         cmd.extend(["--device-map", str(hf_args.device_map)])
     if hf_args.attn_impl:
@@ -9353,6 +9389,20 @@ def _selected_prompt_mask(masks: Any, scores: list[Any], prompt_mode: str) -> An
     return masks[min(index, masks.shape[0] - 1)]
 
 
+def _selected_prompt_prediction_mask(
+    row: dict[str, Any], prompt_mode: str, target_shape: tuple[int, ...]
+) -> Any:
+    import numpy as np
+
+    if bool(row.get("empty_prediction")) or int(row.get("num_masks", -1)) == 0:
+        return np.zeros(target_shape, dtype=bool)
+    return _selected_prompt_mask(
+        _mask_stack(str(row["masks_path"])),
+        list(row.get("mask_scores", [])),
+        prompt_mode,
+    )
+
+
 def _binary_mask_iou(left: Any, right: Any) -> float:
     import numpy as np
 
@@ -9388,17 +9438,17 @@ def compare_prompted_segmentation_prediction_sets(
         if hf_row is None or trtfb_row is None:
             cases.append({"sample_id": sample_id, "passed": False, "error": "missing prediction"})
             continue
-        hf_mask = _selected_prompt_mask(
-            _mask_stack(str(hf_row["masks_path"])),
-            list(hf_row.get("mask_scores", [])),
-            prompt_mode,
-        )
-        trtfb_mask = _selected_prompt_mask(
-            _mask_stack(str(trtfb_row["masks_path"])),
-            list(trtfb_row.get("mask_scores", [])),
-            prompt_mode,
-        )
         ground_truth = _load_segmentation_array(str(request[ground_truth_mask_field])) > 0
+        hf_mask = _selected_prompt_prediction_mask(
+            hf_row,
+            prompt_mode,
+            ground_truth.shape,
+        )
+        trtfb_mask = _selected_prompt_prediction_mask(
+            trtfb_row,
+            prompt_mode,
+            ground_truth.shape,
+        )
         backend_iou = _binary_mask_iou(hf_mask, trtfb_mask)
         hf_gt_iou = _binary_mask_iou(ground_truth, hf_mask)
         trtfb_gt_iou = _binary_mask_iou(ground_truth, trtfb_mask)
@@ -9411,6 +9461,8 @@ def compare_prompted_segmentation_prediction_sets(
                 "hf_ground_truth_iou": hf_gt_iou,
                 "trtfb_ground_truth_iou": trtfb_gt_iou,
                 "ground_truth_iou_drop_from_hf": hf_gt_iou - trtfb_gt_iou,
+                "hf_empty_prediction": bool(hf_row.get("empty_prediction")),
+                "trtfb_empty_prediction": bool(trtfb_row.get("empty_prediction")),
                 "hf_segmented_image_path": str(hf_row.get("segmented_image_path", "")),
                 "trtfb_segmented_image_path": str(
                     trtfb_row.get("segmented_image_path", "")
@@ -10798,6 +10850,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--reference-cache-dir",
         default="",
         help="Shared setting-keyed cache managed by tools/trtmc_reference.py.",
+    )
+    p.add_argument(
+        "--reference-cache-identity",
+        default="",
+        help=(
+            "Explicit identity for TRTMC variants that share one reference "
+            "contract and may reuse the same cached reference result."
+        ),
     )
     p.add_argument("--force-build", action="store_true", help="Rebuild the .trtfb bundle.")
     p.add_argument(
