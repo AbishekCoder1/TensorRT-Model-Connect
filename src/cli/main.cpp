@@ -151,6 +151,10 @@ trtmc::LoadOptions make_load_options(const CliArgs& args) {
     return options;
 }
 
+std::unique_ptr<trtmc::IPipeline> load_pipeline(const CliArgs& args) {
+    return trtmc::load(args.bundle_path, make_load_options(args), args.kernel_bindings_path);
+}
+
 void preload_cli_config_schema_owner(const CliArgs& args) {
     if (args.bundle_path.empty())
         return;
@@ -403,7 +407,7 @@ int cmd_run(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
     if (!pipeline) {
         std::cerr << "Error: failed to load bundle\n";
         return EXIT_FAILURE;
@@ -515,12 +519,14 @@ int cmd_run(const CliArgs& args) {
             pipeline->generate(prompt, cfg);
 
         std::vector<double> setup_ms_v, prefill_ms_v, decode_ms_v;
+        std::size_t generated_tokens = 0;
         setup_ms_v.reserve(static_cast<std::size_t>(bench_n));
         prefill_ms_v.reserve(static_cast<std::size_t>(bench_n));
         decode_ms_v.reserve(static_cast<std::size_t>(bench_n));
 
         for (int r = 0; r < bench_n; ++r) {
             auto result = pipeline->generate(prompt, cfg);
+            generated_tokens += result.token_ids.size();
             setup_ms_v.push_back(result.setup_ms);
             prefill_ms_v.push_back(result.prefill_ms);
             decode_ms_v.push_back(result.decode_ms);
@@ -533,12 +539,18 @@ int cmd_run(const CliArgs& args) {
         const double smean = mean(setup_ms_v);
         const double pmean = mean(prefill_ms_v);
         const double dmean = mean(decode_ms_v);
-        const int ntoks = cfg.max_new_tokens;
+        const double generated_tokens_mean =
+            static_cast<double>(generated_tokens) / static_cast<double>(bench_n);
+        const double total_decode_ms = std::accumulate(decode_ms_v.begin(), decode_ms_v.end(), 0.0);
+        const double tokens_per_sec =
+            total_decode_ms > 0.0
+                ? static_cast<double>(generated_tokens) / (total_decode_ms / 1000.0)
+                : 0.0;
 
         std::cerr << std::fixed << std::setprecision(2);
         std::cerr << "[trtmc.benchmark] setup_ms=" << smean << " prefill_ms=" << pmean
-                  << " decode_ms=" << dmean
-                  << " tokens_per_sec=" << (ntoks > 0 ? ntoks / (dmean / 1000.0) : 0.0) << '\n';
+                  << " decode_ms=" << dmean << " generated_tokens_mean=" << generated_tokens_mean
+                  << " tokens_per_sec=" << tokens_per_sec << '\n';
 
         auto last = pipeline->generate(prompt, trtmc::GenerateConfig{cfg});
         std::cout << last.text << '\n';
@@ -733,7 +745,7 @@ int cmd_generate_video(const CliArgs& args) {
     const std::string out_dir =
         args.output_dir.empty() ? "/tmp/trtmc_generate_video" : args.output_dir;
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
 
     trtmc::GenerateConfig cfg;
     cfg.num_steps = args.num_steps;
@@ -858,7 +870,7 @@ int cmd_segment(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
 
     // Load image (HWC float32 in [0,1])
     auto image = trtmc::io::read_image(args.image_path);
@@ -893,7 +905,7 @@ int cmd_classify(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
     auto image = trtmc::io::read_image(args.image_path);
     if (image.empty()) {
         std::cerr << "Error: failed to load image: " << args.image_path << '\n';
@@ -936,7 +948,7 @@ int cmd_detect(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
     auto image = trtmc::io::read_image(args.image_path);
     if (image.empty()) {
         std::cerr << "Error: failed to load image: " << args.image_path << '\n';
@@ -1025,7 +1037,7 @@ int cmd_segment_prompted(const CliArgs& args) {
     const std::string out_dir = args.output_dir.empty() ? "/tmp/trtmc_masks" : args.output_dir;
     std::filesystem::create_directories(out_dir);
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
     auto image = trtmc::io::read_image(args.image_path);
     if (image.empty()) {
         std::cerr << "Error: failed to load image: " << args.image_path << '\n';
@@ -1120,7 +1132,7 @@ int cmd_serve_audio(const CliArgs& args) {
     }
 
     std::cerr << "[serve-audio] Loading bundle: " << args.bundle_path << std::endl;
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
     std::cerr << "[serve-audio] Ready. Reading prompts from stdin (one per line)..." << std::endl;
 
     trtmc::GenerateConfig cfg;
@@ -1167,7 +1179,7 @@ int cmd_generate_audio(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
 
     trtmc::GenerateConfig cfg;
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 0;
@@ -1213,7 +1225,7 @@ int cmd_encode(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
     auto result = pipeline->encode(args.prompt);
 
     std::cerr << "Hidden states dim: " << result.dim << std::endl;
@@ -1233,7 +1245,7 @@ int cmd_embed(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
     auto result = pipeline->embed(args.prompt);
 
     std::cerr << "Embedding dim: " << result.dim << std::endl;
@@ -1253,7 +1265,7 @@ int cmd_rerank(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
     float score = pipeline->rerank(args.prompt, args.document);
     std::cout << "Relevance score: " << score << '\n';
     return EXIT_SUCCESS;
@@ -1300,7 +1312,7 @@ int cmd_solve(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
     std::vector<float> branch = parse_numeric_csv(has_field ? args.field_input : args.branch_input);
     std::vector<float> trunk =
         has_field ? std::vector<float>{} : parse_numeric_csv(args.trunk_input);
@@ -1330,7 +1342,7 @@ int cmd_transcribe(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
 
     int32_t max_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 224;
 
@@ -1433,7 +1445,7 @@ int cmd_speak(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto pipeline = load_pipeline(args);
 
     auto audio = trtmc::io::read_wav(args.audio_in);
 
@@ -1614,7 +1626,7 @@ int main(int argc, char** argv) {
     try {
         if (args.command == "version")
             return cmd_version();
-        if (args.command == "build" || args.command == "kernel")
+        if (args.command == "build" || args.command == "graph" || args.command == "kernel")
             return cmd_python(args);
         if (args.command == "run")
             return cmd_run(args);

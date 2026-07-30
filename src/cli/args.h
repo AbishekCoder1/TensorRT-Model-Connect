@@ -85,6 +85,7 @@ struct CliArgs {
     float segment_overlap_seconds{0.0F};
     bool lcs_merge{false};
     std::string runtime_cache;
+    std::string kernel_bindings_path;
     std::vector<std::string> backend_search_paths;
     std::vector<std::string> model_plugin_search_paths;
     bool cuda_graphs{false};

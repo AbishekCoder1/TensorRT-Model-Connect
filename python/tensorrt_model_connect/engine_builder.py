@@ -1156,12 +1156,15 @@ def build_bundle(
         )
 
     def _build_plugin_engine_with_role(role: str) -> bytes:
+        from .tvm_ffi.graph_build import engine_role
+
         previous_role = config.raw.get("_decoder_engine_role")
         config.raw["_decoder_engine_role"] = role
         try:
-            return plugin.build_engine(
-                config, weights, max_cache_length, verbose=verbose,
-                **extra_kwargs)
+            with engine_role(role):
+                return plugin.build_engine(
+                    config, weights, max_cache_length, verbose=verbose,
+                    **extra_kwargs)
         finally:
             if previous_role is None:
                 config.raw.pop("_decoder_engine_role", None)
@@ -1179,6 +1182,13 @@ def build_bundle(
                 config.raw.pop("_active_split_decoder_build", None)
             else:
                 config.raw["_active_split_decoder_build"] = previous_active
+
+    from .tvm_ffi.graph_build import inspection_role
+
+    target_inspection_role = inspection_role()
+    if target_inspection_role is not None:
+        _build_plugin_engine_with_role(target_inspection_role)
+        raise RuntimeError("graph inspection did not reach TensorRT serialization")
 
     split_supported = (
         not parallel.enabled and
@@ -1400,6 +1410,12 @@ def build_bundle(
     if vision_plan is not None:
         sections.append(BundleSection("vision_engine_plan", vision_plan))
 
+    from .tvm_ffi.graph_build import kernel_slots_section
+
+    slot_section = kernel_slots_section()
+    if slot_section is not None:
+        sections.append(BundleSection("kernel_slots.json", slot_section))
+
     # Add extra engine sections owned by the active family plugin.
     for ename, eplan in extra_engines.items():
         sections.append(BundleSection(ename, eplan))
@@ -1523,13 +1539,13 @@ def build_bundle(
         sections.append(BundleSection("config.json", make_runtime_config_json(None)))
 
     # Fail before writing if the family did not wire every selected instance.
-    from .kernel_slots import finish_active_kernel_slot
+    from .tvm_ffi.kernel_slots import finish_active_kernel_slot
 
     finish_active_kernel_slot()
 
     # Package explicit artifacts plus the active CLI slot, if any.
     artifacts: list[tuple[str, ...]] = list(kernel_artifacts or [])
-    from .kernel_slots import active_kernel_artifact
+    from .tvm_ffi.kernel_slots import active_kernel_artifact
 
     active_artifact = active_kernel_artifact()
     if active_artifact is not None:
