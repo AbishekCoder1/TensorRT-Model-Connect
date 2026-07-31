@@ -20,9 +20,10 @@ from pathlib import Path
 
 from .context import CiContext
 from .gpu_lease import GpuLease
+from .model_reference_cache import ModelReferenceCacheWarmer, ModelReferenceContract
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
-from .task_eval import TaskEvalDatasetPreparer
+from .validation import ValidationDatasetPreparer
 
 
 CACHE_COPY_PROGRAM = r"""
@@ -67,7 +68,7 @@ class ModelProofRequest:
 
 
 class ModelReferenceCache:
-    """Copy only a declared pinned reference checkout into the proof-private view."""
+    """Warm and copy one pinned reference into the proof-private view."""
 
     def __init__(self, context: CiContext, request: ModelProofRequest):
         self.context = context
@@ -84,18 +85,17 @@ class ModelReferenceCache:
         configured = self.context.env.get("TRTMC_MODEL_REFERENCE_CACHE_ROOT", "")
         if not configured:
             raise CiError(f"TRTMC_MODEL_REFERENCE_CACHE_ROOT is required for {self.request.model}")
+        relative_path = contract["relative_path"]
+        reference = ModelReferenceContract(
+            family=relative_path.split("/", maxsplit=1)[0],
+            repository=contract["repository"],
+            revision=contract["revision"],
+            relative_path=relative_path,
+            entrypoint=contract["entrypoint"],
+            environment_variable=contract.get("environment_variable", ""),
+        )
+        source = ModelReferenceCacheWarmer(self.context).warm_contract(reference)
         root = Path(configured).resolve(strict=True)
-        if not root.is_dir() or root == Path("/") or root == self.context.repository:
-            raise CiError("model reference cache root is invalid")
-        raw_source = root / contract["relative_path"]
-        if raw_source.is_symlink():
-            raise CiError("selected model reference cache must not be a symlink")
-        try:
-            source = raw_source.resolve(strict=True)
-        except OSError as error:
-            raise CiError(
-                f"selected model reference cache is unavailable: {contract['relative_path']}"
-            ) from error
         if not source.is_dir() or not source.is_relative_to(root):
             raise CiError(
                 f"selected model reference cache is unavailable: {contract['relative_path']}"
@@ -300,9 +300,9 @@ class ModelProofRunner:
         ).returncode:
             raise CiError(f"CI image is not present: {image}")
         runtime_model = str(selection.payload["owners"]["runtime"])
-        task_eval_container = self._base_container_name() + "-task-eval-data"
-        self.container_name = task_eval_container
-        task_eval_dir = TaskEvalDatasetPreparer(
+        validation_container = self._base_container_name() + "-validation-data"
+        self.container_name = validation_container
+        validation_dir = ValidationDatasetPreparer(
             self.context,
             self.request.suite,
             runtime_model,
@@ -310,7 +310,7 @@ class ModelProofRunner:
             work,
             self.artifacts_dir,
             image,
-            task_eval_container,
+            validation_container,
             self._job_labels(),
         ).prepare()
         private_hub = self._prepare_hf_cache(projection, work, image, models_file)
@@ -338,7 +338,14 @@ class ModelProofRunner:
         (self.artifacts_dir / "gpu-lease.json").write_text(
             json.dumps(lease_evidence, indent=2) + "\n", encoding="utf-8"
         )
-        self._run_proof_container(projection, work, private_hub, image, selection, task_eval_dir)
+        self._run_proof_container(
+            projection,
+            work,
+            private_hub,
+            image,
+            selection,
+            validation_dir,
+        )
         for name in ("proof.json", "model-proof-report.html"):
             if not (self.artifacts_dir / name).is_file():
                 raise CiError(f"model proof did not emit {name}")
@@ -586,7 +593,7 @@ class ModelProofRunner:
         private_hub: Path,
         image: str,
         selection: ModelProofSelection,
-        task_eval_dir: Path | None,
+        validation_dir: Path | None,
     ) -> None:
         assert self.lease and self.artifacts_dir is not None and self.lease.gpu_id is not None
         name = self._base_container_name()
@@ -603,11 +610,11 @@ class ModelProofRunner:
             "--mount",
             f"type=bind,src={private_hub},dst=/hf-cache/hub",
         ]
-        if task_eval_dir is not None:
+        if validation_dir is not None:
             mounts.extend(
                 [
                     "--mount",
-                    f"type=bind,src={task_eval_dir},dst=/task-eval-data,readonly",
+                    f"type=bind,src={validation_dir},dst=/validation-data,readonly",
                 ]
             )
         command = [
@@ -645,7 +652,7 @@ class ModelProofRunner:
             "/src",
             "--tmpfs",
             "/tmp:rw,exec,nosuid,nodev,size=4g",
-            *self._proof_environment(slots, bool(selection.reference_cache)),
+            *self._proof_environment(slots, selection.reference_cache),
             image,
             "python3",
             "-m",
@@ -665,7 +672,11 @@ class ModelProofRunner:
         if rc:
             raise CiError(f"isolated model proof failed for {self.request.model} (exit {rc})")
 
-    def _proof_environment(self, slots: str, has_reference: bool) -> list[str]:
+    def _proof_environment(
+        self,
+        slots: str,
+        reference: dict[str, str] | None,
+    ) -> list[str]:
         assert self.lease and self.lease.gpu_id is not None
         values = {
             "HOME": "/tmp",
@@ -696,8 +707,13 @@ class ModelProofRunner:
             "HF_MODULES_CACHE": "/work/hf-modules",
             "TRANSFORMERS_CACHE": "/hf-cache/hub",
         }
-        if has_reference:
+        if reference:
             values["TRTMC_STORAGE_ROOT"] = "/work/reference-private"
+            environment_variable = reference.get("environment_variable", "")
+            if environment_variable:
+                values[environment_variable] = (
+                    f"/work/reference-private/{reference['relative_path']}"
+                )
         return [item for name, value in values.items() for item in ("-e", f"{name}={value}")]
 
     def _reclaim_orphans(self) -> None:

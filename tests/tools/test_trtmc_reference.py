@@ -9,6 +9,8 @@ import stat
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 from tools.reference import (
     elf_prepared,
     plugin_reference,
@@ -147,6 +149,21 @@ def _args(work_dir: Path, cache_dir: Path, *extra: str):
     )
 
 
+def test_prepared_dataset_without_native_runner_fails_closed(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "unsupported"
+    _prepare_work(work_dir)
+
+    with pytest.raises(
+        trtmc_reference.ReferenceError,
+        match="dataset kind 'mmlu_json'",
+    ):
+        trtmc_reference._run_reference_inference(
+            _args(work_dir, tmp_path / "cache")
+        )
+
+
 def test_reference_cache_reuses_same_settings_across_work_directories(
     tmp_path: Path,
     monkeypatch,
@@ -181,8 +198,8 @@ def test_reference_cache_reuses_same_settings_across_work_directories(
         (work_dir / "hf_raw.jsonl").write_text("{}\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
+        trtmc_reference,
+        "_run_reference_inference",
         fake_reference,
     )
 
@@ -227,8 +244,8 @@ def test_reference_cache_identity_shares_equivalent_trtmc_variants(
         )
 
     monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
+        trtmc_reference,
+        "_run_reference_inference",
         fake_reference,
     )
 
@@ -365,8 +382,8 @@ def test_reference_cache_key_changes_with_inference_setting(
         )
 
     monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
+        trtmc_reference,
+        "_run_reference_inference",
         fake_reference,
     )
 
@@ -418,8 +435,8 @@ def test_reference_cache_key_changes_with_model_revision(
         )
 
     monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
+        trtmc_reference,
+        "_run_reference_inference",
         fake_reference,
     )
 
@@ -447,8 +464,8 @@ def test_reference_cache_can_adopt_an_existing_result(
     )
 
     monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
+        trtmc_reference,
+        "_run_reference_inference",
         lambda _args: (_ for _ in ()).throw(AssertionError("must not infer")),
     )
 
@@ -510,11 +527,6 @@ def test_causal_reference_uses_native_transformers_entrypoint(
         )
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(
-        trtmc_reference.task_eval,
-        "run_hf_reference",
-        lambda _args: (_ for _ in ()).throw(AssertionError("wrapper was used")),
-    )
     monkeypatch.setattr(trtmc_reference.subprocess, "run", fake_run)
 
     assert trtmc_reference.run_reference(arguments) == "generated"
@@ -523,7 +535,7 @@ def test_causal_reference_uses_native_transformers_entrypoint(
     assert command[1].endswith("tools/reference/transformers_text.py")
     assert command[command.index("--model-revision") + 1] == "0123456789abcdef"
     assert command[command.index("--experts-implementation") + 1] == "batched_mm"
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
     assert (work_dir / "hf_native_run.log").is_symlink()
     assert (work_dir / "hf_native_repro.json").is_symlink()
 
@@ -562,7 +574,7 @@ def test_transformers_reference_metadata_is_direct_and_sample_selectable(
     assert command[command.index("--sample-id") + 1] == "{sample_id}"
     assert command[command.index("--prompts") + 1] == "{work_dir}/prompts.jsonl"
     assert command[command.index("--experts-implementation") + 1] == "batched_mm"
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
 
 
 def test_transformers_text_forwards_experts_implementation(monkeypatch) -> None:
@@ -588,7 +600,7 @@ def test_transformers_text_forwards_experts_implementation(monkeypatch) -> None:
     )
     captured: dict[str, object] = {}
     tokenizer = SimpleNamespace(pad_token_id=0)
-    model = SimpleNamespace(device="cuda", to=lambda _device: None)
+    model = SimpleNamespace(device="cuda", to=lambda *args, **kwargs: None)
     transformers_module = SimpleNamespace(
         logging=SimpleNamespace(set_verbosity_error=lambda: None),
         AutoTokenizer=SimpleNamespace(
@@ -615,6 +627,144 @@ def test_transformers_text_forwards_experts_implementation(monkeypatch) -> None:
     )
 
     assert captured["experts_implementation"] == "batched_mm"
+
+
+def test_transformers_text_moves_all_model_state_to_requested_dtype(
+    monkeypatch,
+) -> None:
+    arguments = transformers_text.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--prompts",
+            "/tmp/prompts.jsonl",
+            "--answers",
+            "/tmp/answers.json",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--predictions",
+            "/tmp/predictions.json",
+            "--raw-output",
+            "/tmp/raw.jsonl",
+            "--dtype",
+            "bfloat16",
+        ]
+    )
+    captured: dict[str, object] = {}
+    tokenizer = SimpleNamespace(pad_token_id=0)
+
+    class FakeModel:
+        def to(self, *args: object, **kwargs: object) -> None:
+            captured["to_args"] = args
+            captured["to_kwargs"] = kwargs
+
+    model = FakeModel()
+    transformers_module = SimpleNamespace(
+        logging=SimpleNamespace(set_verbosity_error=lambda: None),
+        AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda _model_id, **_kwargs: tokenizer
+        ),
+    )
+
+    def fake_load_model(
+        _transformers_module,
+        _model_id,
+        *,
+        model_kwargs,
+        **_kwargs,
+    ):
+        captured["model_kwargs"] = model_kwargs
+        return model, False
+
+    monkeypatch.setattr(transformers_text, "_load_model", fake_load_model)
+    torch_module = SimpleNamespace(
+        bfloat16="bf16",
+        device=lambda name: f"device:{name}",
+    )
+
+    transformers_text._load_runtime(
+        arguments,
+        torch_module,
+        transformers_module,
+    )
+
+    assert captured["model_kwargs"]["torch_dtype"] == "bf16"
+    assert captured["to_args"] == ()
+    assert captured["to_kwargs"] == {
+        "device": "device:cuda",
+        "dtype": "bf16",
+    }
+
+
+def test_transformers_vlm_moves_all_model_state_to_requested_dtype(
+    monkeypatch,
+) -> None:
+    arguments = transformers_vlm.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--prompts",
+            "/tmp/prompts.jsonl",
+            "--answers",
+            "/tmp/answers.json",
+            "--manifest",
+            "/tmp/manifest.json",
+            "--predictions",
+            "/tmp/predictions.json",
+            "--raw-output",
+            "/tmp/raw.jsonl",
+            "--dtype",
+            "bfloat16",
+        ]
+    )
+    captured: dict[str, object] = {}
+    processor = object()
+
+    class FakeProcessor:
+        @staticmethod
+        def from_pretrained(_model: str, **_kwargs: object) -> object:
+            return processor
+
+    class FakeModel:
+        def to(self, *args: object, **kwargs: object) -> None:
+            captured["to_args"] = args
+            captured["to_kwargs"] = kwargs
+
+    model = FakeModel()
+    transformers_module = SimpleNamespace(
+        logging=SimpleNamespace(set_verbosity_error=lambda: None),
+    )
+
+    def fake_load_model(
+        _transformers_module,
+        _model_id,
+        model_kwargs,
+    ):
+        captured["model_kwargs"] = model_kwargs
+        return model
+
+    monkeypatch.setattr(transformers_vlm, "_load_model", fake_load_model)
+    torch_module = SimpleNamespace(
+        bfloat16="bf16",
+        device=lambda name: f"device:{name}",
+    )
+
+    loaded_processor, loaded_model, device = transformers_vlm._load_runtime(
+        arguments,
+        torch_module,
+        transformers_module,
+        FakeProcessor,
+    )
+
+    assert loaded_processor is processor
+    assert loaded_model is model
+    assert device == "device:cuda"
+    assert captured["model_kwargs"]["torch_dtype"] == "bf16"
+    assert captured["to_args"] == ()
+    assert captured["to_kwargs"] == {
+        "device": "device:cuda",
+        "dtype": "bf16",
+    }
 
 
 def test_transformers_text_reference_accepts_float32_dtype() -> None:
@@ -721,7 +871,75 @@ def test_encoder_reference_metadata_is_direct_and_sample_selectable(
     assert command[1].endswith("tools/reference/transformers_encoder.py")
     assert command[command.index("--sample-id") + 1] == "{sample_id}"
     assert command[command.index("--prompts") + 1] == "{work_dir}/prompts.jsonl"
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
+
+
+def test_encoder_reference_moves_all_model_parameters_to_requested_dtype() -> None:
+    captured: dict[str, object] = {}
+    tokenizer = object()
+
+    class FakeTokenizer:
+        @staticmethod
+        def from_pretrained(_model: str, **_kwargs: object) -> object:
+            return tokenizer
+
+    class FakeModel:
+        def eval(self) -> "FakeModel":
+            return self
+
+        def to(self, *args: object, **kwargs: object) -> None:
+            captured["to_args"] = args
+            captured["to_kwargs"] = kwargs
+
+    model = FakeModel()
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(_model: str, **kwargs: object) -> FakeModel:
+            captured["model_kwargs"] = kwargs
+            return model
+
+    transformers = SimpleNamespace(
+        AutoModel=FakeAutoModel,
+        AutoTokenizer=FakeTokenizer,
+        logging=SimpleNamespace(set_verbosity_error=lambda: None),
+    )
+    torch = SimpleNamespace(
+        float16="fp16",
+        bfloat16="bf16",
+        float32="fp32",
+        device=lambda name: f"device:{name}",
+    )
+    arguments = SimpleNamespace(
+        reference_family="encoder_base_features",
+        trust_remote_code=False,
+        local_files_only=True,
+        model_revision="",
+        model="microsoft/deberta-base",
+        dtype="float16",
+        device_map="",
+        device="cuda",
+    )
+
+    loaded_tokenizer, loaded_model, device = transformers_encoder._load_runtime(
+        arguments,
+        torch,
+        transformers,
+    )
+
+    assert loaded_tokenizer is tokenizer
+    assert loaded_model is model
+    assert device == "device:cuda"
+    assert captured["model_kwargs"] == {
+        "torch_dtype": "fp16",
+        "trust_remote_code": False,
+        "local_files_only": True,
+    }
+    assert captured["to_args"] == ()
+    assert captured["to_kwargs"] == {
+        "device": "device:cuda",
+        "dtype": "fp16",
+    }
 
 
 def test_native_reference_runner_uses_prepared_dataset_kind(tmp_path: Path) -> None:
@@ -744,6 +962,12 @@ def test_native_reference_runner_uses_prepared_dataset_kind(tmp_path: Path) -> N
     )
 
     manifest["dataset_kind"] = "diffusion_prompt_json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert trtmc_reference._native_reference_runner(arguments).name == (
+        "plugin_reference.py"
+    )
+
+    manifest["dataset_kind"] = "model_plugin_json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     assert trtmc_reference._native_reference_runner(arguments).name == (
         "plugin_reference.py"
@@ -908,7 +1132,7 @@ def test_plugin_reference_preserves_direct_subprocess_command() -> None:
     assert subprocess_module.run is fake_subprocess_run
 
 
-def test_plugin_reference_applies_task_eval_reference_precision(
+def test_plugin_reference_applies_validation_reference_precision(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -980,7 +1204,7 @@ def test_vlm_reference_metadata_is_direct_and_sample_selectable(
     assert command[1].endswith("tools/reference/transformers_vlm.py")
     assert command[command.index("--sample-id") + 1] == "{sample_id}"
     assert command[command.index("--answers") + 1] == "{work_dir}/answers.json"
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
 
 
 def test_speech_reference_metadata_is_direct_and_sample_selectable(
@@ -1021,7 +1245,7 @@ def test_speech_reference_metadata_is_direct_and_sample_selectable(
     assert command[command.index("--model-revision") + 1] == "0123456789abcdef"
     assert command[command.index("--sample-id") + 1] == "{sample_id}"
     assert command[command.index("--manifest") + 1] == "{work_dir}/manifest.json"
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
 
 
 def test_magpie_reference_restores_exact_pinned_archive(
@@ -1159,10 +1383,10 @@ def test_elf_metadata_points_to_official_reference_entrypoint(tmp_path: Path) ->
     assert command[command.index("--seed") + 1] == "{reference_sample_seed}"
     assert payload["base_seed"] == 42
     assert "elf_prepared.py" not in " ".join(command)
-    assert "task_eval.py" not in " ".join(command)
+    assert "validation/engine.py" not in " ".join(command)
 
 
-def test_speech_runner_dispatches_asr_without_task_eval(
+def test_speech_runner_dispatches_asr_without_engine_wrapper(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1225,7 +1449,7 @@ def test_speech_runner_dispatches_asr_without_task_eval(
     assert json.loads(predictions.read_text(encoding="utf-8"))["responses"][0][
         "output_text"
     ] == "hello"
-    assert "task_eval.py" not in metadata.read_text(encoding="utf-8")
+    assert "validation/engine.py" not in metadata.read_text(encoding="utf-8")
 
 
 def test_nemotron35_asr_restores_nemo_archive_and_uses_language_manifest(
@@ -1407,6 +1631,95 @@ def test_plugin_reference_records_actual_command_during_inference(
     )["command"]
     assert command[1] == "/workspace/model/reference.py"
     assert "plugin_reference.py" not in " ".join(command)
+
+
+def test_model_plugin_reference_runs_manifest_owned_official_reference(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tests.e2e.models.lance.e2e_plugins.references import lance_official
+    from tests.e2e_harness.contracts import StageOutput
+
+    monkeypatch.setattr(
+        lance_official.LanceOfficialReference,
+        "run_stage",
+        lambda _self, _case, stage, _ctx: StageOutput(
+            stage_name=stage.name,
+            data={"text": "White"},
+            text="White",
+            metadata={
+                "command": [
+                    "/profiles/lance/bin/python",
+                    "/references/Lance/inference_lance.py",
+                ]
+            },
+        ),
+    )
+    manifest_path = (
+        trtmc_reference.REPO_ROOT
+        / "tests/e2e/models/lance/manifests/lance-3b-x2t-image.json"
+    )
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text(
+        json.dumps(
+            {
+                "sample_id": "lance-sample",
+                "testcase": "lance-3b-x2t-image",
+                "stage": "full_generation",
+                "inputs": {
+                    "prompt": "What color is the vehicle?",
+                    "image": str(tmp_path / "vehicle.png"),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    answers = tmp_path / "answers.json"
+    answers.write_text(
+        json.dumps({"requests": [{"sample_id": "lance-sample"}]}),
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "dataset_kind": "model_plugin_json",
+                "task_eval": {"model_manifest": str(manifest_path)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    predictions = tmp_path / "hf_predictions.json"
+    arguments = plugin_reference.build_parser().parse_args(
+        [
+            "--model",
+            "bytedance-research/Lance",
+            "--prompts",
+            str(prompts),
+            "--answers",
+            str(answers),
+            "--manifest",
+            str(manifest),
+            "--predictions",
+            str(predictions),
+            "--raw-output",
+            str(tmp_path / "hf_raw.jsonl"),
+            "--repro-metadata",
+            str(tmp_path / "hf_native_repro.json"),
+            "--dtype",
+            "bfloat16",
+        ]
+    )
+
+    plugin_reference.run(arguments)
+
+    row = json.loads(predictions.read_text(encoding="utf-8"))["responses"][0]
+    assert row["sample_id"] == "lance-sample"
+    assert row["testcase"] == "lance-3b-x2t-image"
+    assert row["stage"] == "full_generation"
+    assert row["output_text"] == "White"
+    assert row["stage_output"]["text"] == "White"
 
 
 def test_elf_adapter_preserves_original_sample_seed_and_answer(

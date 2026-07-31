@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,16 @@ def test_resolve_case_profile_names_apply_manifest_profiles():
     }
 
 
+def test_golden_snapshot_overrides_family_reference_profile():
+    case = _make_case(
+        family="lance",
+        runtime_strategy="lance_vision_language",
+        reference_backend="golden_snapshot",
+    )
+
+    assert resolve_case_profile_names(case)["reference"] == "base"
+
+
 def test_resolve_case_python_profiles_uses_manifest_profile_named_env(monkeypatch, tmp_path):
     wrapper = tmp_path / "specialized-python"
     wrapper.write_text("", encoding="utf-8")
@@ -141,6 +152,79 @@ def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path
     assert created == ["custom"]
 
 
+def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_path):
+    requirements = tmp_path / "requirements.lock.txt"
+    requirements.write_text("demo-package==1.0\n", encoding="utf-8")
+    monkeypatch.delenv("MAX_JOBS", raising=False)
+    monkeypatch.delenv(shared_profiles.PREBUILT_ONLY_ENV, raising=False)
+    monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
+    monkeypatch.setattr(
+        shared_profiles,
+        "_verify_exact_requirements",
+        lambda *_args, **_kwargs: None,
+    )
+
+    commands = []
+
+    def run_command(cmd, *, description, timeout=1800, **kwargs):
+        commands.append((cmd, description, timeout, kwargs))
+        if description.startswith("create Python profile"):
+            python = Path(cmd[-1]) / "bin" / "python"
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(shared_profiles, "_run_profile_command", run_command)
+
+    shared_profiles._materialize_venv_profile(
+        "custom",
+        {
+            "requirements": str(requirements),
+            "system_site_packages": False,
+        },
+        sys.executable,
+    )
+
+    install = next(call for call in commands if call[1].startswith("install "))
+    assert install[3]["env"]["MAX_JOBS"] == "4"
+    assert install[2] == 7200
+
+
+def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):
+    monkeypatch.setenv("MAX_JOBS", "2")
+
+    assert shared_profiles._profile_install_environment()["MAX_JOBS"] == "2"
+
+
+def test_profile_command_timeout_terminates_descendants(tmp_path):
+    sentinel = tmp_path / "orphan-finished"
+    child = (
+        "import pathlib, time; "
+        "time.sleep(0.3); "
+        f"pathlib.Path({str(sentinel)!r}).write_text('orphaned')"
+    )
+    parent = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        "time.sleep(60)"
+    )
+
+    error = None
+    try:
+        shared_profiles._run_profile_command(
+            [sys.executable, "-c", parent],
+            description="run descendant timeout regression",
+            timeout=0.05,
+        )
+    except Exception as caught:  # noqa: BLE001 - assert the public failure below.
+        error = caught
+
+    time.sleep(0.5)
+    assert isinstance(error, RuntimeError)
+    assert "timed out" in str(error)
+    assert not sentinel.exists()
+
+
 def test_family_profile_registry_is_fully_exact_pinned():
     expected = {
         "chronos",
@@ -151,7 +235,6 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "lance_reference",
         "magpie_tts_reference",
         "nemotron_h_reference",
-        "personaplex_reference",
         "phi4_multimodal",
         "sana_wm_reference",
         "reference_common",
@@ -165,7 +248,6 @@ def test_family_profile_registry_is_fully_exact_pinned():
         )
         pins = shared_profiles._exact_pinned_requirements(requirements)
         assert pins, name
-
 
 def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
     with pytest.raises(ValueError, match="exact name==version pins"):

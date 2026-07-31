@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -39,11 +40,12 @@ from tensorrt_model_connect.python_profiles import (  # noqa: E402
     profile_env_var,
     resolve_profile_python,
 )
-from tools import task_eval, trtmc_disagreements  # noqa: E402
+from tools.validation import catalog as validation_catalog  # noqa: E402
+from tools import trtmc_disagreements  # noqa: E402
 
 
 DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
-DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
+DEFAULT_SUITES = REPO_ROOT / "tests" / "validation" / "workloads.yaml"
 DEFAULT_MODELS = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_OUTPUT = REPO_ROOT / "artifacts" / "trtmc-validate"
 DEFAULT_ENGINE_DIR = DEFAULT_OUTPUT / "engines"
@@ -59,6 +61,8 @@ _TASK_TYPE_BY_USER_CONTRACT = {
     "code_completion": "Text → Code",
     "translation": "Text → Text",
     "seq2seq_output": "Text → Text",
+    "any-to-any": "Image + Text → Text",
+    "speech_response": "Audio → Audio",
     "vl_answer": "Image + Text → Text",
     "ocr_text": "Image → Text",
     "exact_transcript": "Audio → Text",
@@ -222,7 +226,7 @@ def _suite_task_metadata(suite: Mapping[str, Any]) -> tuple[str, str]:
 def _default_suite_task_metadata() -> dict[str, tuple[str, str]]:
     return {
         str(suite["id"]): _suite_task_metadata(suite)
-        for suite in task_eval.load_suites(DEFAULT_SUITES)
+        for suite in validation_catalog.load_suites(DEFAULT_SUITES)
     }
 
 
@@ -236,7 +240,7 @@ def _result_task_metadata(result: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def ready_model_names(models_root: Path = DEFAULT_MODELS) -> tuple[str, ...]:
-    models = task_eval.load_manifest_records(models_root)
+    models = validation_catalog.load_manifest_records(models_root)
     return tuple(
         sorted(
             str(model["name"])
@@ -306,7 +310,7 @@ def audit_workload_compatibility(
     reference_cache_contracts: dict[str, set[tuple[str, ...]]] = {}
     for model_name, spec in catalog["models"].items():
         for workload in spec.get("workloads", []):
-            matched, reason = task_eval.suite_match_reason(
+            matched, reason = validation_catalog.suite_match_reason(
                 suites[workload],
                 task_models[model_name],
             )
@@ -390,8 +394,11 @@ def resolve_sample_limit(
     return int(catalog["sample_limits"][binding.workload])
 
 
-def _task_eval_models(models_root: Path) -> dict[str, dict[str, Any]]:
-    return {str(model["name"]): model for model in task_eval.load_manifest_records(models_root)}
+def _validation_models(models_root: Path) -> dict[str, dict[str, Any]]:
+    return {
+        str(model["name"]): model
+        for model in validation_catalog.load_manifest_records(models_root)
+    }
 
 
 def _declared_profile(
@@ -523,8 +530,39 @@ def _ensure_reference_source(source: ReferenceSource, cache_root: Path) -> Path:
 def ensure_reference_sources(
     family: str,
     cache_root: Path,
+    model_reference_cache: Mapping[str, Any] | None = None,
 ) -> ReferenceSourceSelection:
     environment = {"TRTMC_STORAGE_ROOT": str(cache_root)}
+    declared_source = None
+    if model_reference_cache:
+        required = ("repository", "revision", "relative_path", "entrypoint")
+        missing = [
+            field for field in required if not model_reference_cache.get(field)
+        ]
+        if missing:
+            raise ValidationError(
+                f"{family} model reference source is missing: "
+                + ", ".join(missing)
+            )
+        declared_source = ReferenceSource(
+            name=family,
+            repository=str(model_reference_cache["repository"]),
+            revision=str(model_reference_cache["revision"]),
+            relative_checkout=Path(str(model_reference_cache["relative_path"])),
+            entrypoint=Path(str(model_reference_cache["entrypoint"])),
+        )
+        checkout = _ensure_reference_source(declared_source, cache_root)
+        environment_variable = str(
+            model_reference_cache.get("environment_variable", "") or ""
+        ).strip()
+        if environment_variable:
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", environment_variable) is None:
+                raise ValidationError(
+                    f"{family} model reference environment_variable is invalid: "
+                    f"{environment_variable!r}"
+                )
+            environment[environment_variable] = str(checkout)
+
     if family == "elf_flow":
         checkout = _ensure_reference_source(ELF_SOURCE, cache_root)
         return ReferenceSourceSelection(
@@ -532,9 +570,11 @@ def ensure_reference_sources(
             elf_reference_repo=checkout,
         )
     if family == "sana_wm":
-        checkout = _ensure_reference_source(SANA_WM_SOURCE, cache_root)
+        if declared_source is None:
+            declared_source = SANA_WM_SOURCE
+            checkout = _ensure_reference_source(declared_source, cache_root)
         environment["SANA_WM_SCRIPT"] = str(
-            checkout / SANA_WM_SOURCE.entrypoint
+            checkout / declared_source.entrypoint
         )
     return ReferenceSourceSelection(environment=environment)
 
@@ -922,6 +962,7 @@ def _append_unique(commands: dict[str, list[str]], kind: str, command: str) -> N
 
 
 _PRIMARY_COMPARISON_METRICS = (
+    "sample_pass_rate",
     "sample_agreement_rate",
     "prediction_agreement_rate",
     "vector_pass_rate",
@@ -939,6 +980,7 @@ _PRIMARY_METRIC_BY_MODE = {
     "diffusion_text_parity": "token_agreement_rate",
     "encoder_embedding_parity": "vector_pass_rate",
     "image_classification_parity": "top1_agreement",
+    "model_plugin_parity": "sample_pass_rate",
     "ocrbench_v2": "prediction_agreement_rate",
     "reranking_parity": "mean_pairwise_ordering_agreement",
     "semantic_segmentation_parity": "backend_pixel_agreement",
@@ -1329,6 +1371,7 @@ def run_binding(
     reference_sources = ensure_reference_sources(
         str(task_models[binding.model].get("family", "") or ""),
         Path(arguments.reference_cache_dir),
+        task_models[binding.model].get("model_reference_cache"),
     )
     process_env = _source_environment()
     process_env.update(environment.overrides)
@@ -1388,14 +1431,31 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _campaign_started_at(output: Path, fallback: str) -> str:
+    path = output / "run.json"
+    if not path.is_file() or next(output.glob("*/*/comparison.json"), None) is None:
+        return fallback
+    try:
+        started_at = json.loads(path.read_text(encoding="utf-8")).get(
+            "started_at"
+        )
+        if not isinstance(started_at, str) or not started_at:
+            return fallback
+        datetime.fromisoformat(started_at)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return fallback
+    return started_at
+
+
 def write_run_metadata(output: Path) -> Path:
+    started_at = _campaign_started_at(output, _utc_now().isoformat())
     metadata = {
         "schema_version": "trtmc.validation-run/v1",
         "source_revision": _source_revision(),
         "hostname": platform.node(),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
         "command": shlex.join(sys.argv),
-        "started_at": _utc_now().isoformat(),
+        "started_at": started_at,
         "finished_at": None,
         "duration_seconds": None,
     }
@@ -2305,10 +2365,10 @@ def _load_validation_inputs(
     dict[str, dict[str, Any]],
 ]:
     catalog = load_catalog(arguments.catalog)
-    suites_list = task_eval.load_suites(arguments.suites)
+    suites_list = validation_catalog.load_suites(arguments.suites)
     suites = {suite["id"]: suite for suite in suites_list}
     ready = ready_model_names(arguments.models_dir)
-    task_models = _task_eval_models(arguments.models_dir)
+    task_models = _validation_models(arguments.models_dir)
     audit_catalog(catalog, ready_models=ready, suite_names=suites)
     audit_workload_compatibility(
         catalog,

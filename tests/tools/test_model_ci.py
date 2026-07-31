@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -12,6 +13,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from tools import model_ci
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -164,10 +167,17 @@ def _make_repo(
     ):
         _write(repo, reference_runner, "# task-eval reference runner\n")
     _write(repo, "tools/test_impact.py", "# shared impact analyzer\n")
-    _write(repo, "tools/task_eval.py", "# task-eval runner\n")
     _write(repo, "tools/trtmc_reference.py", "# task-eval reference runner\n")
-    _write(repo, "tests/task_eval/validation_suites.yaml", "suites: []\n")
-    _write(repo, "tests/tools/test_task_eval.py", "# task-eval unit tests\n")
+    for validation_module in (
+        "tools/validation/__init__.py",
+        "tools/validation/artifacts.py",
+        "tools/validation/catalog.py",
+        "tools/validation/engine.py",
+        "tools/validation/model_plugin_contract.py",
+    ):
+        _write(repo, validation_module, "# validation module\n")
+    _write(repo, "tests/validation/workloads.yaml", "suites: []\n")
+    _write(repo, "tests/tools/test_validation_engine.py", "# validation unit tests\n")
     _write(repo, "tools/tool_helpers.py", "# shared tool helpers\n")
     _write(repo, "scripts/repro_trt_fp8_mha.py", "# unrelated model script\n")
     _write(repo, "tools/diff_t5.py", "# unrelated model diff\n")
@@ -752,7 +762,7 @@ def test_mixed_model_and_broad_change_keeps_direct_model_plus_fallback(
     assert result["unit_scope"] == "all"
 
 
-def test_task_eval_only_pr_runs_units_without_model_proofs(tmp_path: Path) -> None:
+def test_validation_only_pr_runs_units_without_model_proofs(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     _write(
         repo,
@@ -761,29 +771,29 @@ def test_task_eval_only_pr_runs_units_without_model_proofs(tmp_path: Path) -> No
         'dependencies = ["runtime-package>=1"]\n\n'
         "[project.optional-dependencies]\n"
         'test = ["pytest>=7"]\n'
-        'task-eval = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]\n',
+        'validation = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]\n',
     )
     _write(
         repo,
-        "tests/task_eval/validation_suites.yaml",
+        "tests/validation/workloads.yaml",
         "suites:\n  - id: elf_text_parity\n",
     )
-    _write(repo, "tests/tools/test_task_eval.py", "# expanded task-eval unit tests\n")
-    _write(repo, "tests/tools/test_test_impact.py", "# task-eval impact tests\n")
-    _write(repo, "tools/task_eval.py", "# expanded task-eval runner\n")
+    _write(repo, "tests/tools/test_validation_engine.py", "# expanded validation unit tests\n")
+    _write(repo, "tests/tools/test_test_impact.py", "# validation impact tests\n")
+    _write(repo, "tools/validation/engine.py", "# expanded validation runner\n")
     _write(repo, "tools/elf_hf_reference.py", "# isolated ELF reference\n")
     _write(
         repo,
-        "tools/prepare_elf_task_eval_datasets.py",
-        "# ELF task-eval dataset preparation\n",
+        "tools/prepare_elf_validation_datasets.py",
+        "# ELF validation dataset preparation\n",
     )
     _write(
         repo,
-        "tools/prepare_media_task_eval_datasets.py",
-        "# media task-eval dataset preparation\n",
+        "tools/prepare_media_validation_datasets.py",
+        "# media validation dataset preparation\n",
     )
-    _write(repo, "tools/test_impact.py", "# task-eval impact refinement\n")
-    head = _commit(repo, "add task-eval coverage")
+    _write(repo, "tools/test_impact.py", "# validation impact refinement\n")
+    head = _commit(repo, "add validation coverage")
 
     result = _impact(repo, base, head)
 
@@ -801,7 +811,7 @@ def test_task_eval_only_pr_runs_units_without_model_proofs(tmp_path: Path) -> No
     } == {"unit_tests"}
 
 
-def test_task_eval_optional_extra_mixed_with_runtime_dependency_uses_fallback(
+def test_validation_optional_extra_mixed_with_runtime_dependency_uses_fallback(
     tmp_path: Path,
 ) -> None:
     repo, base = _make_repo(tmp_path)
@@ -812,9 +822,9 @@ def test_task_eval_optional_extra_mixed_with_runtime_dependency_uses_fallback(
         'dependencies = ["runtime-package>=1", "new-runtime-package>=1"]\n\n'
         "[project.optional-dependencies]\n"
         'test = ["pytest>=7"]\n'
-        'task-eval = ["rouge-score>=0.1.2"]\n',
+        'validation = ["rouge-score>=0.1.2"]\n',
     )
-    head = _commit(repo, "change runtime and task-eval dependencies")
+    head = _commit(repo, "change runtime and validation dependencies")
 
     result = _impact(repo, base, head)
 
@@ -823,13 +833,13 @@ def test_task_eval_optional_extra_mixed_with_runtime_dependency_uses_fallback(
     assert result["fallback_models"] == ["model_a"]
 
 
-def test_task_eval_and_model_change_runs_direct_model_proof_plus_units(
+def test_validation_and_model_change_runs_direct_model_proof_plus_units(
     tmp_path: Path,
 ) -> None:
     repo, base = _make_repo(tmp_path)
-    _write(repo, "tools/task_eval.py", "# expanded task-eval runner\n")
+    _write(repo, "tools/validation/engine.py", "# expanded validation runner\n")
     _write(repo, "src/runtime/models/model_b/plugin.cpp", "// changed model b\n")
-    head = _commit(repo, "change task-eval and model b")
+    head = _commit(repo, "change validation and model b")
 
     result = _impact(repo, base, head)
 
@@ -1104,16 +1114,20 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "tools/reference/transformers_encoder.py",
         "tools/reference/transformers_text.py",
         "tools/reference/transformers_vlm.py",
-        "tools/task_eval.py",
         "tools/test_impact.py",
         "tools/tool_helpers.py",
         "tools/trtmc_reference.py",
+        "tools/validation/__init__.py",
+        "tools/validation/artifacts.py",
+        "tools/validation/catalog.py",
+        "tools/validation/engine.py",
+        "tools/validation/model_plugin_contract.py",
         "tools/ci/__init__.py",
         "tools/ci/__main__.py",
         "tools/ci/model_proof.py",
     ):
         assert (output / report_path).is_file()
-    assert (output / "tests/task_eval/validation_suites.yaml").is_file()
+    assert (output / "tests/validation/workloads.yaml").is_file()
     for unrelated_tool in (
         "scripts/repro_trt_fp8_mha.py",
         "tools/diff_t5.py",
@@ -1126,6 +1140,28 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         item for item in manifest["files"] if item["path"] == copied.relative_to(output).as_posix()
     )
     assert entry["sha256"] == hashlib.sha256(expected).hexdigest()
+
+
+def test_projection_closes_validation_module_imports() -> None:
+    projected = set(model_ci.PLATFORM_PROJECTION_EXACT)
+    dependencies = {"tools/validation/__init__.py"}
+
+    for relative in projected:
+        source = REPO_ROOT / relative
+        if source.suffix != ".py" or not source.is_file():
+            continue
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            if node.module == "tools.validation":
+                for imported in node.names:
+                    candidate = f"tools/validation/{imported.name}.py"
+                    if (REPO_ROOT / candidate).is_file():
+                        dependencies.add(candidate)
+            elif node.module.startswith("tools.validation."):
+                dependencies.add(node.module.replace(".", "/") + ".py")
+
+    assert dependencies <= projected
 
 
 def test_projection_includes_only_the_selected_family_adapter_subtrees(

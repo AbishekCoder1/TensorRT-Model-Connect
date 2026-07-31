@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -30,6 +31,8 @@ PREBUILT_ONLY_ENV = "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"
 DEFAULT_PROFILE_ROOT = "/tmp/trtmc-python-profiles"
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _PROFILE_LAYOUT_VERSION = "overlay-v3-exact-pins"
+_DEFAULT_PROFILE_BUILD_JOBS = "4"
+_PROFILE_INSTALL_TIMEOUT_SECONDS = 7200
 _EXACT_REQUIREMENT_RE = re.compile(
     r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9,._-]+\])?==([^\s;]+)$"
 )
@@ -269,24 +272,73 @@ def normalize_execution_profiles(
     return profiles
 
 
+def _process_session_members(session_id: int) -> list[int]:
+    members = []
+    for stat_path in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            _, _, remainder = stat_path.read_text(encoding="utf-8").rpartition(")")
+            fields = remainder.split()
+            if len(fields) > 3 and int(fields[3]) == session_id:
+                members.append(int(stat_path.parent.name))
+        except (FileNotFoundError, PermissionError, ValueError):
+            continue
+    return members
+
+
+def _kill_profile_process_session(process: subprocess.Popen[str]) -> None:
+    members = set(_process_session_members(process.pid))
+    members.add(process.pid)
+    for pid in members:
+        try:
+            os.kill(pid, signal.SIGSTOP)
+        except ProcessLookupError:
+            continue
+    members.update(_process_session_members(process.pid))
+    for pid in sorted(members, reverse=True):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+
+
 def _run_profile_command(
     cmd: list[str],
     *,
     description: str,
-    timeout: int = 1800,
+    timeout: float = 1800,
+    env: Mapping[str, str] | None = None,
 ) -> None:
-    result = subprocess.run(
+    process = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
         text=True,
-        timeout=timeout,
+        env=dict(env) if env is not None else None,
     )
-    if result.returncode != 0:
-        stderr = (result.stderr or result.stdout or "").strip()
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        _kill_profile_process_session(process)
+        stdout, stderr = process.communicate()
+        detail = (error.stderr or stderr or error.stdout or stdout or "").strip()
+        message = f"Failed to {description}: timed out after {timeout:g} seconds"
+        if detail:
+            message = f"{message}: {detail}"
+        raise RuntimeError(message) from error
+    if process.returncode != 0:
+        stderr = (stderr or stdout or "").strip()
         raise RuntimeError(
             f"Failed to {description}: "
-            f"{stderr or f'command exited with rc={result.returncode}'}"
+            f"{stderr or f'command exited with rc={process.returncode}'}"
         )
+
+
+def _profile_install_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    if not environment.get("MAX_JOBS", "").strip():
+        environment["MAX_JOBS"] = _DEFAULT_PROFILE_BUILD_JOBS
+    return environment
 
 
 def _python_site_packages(python: str) -> list[str]:
@@ -429,6 +481,8 @@ def _materialize_venv_profile(
                         str(requirements_file),
                     ],
                     description=f"install Python profile {profile_name!r}",
+                    timeout=_PROFILE_INSTALL_TIMEOUT_SECONDS,
+                    env=_profile_install_environment(),
                 )
 
             _verify_exact_requirements(

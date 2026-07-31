@@ -60,6 +60,10 @@ suites:
           prompt_renderer: gpt_oss_harmony_mcq
           answer_parser: gpt_oss_harmony_final_mcq
           require_valid_prediction: true
+          # The MXFP4 checkpoint's official Transformers path dequantizes
+          # experts to BF16 while TRTMC builds the dequantized engine in FP16.
+          reference_precision: bf16
+          allow_reference_precision_mismatch: true
           build_generation_headroom: true
           generation:
             max_new_tokens: 8
@@ -237,7 +241,7 @@ suites:
       lane: local_only
       notes: >
         Run with --limit 10 on GB300. Generated code is not executed by
-        task-eval; HumanEval pass@1 remains a separate diagnostic.
+        validation; HumanEval pass@1 remains a separate diagnostic.
 
   - id: wikitext103_distilgpt2_continuation_parity
     description: >
@@ -585,6 +589,14 @@ suites:
       apply_chat_template: true
       enable_thinking: false
       do_sample: false
+    model_overrides:
+      by_model:
+        deepseek-ocr:
+          # DeepSeek-OCR's upstream model.infer path is explicitly BF16. TRTMC
+          # uses its reviewed FP16/FP32 mixed policy, so record the difference
+          # instead of coercing the upstream reference into an invalid dtype.
+          reference_precision: bf16
+          allow_reference_precision_mismatch: true
     scoring:
       scorer: ocrbench_v2
     build:
@@ -864,6 +876,7 @@ suites:
     default_model_names:
       - ltx-video-l0
       - wan21-t2v-1.3b-l0
+      - wan21-t2v-1.3b
     dataset:
       kind: diffusion_prompt_json
       default_path: /mnt/data/VBench/vbench_t2v_task_eval.json
@@ -873,6 +886,7 @@ suites:
       model_names:
         - ltx-video-l0
         - wan21-t2v-1.3b-l0
+        - wan21-t2v-1.3b
       task_strategies:
         - diffusion_media_generation
       runtime_strategies:
@@ -912,8 +926,8 @@ suites:
       eligible: false
       lane: local_only
       notes: >
-        GB300-only sampled validation. Run with --limit 10; do not expand to
-        the full VBench prompt suite in task-eval.
+        GB300-only sampled validation. Use the model catalog sample limit; do not expand to
+        the full VBench prompt suite in validation.
 
   - id: gedit_bench_image_edit
     description: >
@@ -1079,6 +1093,13 @@ suites:
     scoring:
       scorer: semantic_segmentation_parity
       task_metric: mean_iou
+    model_overrides:
+      by_model:
+        segformer-b0-ade:
+          # The E2E acceptance manifest intentionally keeps a stable FP32
+          # oracle. Validation instead compares the FP16 bundle with an FP16
+          # HF reference so backend consistency is measured at equal precision.
+          reference_precision: fp16
     gates:
       min_backend_pixel_agreement: 0.98
       min_backend_mean_iou: 0.95
@@ -1264,7 +1285,7 @@ suites:
       limit: 10
       sample_seed: 20260715
       notes: >
-        Run as a blocking nightly GB300 task-eval stage. ETTh1 is shared by all
+        Run as a blocking nightly GB300 validation stage. ETTh1 is shared by all
         five checkpoints, but output quality metrics are not mixed across their
         distinct forecast and regression contracts; this suite gates backend
         prediction parity. TimesFM remains gated at its reviewed tolerance while
@@ -1314,13 +1335,24 @@ suites:
     scoring:
       scorer: encoder_embedding_parity
       task_metric: sts_spearman
+    model_overrides:
+      by_model:
+        fnet-base:
+          # PyTorch cuFFT cannot execute FNet's 768-wide 2D transform in FP16.
+          # Keep the numerical comparison aligned by building TRTMC and
+          # running the reference in FP32.
+          comparison_precision: fp32
+        xlnet-base:
+          # Upstream XLNet retains FP32 relative-attention parameters that
+          # cannot participate in its FP16 einsum. Compare both sides in FP32.
+          comparison_precision: fp32
     gates:
       min_vector_cosine: 0.999
       min_vector_pass_rate: 1.0
       max_pair_cosine_abs_delta: 0.02
     model_profiles:
       # Match the model-owned, reviewed encoder E2E numerical contracts. These
-      # models have architecture-specific FP16 sensitivity; task-eval does not
+      # models have architecture-specific FP16 sensitivity; validation does not
       # invent looser thresholds for them.
       albert-base:
         gates:
@@ -1544,3 +1576,178 @@ suites:
       notes: >
         Local-only; use the full 1,000-request dataset for paper-comparable
         perplexity and entropy. Small --limit slices are smoke tests only.
+
+  - id: mmmu_pro_vision_plugin_parity
+    description: >
+      Image-question output consistency on five distinct-subject MMMU-Pro
+      Vision samples letterboxed to the static Phi-4 Dynamic-HD canvas. The
+      official reference and TRTMC implementation receive the same canonical
+      image and question.
+    user_contract: vl_answer
+    default_model_names: [phi4-multimodal]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/mmmu-pro-vision/dataset.json
+      input_asset_fields: [image]
+    selectors:
+      model_names: [phi4-multimodal]
+    scoring:
+      scorer: model_plugin_parity
+    build:
+      min_max_cache_length: 1024
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only native-reference consistency.
+
+  - id: mmmu_pro_vision_square_plugin_parity
+    description: >
+      Image-question output consistency on the same five distinct-subject
+      MMMU-Pro Vision samples letterboxed to a 448x448 canvas. This profile
+      keeps the official reference and fixed-shape TRTMC vision engine on the
+      same image geometry and vision-token count.
+    user_contract: vl_answer
+    default_model_names: [lance-3b-x2t-image]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/mmmu-pro-vision-square-448/dataset.json
+      input_asset_fields: [image]
+    selectors:
+      model_names: [lance-3b-x2t-image]
+    scoring:
+      scorer: model_plugin_parity
+    build:
+      min_max_cache_length: 1024
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only native-reference consistency.
+
+  - id: mmlu_generation_mode_parity
+    description: >
+      Deterministic MMLU-Pro output consistency across AR, diffusion,
+      linear speculative, and LoRA-backed linear speculative generation
+      modes.
+    user_contract: continuation_parity
+    default_model_names: [nemotron-labs-diffusion-8b]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/mmlu-generation-modes/dataset.json
+    selectors:
+      model_names: [nemotron-labs-diffusion-8b]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only native-reference consistency.
+
+  - id: flores200_en_fr_seq2seq_parity
+    description: >
+      English-to-French output consistency on ten deterministic FLORES-200
+      devtest source sentences.
+    user_contract: translation
+    default_model_names: [nllb-200-distilled-600m]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/flores200-en-fr/dataset.json
+    selectors:
+      model_names: [nllb-200-distilled-600m]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only native-reference consistency.
+
+  - id: full_duplex_bench_speech_parity
+    description: >
+      Speech-response token and waveform consistency on five public
+      Full-Duplex-Bench synthetic interruption and pause-handling inputs.
+      Both paths use greedy decoding without an injected assistant persona.
+    user_contract: speech_response
+    default_model_names: [personaplex-7b]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/full-duplex-bench/dataset.json
+      input_asset_fields: [audio]
+    selectors:
+      model_names: [personaplex-7b]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only gated-model native-reference consistency.
+
+  - id: seedtts_en_omni_audio_parity
+    description: >
+      Qwen3-Omni text-to-audio consistency on a public Seed-TTS-Eval English
+      utterance. The official HF and TRTMC paths share prompt, speaker, seed,
+      token budgets, and deterministic decoding settings. This workload uses
+      the public target text as a parity input; it is not a paper-comparable
+      Seed-TTS zero-shot WER or speaker-similarity evaluation.
+    user_contract: tts_audio
+    default_model_names: [qwen3-omni-30b-a3b-instruct]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/TRTMCValidation/seedtts-en-omni-audio/dataset.json
+    selectors:
+      model_names: [qwen3-omni-30b-a3b-instruct]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only 280 GB native-reference consistency.
+
+  - id: vbench_ti2v_official_profile_parity
+    description: >
+      Wan2.2 TI2V-5B consistency at the pinned official 1280x704,
+      121-frame, 50-step profile. The pinned official Wan implementation and
+      TRTMC generate aligned videos for model-owned numeric comparison.
+    user_contract: diffusion_video
+    default_model_names: [wan22-ti2v-5b]
+    dataset:
+      kind: diffusion_prompt_json
+      default_path: /mnt/data/VBench/vbench_t2v_task_eval.json
+      prompt_field: prompt
+      subject_field: category
+    selectors:
+      model_names: [wan22-ti2v-5b]
+    generation:
+      seed: 42
+    scoring:
+      scorer: diffusion_image_clip_parity
+    gates:
+      exact_num_frames: 121
+      exact_video_height: 704
+      exact_video_width: 1280
+      max_rmse_uint8: 1.0
+      max_pixel_mean: 0.98
+      max_temporal_motion_ratio: 2.0
+      min_active_transition_fraction: 0.9
+      min_cosine_uint8: 0.998
+      min_frame_cosine_uint8: 0.998
+      min_pixel_mean: 0.02
+      min_pixel_std: 0.01
+      min_temporal_motion_ratio: 0.5
+      min_temporal_profile_correlation: 0.75
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only full official-profile validation; this workload can take
+        several hours for the reference and TRTMC pair.

@@ -18,12 +18,14 @@ import textwrap
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from tools.ci.context import CiContext
 from tools.ci.gpu_lease import GpuLease
-from tools.ci.model_proof import ModelProofRequest, ModelReferenceCache
+from tools.ci.model_reference_cache import ModelReferenceCacheWarmer
+from tools.ci.model_proof import ModelProofRequest, ModelProofRunner, ModelReferenceCache
 from tools.ci.model_proof_inner import ModelProofInnerPipeline
 from tools.ci.model_proof_selection import ModelProofSelector
 from tools.ci.process import CiError
@@ -720,6 +722,32 @@ def test_wan22_nightly_selection_emits_only_the_pinned_source_contract(
         "relative_path": "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384",
         "entrypoint": "wan/textimage2video.py",
     }
+
+
+def test_lance_selection_projects_reference_environment_into_proof(
+    tmp_path: Path,
+) -> None:
+    selection = _run_test_selection(tmp_path, "lance", "premerge")
+    contract = selection["model_reference_cache"]
+    assert contract["environment_variable"] == "TRTMC_LANCE_REFERENCE_REPO"
+
+    runner = ModelProofRunner(
+        CiContext(REPO_ROOT, os.environ.copy()),
+        ModelProofRequest("lance"),
+    )
+    runner.lease = SimpleNamespace(
+        gpu_id=0,
+        slots_per_gpu=4,
+        resource_class="exclusive_gpu",
+        min_free_gpu_memory_mib=0,
+    )
+
+    environment = runner._proof_environment("0,1,2,3", contract)
+
+    assert (
+        "TRTMC_LANCE_REFERENCE_REPO="
+        "/work/reference-private/lance/reference/Lance-4baeee086648"
+    ) in environment
 
 
 def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
@@ -1851,9 +1879,12 @@ def test_sana_reference_cache_is_copied_to_selected_private_view(
     }
 
 
-def test_sana_reference_cache_missing_checkout_fails_before_docker(
+def test_sana_reference_cache_missing_checkout_is_warmed_before_copy(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
     cache_root = tmp_path / "model-reference-cache"
     cache_root.mkdir()
     config = tmp_path / "model-proof-config.txt"
@@ -1863,12 +1894,34 @@ def test_sana_reference_cache_missing_checkout_fails_before_docker(
     work_dir.mkdir()
     artifacts.mkdir()
     env = os.environ.copy()
-    env["TRTMC_MODEL_REFERENCE_CACHE_ROOT"] = str(cache_root)
+    source = cache_root / SANA_REFERENCE_RELATIVE_PATH
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "TRTMC_MODEL_REFERENCE_CACHE_ROOT": str(cache_root),
+            "FAKE_REFERENCE_SOURCE": str(source),
+            "FAKE_REFERENCE_REVISION": SANA_REFERENCE_REVISION,
+        }
+    )
+    warmed: list[str] = []
 
-    with pytest.raises(CiError, match="selected model reference cache is unavailable"):
-        ModelReferenceCache(CiContext(REPO_ROOT, env), ModelProofRequest("sana_wm")).prepare(
-            _sana_reference_contract(), work_dir, artifacts
-        )
+    def fake_warm_contract(_self, contract):
+        warmed.append(contract.relative_path)
+        _cache_root, prepared = _write_fake_pinned_model_reference(tmp_path, fake_bin)
+        return prepared
+
+    monkeypatch.setattr(
+        ModelReferenceCacheWarmer,
+        "warm_contract",
+        fake_warm_contract,
+    )
+
+    ModelReferenceCache(CiContext(REPO_ROOT, env), ModelProofRequest("sana_wm")).prepare(
+        _sana_reference_contract(), work_dir, artifacts
+    )
+
+    assert warmed == [SANA_REFERENCE_RELATIVE_PATH]
+    assert (work_dir / "reference-private" / SANA_REFERENCE_RELATIVE_PATH).is_dir()
 
 
 def test_sana_reference_cache_wrong_revision_fails_before_docker(
@@ -1897,7 +1950,7 @@ def test_sana_reference_cache_wrong_revision_fails_before_docker(
     with pytest.raises(
         CiError,
         match=(
-            "selected model reference cache revision mismatch: "
+            f"model reference cache revision mismatch for {SANA_REFERENCE_RELATIVE_PATH}: "
             f"expected {SANA_REFERENCE_REVISION}, found {wrong_revision}"
         ),
     ):

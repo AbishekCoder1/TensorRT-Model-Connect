@@ -25,18 +25,17 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-import warnings
 from collections import Counter, defaultdict
 from itertools import product
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tests.e2e_harness.manifest_loader import iter_manifest_paths, load_manifest  # noqa: E402
+from tests.e2e_harness.manifest_loader import load_manifest  # noqa: E402
 from tests.e2e_harness.python_profiles import (  # noqa: E402
     normalize_execution_profiles,
     resolve_profile_python,
@@ -47,10 +46,34 @@ from tests.e2e_harness.registry import (  # noqa: E402
     get_reference,
     get_runner,
 )
+from tools.validation import artifacts as validation_artifacts  # noqa: E402
+from tools.validation import catalog as validation_catalog  # noqa: E402
+from tools.validation.model_plugin_contract import (  # noqa: E402
+    deserialize_stage_output,
+    manifest_path_from_work_manifest,
+    response_from_output,
+    select_case,
+    serialize_stage_output,
+)
 
 
-DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
-DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
+# Shared catalog and artifact Interfaces used by the engine.
+_generated_token_ids = validation_artifacts.generated_token_ids
+predictions_file_valid = validation_artifacts.predictions_file_valid
+DEFAULT_MODELS_DIR = validation_catalog.DEFAULT_MODELS_DIR
+DEFAULT_SUITES = validation_catalog.DEFAULT_SUITES
+_selector_values = validation_catalog._selector_values
+infer_reference_family = validation_catalog.infer_reference_family
+infer_user_contract = validation_catalog.infer_user_contract
+load_manifest_records = validation_catalog.load_manifest_records
+load_structured_file = validation_catalog.load_structured_file
+load_suites = validation_catalog.load_suites
+manifest_record = validation_catalog.manifest_record
+resolve_suite_for_model = validation_catalog.resolve_suite_for_model
+suite_by_id = validation_catalog.suite_by_id
+suite_match_reason = validation_catalog.suite_match_reason
+
+
 DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 REFERENCE_RUNNER = REPO_ROOT / "tools" / "trtmc_reference.py"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
@@ -78,62 +101,24 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_structured_file(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    if path.suffix.lower() == ".json":
-        return json.loads(text)
-    try:
-        import yaml
-    except Exception as exc:  # pragma: no cover - dependency is in pyproject
-        raise RuntimeError("PyYAML is required for task-eval YAML files") from exc
-    data = yaml.safe_load(text)
-    if not isinstance(data, dict):
-        raise ValueError(f"{path} must contain a mapping at the top level")
-    return data
-
-
-def load_suites(path: Path = DEFAULT_SUITES) -> list[dict[str, Any]]:
-    path = Path(path)
-    data = load_structured_file(path)
-    suites = data.get("suites", [])
-    if not isinstance(suites, list):
-        raise ValueError(f"{path}: 'suites' must be a list")
-    suites = copy.deepcopy(suites)
-    seen: set[str] = set()
-    for suite in suites:
-        suite_id = suite.get("id")
-        if not suite_id or not isinstance(suite_id, str):
-            raise ValueError(f"{path}: every suite needs a string id")
-        if suite_id in seen:
-            raise ValueError(f"{path}: duplicate suite id {suite_id!r}")
-        seen.add(suite_id)
-    return suites
-
-
-def suite_by_id(suites: list[dict[str, Any]], suite_id: str) -> dict[str, Any]:
-    for suite in suites:
-        if suite["id"] == suite_id:
-            return suite
-    known = ", ".join(sorted(s["id"] for s in suites))
-    raise ValueError(f"Unknown suite {suite_id!r}. Known suites: {known}")
-
-
 def validate_ci_suite(suite: dict[str, Any], lane: str) -> dict[str, Any]:
     ci = suite.get("ci", {})
     if not isinstance(ci, dict) or ci.get("eligible") is not True:
-        raise ValueError(f"Task-eval suite {suite['id']!r} is not CI-eligible")
+        raise ValueError(f"Validation suite {suite['id']!r} is not CI-eligible")
     if str(ci.get("lane", "")) != lane:
         raise ValueError(
-            f"Task-eval suite {suite['id']!r} belongs to lane "
+            f"Validation suite {suite['id']!r} belongs to lane "
             f"{ci.get('lane')!r}, not {lane!r}"
         )
     if int(ci.get("limit", 0) or 0) <= 0:
-        raise ValueError(f"Task-eval suite {suite['id']!r} must define a positive CI limit")
+        raise ValueError(f"Validation suite {suite['id']!r} must define a positive CI limit")
     if not isinstance(ci.get("sample_seed"), int):
-        raise ValueError(f"Task-eval suite {suite['id']!r} must define an integer CI sample seed")
+        raise ValueError(
+            f"Validation suite {suite['id']!r} must define an integer CI sample seed"
+        )
     models = suite.get("default_model_names", [])
     if not isinstance(models, list) or not models or not all(isinstance(item, str) for item in models):
-        raise ValueError(f"Task-eval suite {suite['id']!r} has no default CI models")
+        raise ValueError(f"Validation suite {suite['id']!r} has no default CI models")
     return ci
 
 
@@ -148,10 +133,10 @@ def ensure_ci_dataset(
 ) -> Path:
     dataset = suite.get("dataset", {})
     if not isinstance(dataset, dict):
-        raise ValueError("CI task-eval dataset configuration must be a mapping")
+        raise ValueError("CI validation dataset configuration must be a mapping")
     expected_sha256 = str(dataset.get("sha256", ""))
     if len(expected_sha256) != 64:
-        raise ValueError("CI task-eval dataset must define a SHA-256 digest")
+        raise ValueError("CI validation dataset must define a SHA-256 digest")
 
     candidates = [explicit_path] if explicit_path is not None else []
     if dataset.get("default_path"):
@@ -161,15 +146,15 @@ def ensure_ci_dataset(
         if verified is not None:
             return verified
     if explicit_path is not None:
-        raise ValueError("Explicit CI task-eval dataset is missing or has the wrong checksum")
+        raise ValueError("Explicit CI validation dataset is missing or has the wrong checksum")
 
     source = str(dataset.get("source", ""))
     parsed = urllib.parse.urlparse(source)
     if parsed.scheme != "https":
-        raise ValueError("CI task-eval dataset source must use HTTPS")
+        raise ValueError("CI validation dataset source must use HTTPS")
     filename = Path(parsed.path).name
     if not filename:
-        raise ValueError("CI task-eval dataset source has no filename")
+        raise ValueError("CI validation dataset source has no filename")
     destination = cache_root / str(suite["id"]) / filename
     verified = _verified_ci_dataset(destination, expected_sha256)
     if verified is not None:
@@ -181,7 +166,7 @@ def ensure_ci_dataset(
         with urllib.request.urlopen(source, timeout=60) as response, temporary.open("wb") as stream:
             shutil.copyfileobj(response, stream)
         if _sha256_file(temporary) != expected_sha256:
-            raise ValueError("Downloaded CI task-eval dataset has the wrong checksum")
+            raise ValueError("Downloaded CI validation dataset has the wrong checksum")
         temporary.replace(destination)
     finally:
         temporary.unlink(missing_ok=True)
@@ -286,7 +271,7 @@ def write_public_ci_artifacts(
     )
 
     lines = [
-        f"# {suite['id']} task-eval CI",
+        f"# {suite['id']} validation CI",
         "",
         f"- Passed: `{str(passed).lower()}`",
         f"- Models: `{len(results)}/{len(expected_models)}`",
@@ -330,12 +315,12 @@ def configure_ci_eval(args: argparse.Namespace, suite: dict[str, Any]) -> list[s
     requested_models = list(dict.fromkeys(args.model))
     unknown_models = sorted(set(requested_models) - set(default_models))
     if unknown_models:
-        raise ValueError(f"CI task-eval model selection is not allowlisted: {unknown_models}")
+        raise ValueError(f"CI validation model selection is not allowlisted: {unknown_models}")
     expected_models = requested_models or default_models
     if args.limit not in {0, int(ci["limit"])}:
-        raise ValueError("CI task-eval limit must match the suite CI profile")
+        raise ValueError("CI validation limit must match the suite CI profile")
     if args.sample_seed not in {None, int(ci["sample_seed"])}:
-        raise ValueError("CI task-eval sample seed must match the suite CI profile")
+        raise ValueError("CI validation sample seed must match the suite CI profile")
     args.model = expected_models
     args.limit = int(ci["limit"])
     args.sample_seed = int(ci["sample_seed"])
@@ -346,7 +331,7 @@ def configure_ci_eval(args: argparse.Namespace, suite: dict[str, Any]) -> list[s
     if not args.engine_dir:
         args.engine_dir = os.environ.get("ENGINE_DIR", "")
     if not args.engine_dir:
-        raise ValueError("CI task-eval requires --engine-dir")
+        raise ValueError("CI validation requires --engine-dir")
     explicit_dataset = Path(args.dataset) if args.dataset else None
     args.dataset = str(
         ensure_ci_dataset(
@@ -385,7 +370,7 @@ def _deep_merge_mappings(*values: Any) -> dict[str, Any]:
     return merged
 
 
-def effective_task_eval_config(
+def effective_validation_config(
     suite: dict[str, Any], model: dict[str, Any]
 ) -> dict[str, Any]:
     """Resolve suite family/model overrides, then manifest-specific settings."""
@@ -404,111 +389,6 @@ def effective_task_eval_config(
         by_model.get(str(model.get("name", "")), {}),
         model.get("task_eval", {}),
     )
-
-
-def infer_reference_family(raw: dict[str, Any]) -> str:
-    return str(raw.get("reference_family", "") or "")
-
-
-def infer_user_contract(raw: dict[str, Any], reference_family: str) -> str:
-    return str(raw.get("user_contract", "") or "")
-
-
-def manifest_record(path: Path) -> dict[str, Any]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    model_name = str(raw.get("name", path.stem))
-    testcases = raw.pop("testcases", [])
-    if isinstance(testcases, list) and testcases:
-        canonical = next(
-            (
-                testcase
-                for testcase in testcases
-                if isinstance(testcase, dict) and testcase.get("name") == model_name
-            ),
-            testcases[0],
-        )
-        if isinstance(canonical, dict):
-            raw = {**raw, **canonical, "name": model_name}
-    build_args = raw.get("build_args", {})
-    task_eval_config = raw.get("task_eval", {})
-    if not isinstance(task_eval_config, dict):
-        task_eval_config = {}
-    runtime_strategy = str(raw.get("runtime_strategy") or "")
-    task_strategy = str(raw.get("task_strategy") or runtime_strategy)
-    # A model's E2E testcase may exercise a different contract from its
-    # dataset-backed validation workload (for example seeded top-p sampling
-    # versus deterministic MMLU). Keep the E2E fields intact and let the
-    # task-eval section declare validation-specific reference semantics.
-    reference_family = str(
-        task_eval_config.get("reference_family") or infer_reference_family(raw)
-    )
-    reference_backend = str(
-        task_eval_config.get("reference_backend")
-        or raw.get("reference_backend", "")
-        or ""
-    )
-    if not reference_backend:
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
-                reference_backend = load_manifest(path).reference_backend
-        except Exception:
-            reference_backend = "hf_transformers"
-    user_contract = str(
-        task_eval_config.get("user_contract")
-        or infer_user_contract(raw, reference_family)
-    )
-    distributed = raw.get("distributed_runtime", {})
-    requires_multi_device = bool(distributed.get("enabled")) or (
-        str(raw.get("ci_tier", "")) == "multi_device"
-    )
-    return {
-        "name": model_name,
-        "manifest": str(path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path),
-        "hf_id": raw.get("hf_id") or raw.get("model_id", ""),
-        "hf_revision": str(raw.get("hf_revision", "") or ""),
-        "bundle": raw.get("bundle", f"{path.stem}.trtfb"),
-        "family": raw.get("family", ""),
-        "runtime_strategy": runtime_strategy,
-        "task_strategy": task_strategy,
-        "reference_family": reference_family,
-        "reference_backend": reference_backend,
-        "execution_profiles": raw.get("execution_profiles", {})
-        if isinstance(raw.get("execution_profiles", {}), dict)
-        else {},
-        "user_contract": user_contract,
-        "ci_tier": raw.get("ci_tier", "default"),
-        "core": bool(raw.get("core", False)),
-        "skip": raw.get("skip", ""),
-        "requires_multi_device": requires_multi_device,
-        "l0_replacement": raw.get("l0_replacement", ""),
-        "gated": bool(raw.get("gated", False)),
-        "trust_remote_code": bool(raw.get("trust_remote_code", False)),
-        "max_cache_length": raw.get(
-            "max_cache_length",
-            build_args.get("max_cache_length", 256) if isinstance(build_args, dict) else 256,
-        ),
-        "precision": raw.get("precision", "fp32"),
-        "fp32_layers": raw.get("fp32_layers", []),
-        "quantization": raw.get("quantization", {}),
-        "build_args": build_args if isinstance(build_args, dict) else {},
-        "fp8_scales": raw.get("fp8_scales", ""),
-        "image_height": raw.get("image_height"),
-        "image_width": raw.get("image_width"),
-        "video_num_frames": raw.get("video_num_frames"),
-        "video_height": raw.get("video_height"),
-        "video_width": raw.get("video_width"),
-        "num_inference_steps": raw.get("num_inference_steps"),
-        "task_eval": task_eval_config,
-        "runtime_config": raw.get("runtime_config", {})
-        if isinstance(raw.get("runtime_config", {}), dict)
-        else {},
-        "max_new_tokens": raw.get("max_new_tokens"),
-    }
-
-
-def load_manifest_records(models_dir: Path = DEFAULT_MODELS_DIR) -> list[dict[str, Any]]:
-    return [manifest_record(path) for path in iter_manifest_paths(models_dir)]
 
 
 def load_waives(path: Path = DEFAULT_WAIVES, platform: str = "") -> dict[str, tuple[str, str]]:
@@ -536,103 +416,6 @@ def load_waives(path: Path = DEFAULT_WAIVES, platform: str = "") -> dict[str, tu
             model_name = name_part
         waives[model_name] = (action, reason)
     return waives
-
-
-def _selector_values(selectors: dict[str, Any], key: str) -> set[str]:
-    values = selectors.get(key, [])
-    if values is None:
-        return set()
-    if isinstance(values, str):
-        return {values}
-    return {str(v) for v in values}
-
-
-def suite_match_reason(suite: dict[str, Any], model: dict[str, Any]) -> tuple[bool, str]:
-    selectors = suite.get("selectors", {})
-    model_names = _selector_values(selectors, "model_names")
-    exclude_model_names = _selector_values(selectors, "exclude_model_names")
-    task_strategies = _selector_values(selectors, "task_strategies")
-    runtime_strategies = _selector_values(selectors, "runtime_strategies")
-    user_contracts = _selector_values(selectors, "user_contracts")
-    exclude_user_contracts = _selector_values(selectors, "exclude_user_contracts")
-    families = _selector_values(selectors, "families")
-    exclude_families = _selector_values(selectors, "exclude_families")
-
-    if model_names and model["name"] not in model_names:
-        return False, f"model={model['name']} not selected"
-    if exclude_model_names and model["name"] in exclude_model_names:
-        return False, f"model={model['name']} excluded"
-    if task_strategies and model["task_strategy"] not in task_strategies:
-        return False, f"task_strategy={model['task_strategy']} not selected"
-    if runtime_strategies and model["runtime_strategy"] not in runtime_strategies:
-        return False, f"runtime_strategy={model['runtime_strategy']} not selected"
-    if user_contracts and model["user_contract"] not in user_contracts:
-        return False, f"user_contract={model['user_contract'] or '<empty>'} not selected"
-    if exclude_user_contracts and model["user_contract"] in exclude_user_contracts:
-        return False, f"user_contract={model['user_contract']} excluded"
-    if families and model["family"] not in families:
-        return False, f"family={model['family']} not selected"
-    if exclude_families and model["family"] in exclude_families:
-        return False, f"family={model['family']} excluded"
-    if model.get("skip"):
-        return False, f"manifest skip: {model['skip']}"
-    return True, "selected"
-
-
-def resolve_suite_for_model(
-    suite: dict[str, Any], model: dict[str, Any]
-) -> dict[str, Any]:
-    """Resolve manifest generation settings and per-model gates for one suite run."""
-    resolved = copy.deepcopy(suite)
-    generation = dict(resolved.get("generation", {}))
-    for key in (
-        "image_height",
-        "image_width",
-        "video_num_frames",
-        "video_height",
-        "video_width",
-        "num_inference_steps",
-    ):
-        value = model.get(key)
-        if value is not None:
-            generation[key] = value
-
-    family_profiles = resolved.get("family_profiles", {})
-    if not isinstance(family_profiles, dict):
-        raise ValueError(f"Suite {suite['id']} family_profiles must be a mapping")
-    family_profile = family_profiles.get(str(model.get("family", "")), {})
-    if not isinstance(family_profile, dict):
-        raise ValueError(
-            f"Suite {suite['id']} family profile for {model.get('family')} must be a mapping"
-        )
-
-    profiles = resolved.get("model_profiles", {})
-    if not isinstance(profiles, dict):
-        raise ValueError(f"Suite {suite['id']} model_profiles must be a mapping")
-    profile = profiles.get(str(model.get("name", "")), {})
-    if not isinstance(profile, dict):
-        raise ValueError(
-            f"Suite {suite['id']} profile for {model.get('name')} must be a mapping"
-        )
-    for owner, source in ((model.get("family"), family_profile), (model.get("name"), profile)):
-        profile_generation = source.get("generation", {})
-        if not isinstance(profile_generation, dict):
-            raise ValueError(
-                f"Suite {suite['id']} generation profile for {owner} must be a mapping"
-            )
-        generation.update(profile_generation)
-    resolved["generation"] = generation
-
-    gates = dict(resolved.get("gates", {}))
-    for owner, source in ((model.get("family"), family_profile), (model.get("name"), profile)):
-        profile_gates = source.get("gates", {})
-        if not isinstance(profile_gates, dict):
-            raise ValueError(
-                f"Suite {suite['id']} gate profile for {owner} must be a mapping"
-            )
-        gates.update(profile_gates)
-    resolved["gates"] = gates
-    return resolved
 
 
 def build_plan(
@@ -726,8 +509,8 @@ def _request_prompt(request: dict[str, Any]) -> str:
     raise ValueError("MMLU request has neither messages content nor prompt")
 
 
-def render_mmlu_prompt(prompt: str, task_eval_config: dict[str, Any] | None) -> str:
-    config = task_eval_config if isinstance(task_eval_config, dict) else {}
+def render_mmlu_prompt(prompt: str, validation_config: dict[str, Any] | None) -> str:
+    config = validation_config if isinstance(validation_config, dict) else {}
     renderer = str(config.get("prompt_renderer", "") or "")
     if not renderer:
         return prompt
@@ -782,7 +565,7 @@ def prepare_mmlu_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     data, indexed = load_mmlu_requests(
         dataset_path,
@@ -811,7 +594,7 @@ def prepare_mmlu_dataset(
         for out_idx, ((dataset_index, request), prepared_request) in enumerate(
             zip(indexed, requests, strict=True)
         ):
-            prompt = render_mmlu_prompt(_request_prompt(request), task_eval_config)
+            prompt = render_mmlu_prompt(_request_prompt(request), validation_config)
             sample = {
                 "sample_id": prepared_request["sample_id"],
                 "dataset_index": dataset_index,
@@ -824,7 +607,7 @@ def prepare_mmlu_dataset(
 
     generation = _deep_merge_mappings(
         suite.get("generation", {}),
-        (task_eval_config or {}).get("generation", {}),
+        (validation_config or {}).get("generation", {}),
     )
 
     manifest = {
@@ -841,8 +624,8 @@ def prepare_mmlu_dataset(
             "prompts": str(prompts_path),
         },
     }
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -855,7 +638,7 @@ def prepare_conditional_text_jsonl_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     dataset_config = suite.get("dataset", {})
     source_field = str(dataset_config.get("source_field", "input"))
@@ -931,7 +714,7 @@ def prepare_conditional_text_jsonl_dataset(
 
     generation = _deep_merge_mappings(
         suite.get("generation", {}),
-        (task_eval_config or {}).get("generation", {}),
+        (validation_config or {}).get("generation", {}),
     )
     manifest = {
         "suite": suite["id"],
@@ -946,8 +729,8 @@ def prepare_conditional_text_jsonl_dataset(
         "scoring": suite.get("scoring", {}),
         "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
     }
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -960,7 +743,7 @@ def prepare_unconditional_text_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     data = json.loads(dataset_path.read_text(encoding="utf-8"))
     requests = data.get("requests")
@@ -1019,7 +802,7 @@ def prepare_unconditional_text_dataset(
 
     generation = _deep_merge_mappings(
         suite.get("generation", {}),
-        (task_eval_config or {}).get("generation", {}),
+        (validation_config or {}).get("generation", {}),
     )
     manifest = {
         "suite": suite["id"],
@@ -1034,8 +817,8 @@ def prepare_unconditional_text_dataset(
         "scoring": suite.get("scoring", {}),
         "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
     }
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -1048,7 +831,7 @@ def prepare_diffusion_prompt_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     with dataset_path.open("r", encoding="utf-8-sig", newline="") as dataset_file:
         reader = csv.DictReader(dataset_file, delimiter="\t")
@@ -1123,8 +906,8 @@ def prepare_diffusion_prompt_dataset(
             "prompts": str(prompts_path),
         },
     }
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -1137,7 +920,7 @@ def prepare_diffusion_prompt_json_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     data = json.loads(dataset_path.read_text(encoding="utf-8"))
     dataset_config = suite.get("dataset", {})
@@ -1214,9 +997,127 @@ def prepare_diffusion_prompt_json_dataset(
         "generation": suite.get("generation", {}),
         "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
     }
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
+def prepare_model_plugin_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    validation_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    """Prepare fixed rows consumed by model-owned reference/runner plugins."""
+    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    requests = data.get("requests")
+    if not isinstance(requests, list):
+        raise ValueError(f"{dataset_path}: expected top-level 'requests' list")
+    dataset_config = suite.get("dataset", {})
+    asset_fields = dataset_config.get("input_asset_fields", [])
+    if not isinstance(asset_fields, list) or not all(
+        isinstance(field, str) and field for field in asset_fields
+    ):
+        raise ValueError(
+            f"Suite {suite['id']} dataset.input_asset_fields must be a list of strings"
+        )
+
+    indexed: list[tuple[int, dict[str, Any]]] = []
+    seen_ids: set[str] = set()
+    for source_position, request in enumerate(requests):
+        if not isinstance(request, dict):
+            raise ValueError(f"{dataset_path}: request {source_position} must be an object")
+        prepared = copy.deepcopy(request)
+        sample_id = str(
+            prepared.get("sample_id", f"model_plugin_{source_position:06d}")
+        ).strip()
+        if not sample_id:
+            raise ValueError(f"{dataset_path}: request {source_position} has no sample_id")
+        if sample_id in seen_ids:
+            raise ValueError(f"{dataset_path}: duplicate sample_id {sample_id!r}")
+        seen_ids.add(sample_id)
+        prepared["sample_id"] = sample_id
+        prepared.setdefault("dataset_index", source_position)
+        category = str(prepared.get("category", "") or "")
+        if subject and subject not in {
+            value.strip() for value in category.split(",")
+        }:
+            continue
+        inputs = prepared.get("inputs", {})
+        if not isinstance(inputs, dict):
+            raise ValueError(
+                f"{dataset_path}: request {source_position} inputs must be an object"
+            )
+        for field in asset_fields:
+            value = inputs.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"{dataset_path}: request {source_position} has no inputs.{field}"
+                )
+            asset_path = Path(value)
+            if not asset_path.is_absolute():
+                asset_path = dataset_path.parent / asset_path
+            if not asset_path.is_file():
+                raise FileNotFoundError(
+                    f"{dataset_path}: request {source_position} inputs.{field} "
+                    f"does not exist: {asset_path}"
+                )
+            inputs[field] = str(asset_path.resolve())
+            if field in {"audio", "image", "video", "video_path"}:
+                prepared[field] = inputs[field]
+        prepared["inputs"] = inputs
+        indexed.append((source_position, prepared))
+    if sample_seed is not None:
+        rng = random.Random(sample_seed)
+        rng.shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+    if not indexed:
+        raise ValueError(
+            f"{dataset_path}: no model-plugin requests selected"
+        )
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    selected = [request for _source_position, request in indexed]
+    answers_path.write_text(
+        json.dumps(
+            _copy_dataset_header(data, selected),
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with prompts_path.open("w", encoding="utf-8") as prompts_file:
+        for eval_index, (_source_position, request) in enumerate(indexed):
+            prompt_row = dict(request)
+            prompt_row["eval_index"] = eval_index
+            prompts_file.write(json.dumps(prompt_row, ensure_ascii=False) + "\n")
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_name": data.get("dataset", ""),
+        "dataset_version": data.get("version", ""),
+        "dataset_kind": "model_plugin_json",
+        "request_count": len(indexed),
+        "subject": subject or "all",
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
+    }
+    if validation_config:
+        manifest["task_eval"] = validation_config
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
 
@@ -1247,11 +1148,11 @@ def prepare_seedtts_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     if subject:
         raise ValueError(
-            "SeedTTS task eval does not support --subject; select a language suite instead"
+            "SeedTTS reference-consistency validation does not support --subject; select a language suite instead"
         )
     data, indexed = load_seedtts_requests(
         dataset_path,
@@ -1313,8 +1214,8 @@ def prepare_seedtts_dataset(
         "scoring": suite.get("scoring", {}),
         "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
     }
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -1559,7 +1460,7 @@ def _write_indexed_json_task_dataset(
     limit: int,
     subject: str,
     sample_seed: int | None,
-    task_eval_config: dict[str, Any] | None,
+    validation_config: dict[str, Any] | None,
 ) -> dict[str, Path]:
     work_dir.mkdir(parents=True, exist_ok=True)
     answers_path = work_dir / "answers.json"
@@ -1584,8 +1485,8 @@ def _write_indexed_json_task_dataset(
         "scoring": suite.get("scoring", {}),
         "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
     }
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -1598,7 +1499,7 @@ def prepare_image_classification_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     dataset_config = suite.get("dataset", {})
     subject_field = str(dataset_config.get("subject_field", "synset"))
@@ -1645,7 +1546,7 @@ def prepare_image_classification_dataset(
         limit=limit,
         subject=subject,
         sample_seed=sample_seed,
-        task_eval_config=task_eval_config,
+        validation_config=validation_config,
     )
 
 
@@ -1657,7 +1558,7 @@ def prepare_semantic_segmentation_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     dataset_config = suite.get("dataset", {})
     subject_field = str(dataset_config.get("subject_field", "subset"))
@@ -1701,7 +1602,7 @@ def prepare_semantic_segmentation_dataset(
         limit=limit,
         subject=subject,
         sample_seed=sample_seed,
-        task_eval_config=task_eval_config,
+        validation_config=validation_config,
     )
 
 
@@ -1713,7 +1614,7 @@ def prepare_prompted_segmentation_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     dataset_config = suite.get("dataset", {})
     subject_field = str(dataset_config.get("subject_field", "category"))
@@ -1777,7 +1678,7 @@ def prepare_prompted_segmentation_dataset(
         limit=limit,
         subject=subject,
         sample_seed=sample_seed,
-        task_eval_config=task_eval_config,
+        validation_config=validation_config,
     )
 
 
@@ -1789,7 +1690,7 @@ def prepare_reranking_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     dataset_config = suite.get("dataset", {})
     subject_field = str(dataset_config.get("subject_field", "subset"))
@@ -1855,7 +1756,7 @@ def prepare_reranking_dataset(
         limit=limit,
         subject=subject,
         sample_seed=sample_seed,
-        task_eval_config=task_eval_config,
+        validation_config=validation_config,
     )
 
 
@@ -1892,7 +1793,7 @@ def asr_request_audio(dataset_path: Path, request: dict[str, Any]) -> Path:
     refs = asr_request_audio_refs(request)
     if len(refs) != 1:
         raise ValueError(
-            f"ASR task eval expects exactly one audio asset per sample; found {len(refs)}"
+            f"ASR reference-consistency validation expects exactly one audio asset per sample; found {len(refs)}"
         )
     return resolve_dataset_asset_path(dataset_path, refs[0])
 
@@ -1969,7 +1870,7 @@ def _resize_image_to_square(src: Path, dst: Path, image_size: int) -> None:
     try:
         from PIL import Image
     except Exception as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError("Fixed VLM task eval normalization requires Pillow") from exc
+        raise RuntimeError("Fixed VLM reference-consistency validation normalization requires Pillow") from exc
     dst.parent.mkdir(parents=True, exist_ok=True)
     with Image.open(src) as image:
         rgb = image.convert("RGB")
@@ -2011,7 +1912,7 @@ def _convert_audio_to_wav(src: Path, dst: Path) -> None:
             return
     raise RuntimeError(
         f"Could not convert audio asset {src} to WAV. Install soundfile, torchaudio, "
-        "ffmpeg, sox, or flac in the environment running task eval prepare."
+        "ffmpeg, sox, or flac in the environment running reference-consistency validation prepare."
     )
 
 
@@ -2126,7 +2027,7 @@ def prepare_asr_chat_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     dataset_cfg = suite.get("dataset", {})
     answer_field = str(dataset_cfg.get("answer_field", "reference"))
@@ -2195,8 +2096,8 @@ def prepare_asr_chat_dataset(
             "prompts": str(prompts_path),
         },
     }
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -2211,7 +2112,7 @@ def _prepare_vlm_requests(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     validate_vlm_dataset_assets(dataset_path, indexed)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -2232,7 +2133,7 @@ def _prepare_vlm_requests(
             images = vlm_request_images(dataset_path, request)
             if len(images) != 1:
                 raise ValueError(
-                    f"VLM task eval currently supports exactly one image per sample; "
+                    f"VLM reference-consistency validation currently supports exactly one image per sample; "
                     f"dataset_index={dataset_index} has {len(images)}"
                 )
             image_count += len(images)
@@ -2285,8 +2186,8 @@ def _prepare_vlm_requests(
     }
     if normalization:
         manifest["normalization"] = normalization
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -2299,7 +2200,7 @@ def prepare_vlm_chat_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     data, indexed = load_vlm_chat_requests(
         dataset_path,
@@ -2316,7 +2217,7 @@ def prepare_vlm_chat_dataset(
         limit=limit,
         subject=subject,
         sample_seed=sample_seed,
-        task_eval_config=task_eval_config,
+        validation_config=validation_config,
     )
 
 
@@ -2328,7 +2229,7 @@ def prepare_vlm_unified_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     data, indexed = load_vlm_unified_requests(
         dataset_path,
@@ -2345,7 +2246,7 @@ def prepare_vlm_unified_dataset(
         limit=limit,
         subject=subject,
         sample_seed=sample_seed,
-        task_eval_config=task_eval_config,
+        validation_config=validation_config,
     )
 
 
@@ -2357,7 +2258,7 @@ def prepare_sts_pair_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     """Prepare STS sentence pairs as byte-shared HF/TRTMC text inputs."""
     indexed: list[tuple[int, dict[str, Any]]] = []
@@ -2434,8 +2335,8 @@ def prepare_sts_pair_dataset(
         "scoring": suite.get("scoring", {}),
         "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
     }
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -2460,12 +2361,12 @@ def prepare_time_series_csv_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     """Prepare model-shaped numeric windows from a shared time-series CSV."""
     if subject:
         raise ValueError("time_series_csv does not support --subject filtering")
-    config = task_eval_config if isinstance(task_eval_config, dict) else {}
+    config = validation_config if isinstance(validation_config, dict) else {}
     time_series = config.get("time_series", {})
     if not isinstance(time_series, dict):
         raise ValueError("task_eval.time_series must be a mapping")
@@ -2604,8 +2505,8 @@ def prepare_time_series_csv_dataset(
         },
         "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
     }
-    if task_eval_config:
-        manifest["task_eval"] = task_eval_config
+    if validation_config:
+        manifest["task_eval"] = validation_config
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
@@ -2618,7 +2519,7 @@ def prepare_task_dataset(
     limit: int = 0,
     subject: str = "",
     sample_seed: int | None = None,
-    task_eval_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     dataset_kind = suite.get("dataset", {}).get("kind", "")
     if dataset_kind in {"mmlu_five_shot_json", "text_generation_json"}:
@@ -2629,7 +2530,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "seedtts_json":
         return prepare_seedtts_dataset(
@@ -2639,7 +2540,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "image_classification_json":
         return prepare_image_classification_dataset(
@@ -2649,7 +2550,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "semantic_segmentation_json":
         return prepare_semantic_segmentation_dataset(
@@ -2659,7 +2560,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "prompted_segmentation_json":
         return prepare_prompted_segmentation_dataset(
@@ -2669,7 +2570,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "reranking_json":
         return prepare_reranking_dataset(
@@ -2679,7 +2580,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "vlm_chat_json":
         return prepare_vlm_chat_dataset(
@@ -2689,7 +2590,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "vlm_unified_json":
         return prepare_vlm_unified_dataset(
@@ -2699,7 +2600,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "asr_chat_json":
         return prepare_asr_chat_dataset(
@@ -2709,7 +2610,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "diffusion_prompt_tsv":
         return prepare_diffusion_prompt_dataset(
@@ -2719,7 +2620,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "diffusion_prompt_json":
         return prepare_diffusion_prompt_json_dataset(
@@ -2729,7 +2630,17 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
+        )
+    if dataset_kind == "model_plugin_json":
+        return prepare_model_plugin_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            validation_config=validation_config,
         )
     if dataset_kind == "sts_pair_jsonl":
         return prepare_sts_pair_dataset(
@@ -2739,7 +2650,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "time_series_csv":
         return prepare_time_series_csv_dataset(
@@ -2749,7 +2660,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "conditional_text_jsonl":
         return prepare_conditional_text_jsonl_dataset(
@@ -2759,7 +2670,7 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
     if dataset_kind == "unconditional_text_json":
         return prepare_unconditional_text_dataset(
@@ -2769,9 +2680,9 @@ def prepare_task_dataset(
             limit=limit,
             subject=subject,
             sample_seed=sample_seed,
-            task_eval_config=task_eval_config,
+            validation_config=validation_config,
         )
-    raise ValueError(f"Unsupported task-eval dataset kind {dataset_kind!r}")
+    raise ValueError(f"Unsupported validation dataset kind {dataset_kind!r}")
 
 
 def load_jsonl(path: Path, *, errors: str = "strict") -> list[dict[str, Any]]:
@@ -2944,50 +2855,6 @@ def validate_prompt_lengths_for_cache(
 def write_predictions(path: Path, rows: list[dict[str, Any]]) -> None:
     payload = {"responses": rows}
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def _int_list(value: Any) -> list[int] | None:
-    if not isinstance(value, list):
-        return None
-    try:
-        return [int(v) for v in value]
-    except (TypeError, ValueError):
-        return None
-
-
-def _generated_token_ids(row: dict[str, Any]) -> list[int] | None:
-    generated = _int_list(row.get("generated_token_ids"))
-    if generated is not None:
-        return generated
-    return _int_list(row.get("token_ids"))
-
-
-def predictions_file_valid(
-    predictions_path: Path,
-    answers_path: Path,
-    *,
-    require_token_ids: bool = False,
-) -> bool:
-    if not predictions_path.is_file() or not answers_path.is_file():
-        return False
-    try:
-        predictions = json.loads(predictions_path.read_text(encoding="utf-8"))
-        answers = json.loads(answers_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    responses = predictions.get("responses")
-    requests = answers.get("requests")
-    if (
-        not isinstance(responses, list)
-        or not isinstance(requests, list)
-        or len(responses) != len(requests)
-    ):
-        return False
-    if require_token_ids:
-        return all(
-            isinstance(row, dict) and _generated_token_ids(row) is not None for row in responses
-        )
-    return True
 
 
 def reference_cache_metadata(work_dir: Path) -> dict[str, Any]:
@@ -3236,7 +3103,7 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
                     if not proc.stdout.endswith("\n"):
                         log_f.write("\n")
                 raise RuntimeError(
-                    f"VLM TRTFB task eval failed for sample {idx} rc={proc.returncode}; see {log_path}"
+                    f"VLM TRTFB reference-consistency validation failed for sample {idx} rc={proc.returncode}; see {log_path}"
                 )
             output_text = _strip_generated_text_prefix(
                 proc.stdout,
@@ -3253,7 +3120,7 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
             rows.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.vlm_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(f"[validation.vlm_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
     write_predictions(predictions, rows)
 
 
@@ -3319,7 +3186,7 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
                     log_f.write("\n")
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"ASR TRTFB task eval failed for sample {idx} rc={proc.returncode}; see {log_path}"
+                    f"ASR TRTFB reference-consistency validation failed for sample {idx} rc={proc.returncode}; see {log_path}"
                 )
             generated_token_ids = _parse_generated_token_ids(proc.stderr)
             row = {
@@ -3335,7 +3202,7 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
             rows.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.asr_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(f"[validation.asr_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
     write_predictions(predictions, rows)
 
 
@@ -3390,7 +3257,7 @@ def parse_model_prediction(text: str, *, answer_parser: str = "") -> str:
     if not answer_parser:
         return parse_multi_choice_response(clean_text(text))
     if answer_parser != "gpt_oss_harmony_final_mcq":
-        raise ValueError(f"Unsupported task-eval answer parser {answer_parser!r}")
+        raise ValueError(f"Unsupported validation answer parser {answer_parser!r}")
 
     final_marker = "<|channel|>final<|message|>"
     if final_marker in text:
@@ -4633,7 +4500,7 @@ def score_sacrebleu_predictions(
         import sacrebleu
     except Exception as exc:  # pragma: no cover - optional runtime dependency
         raise RuntimeError(
-            "sacreBLEU scoring requires the task-eval optional dependency: "
+            "sacreBLEU scoring requires the validation optional dependency: "
             "pip install 'sacrebleu>=2.4'"
         ) from exc
     predictions, references, samples = _aligned_generated_texts(predictions_data, answers_data)
@@ -4668,7 +4535,7 @@ def score_rouge_predictions(
         from rouge_score import rouge_scorer
     except Exception as exc:  # pragma: no cover - optional runtime dependency
         raise RuntimeError(
-            "ROUGE scoring requires the task-eval optional dependency: "
+            "ROUGE scoring requires the validation optional dependency: "
             "pip install 'rouge-score>=0.1.2'"
         ) from exc
     predictions, references, samples = _aligned_generated_texts(predictions_data, answers_data)
@@ -5259,8 +5126,93 @@ def compare_prediction_sets(
     return summary
 
 
-def _load_diffusion_task_eval_comparator(work_dir: Path) -> Any:
-    case, _reference, _runner = _load_diffusion_task_eval_plugins(work_dir)
+def prediction_agreement_gate_result(
+    summary: Mapping[str, Any],
+    gates: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate task-accuracy and direct prediction-agreement gates."""
+    max_accuracy_drop = float(
+        gates.get("max_accuracy_drop_from_hf", 0.05)
+    )
+    min_agreement = float(
+        gates.get("min_prediction_agreement", 0.90)
+    )
+    accuracy_drop = (
+        float(summary["hf"]["overall_accuracy"])
+        - float(summary["trtfb"]["overall_accuracy"])
+    )
+    prediction_agreement = float(summary["prediction_agreement_rate"])
+    failures: list[dict[str, Any]] = []
+    if accuracy_drop > max_accuracy_drop:
+        failures.append(
+            {
+                "gate": "max_accuracy_drop_from_hf",
+                "metric": "accuracy_drop_from_hf",
+                "actual": accuracy_drop,
+                "required": max_accuracy_drop,
+            }
+        )
+    if prediction_agreement < min_agreement:
+        failures.append(
+            {
+                "gate": "min_prediction_agreement",
+                "metric": "prediction_agreement_rate",
+                "actual": prediction_agreement,
+                "required": min_agreement,
+            }
+        )
+    result: dict[str, Any] = {
+        "status": "failed" if failures else "passed",
+        "accuracy_drop_from_hf": accuracy_drop,
+        "gates": {
+            "max_accuracy_drop_from_hf": max_accuracy_drop,
+            "min_prediction_agreement": min_agreement,
+        },
+        "gate_failures": failures,
+    }
+    if failures:
+        result["error_type"] = "BenchmarkGateError"
+        result["error"] = "; ".join(
+            f"{failure['gate']} actual={failure['actual']} "
+            f"required={failure['required']}"
+            for failure in failures
+        )
+    return result
+
+
+def tts_intelligibility_gate_result(
+    summary: Mapping[str, Any],
+    gates: Mapping[str, Any],
+) -> dict[str, Any]:
+    max_pass_rate_drop = float(
+        gates.get("max_pass_rate_drop_from_hf", 0.05)
+    )
+    min_correctness_agreement = float(
+        gates.get("min_correctness_agreement", 0.95)
+    )
+    pass_rate_drop = (
+        float(summary["hf"]["overall_accuracy"])
+        - float(summary["trtfb"]["overall_accuracy"])
+    )
+    correctness_agreement = float(summary["correctness_agreement_rate"])
+    return {
+        "status": (
+            "passed"
+            if pass_rate_drop <= max_pass_rate_drop
+            and correctness_agreement >= min_correctness_agreement
+            else "failed"
+        ),
+        "pass_rate_drop_from_hf": pass_rate_drop,
+        "correctness_agreement_rate": correctness_agreement,
+        "gates": {
+            "max_pass_rate_drop_from_hf": max_pass_rate_drop,
+            "min_correctness_agreement": min_correctness_agreement,
+        },
+    }
+
+
+def _load_diffusion_validation_comparator(work_dir: Path) -> Any:
+    case, _reference, _runner = _load_diffusion_validation_plugins(work_dir)
     comparator = get_comparator(case.task_strategy)
     if comparator is None:
         raise RuntimeError(
@@ -5269,7 +5221,24 @@ def _load_diffusion_task_eval_comparator(work_dir: Path) -> Any:
     return comparator
 
 
-def _compute_task_eval_clip_metrics(
+def _model_owned_diffusion_native_acceptance(work_dir: Path) -> Any:
+    manifest_path = work_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    validation_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(validation_config, dict):
+        return None
+    model_manifest = str(validation_config.get("model_manifest", "") or "")
+    if not model_manifest:
+        return None
+    owner_path = Path(model_manifest)
+    if not owner_path.is_absolute():
+        owner_path = REPO_ROOT / owner_path
+    case = load_manifest(owner_path)
+    return copy.deepcopy(case.metadata.get("native_acceptance"))
+
+
+def _compute_validation_clip_metrics(
     trt_frames_dir: str, hf_frames_dir: str, prompt: str
 ) -> Any:
     from tests.e2e.models.flux.e2e_plugins.comparators.clip_metrics import (
@@ -5288,6 +5257,13 @@ def _first_generated_image(frames_dir: str) -> Path | None:
         if images:
             return images[0]
     return None
+
+
+def _generated_frame_paths(frames_dir: object) -> list[str]:
+    root = Path(str(frames_dir or ""))
+    if not root.is_dir():
+        return []
+    return [str(path) for path in sorted(root.glob("frame_*.png")) if path.is_file()]
 
 
 def write_diffusion_visual_review(
@@ -5388,7 +5364,8 @@ def compare_diffusion_image_predictions(
             "HF predictions, TRT predictions, and diffusion requests must have "
             f"the same length: {len(hf_rows)}, {len(trt_rows)}, {len(requests)}"
         )
-    comparator = _load_diffusion_task_eval_comparator(work_dir)
+    comparator = _load_diffusion_validation_comparator(work_dir)
+    model_native_acceptance = _model_owned_diffusion_native_acceptance(work_dir)
     threshold = ThresholdProfile(
         task_strategy="diffusion_media_generation",
         profile_name="task_eval",
@@ -5478,24 +5455,32 @@ def compare_diffusion_image_predictions(
             })
             continue
 
+        trt_frames_dir = trt_row.get("frames_dir", "")
+        hf_frames_dir = hf_row.get("frames_dir", "")
         trt_output = StageOutput(
             stage_name="end_to_end",
             data={
                 "returncode": trt_row.get("returncode", 0),
                 "num_frames": trt_row.get("num_frames", 0),
-                "frames_dir": trt_row.get("frames_dir", ""),
+                "frames_dir": trt_frames_dir,
+                "frame_paths": _generated_frame_paths(trt_frames_dir),
                 "frame_stats": trt_row.get("frame_stats", {}),
                 "prompt": trt_row.get("prompt", request.get("prompt", "")),
             },
         )
+        native_acceptance = hf_row.get("native_acceptance")
+        if native_acceptance is None:
+            native_acceptance = model_native_acceptance
         hf_output = StageOutput(
             stage_name="end_to_end",
             data={
                 "returncode": hf_row.get("returncode", 0),
                 "num_frames": hf_row.get("num_frames", 0),
-                "frames_dir": hf_row.get("frames_dir", ""),
+                "frames_dir": hf_frames_dir,
+                "frame_paths": _generated_frame_paths(hf_frames_dir),
                 "frame_stats": hf_row.get("frame_stats", {}),
                 "prompt": hf_row.get("prompt", request.get("prompt", "")),
+                "native_acceptance": native_acceptance,
             },
         )
         result = comparator.compare(trt_output, hf_output, threshold, stage)
@@ -5509,7 +5494,7 @@ def compare_diffusion_image_predictions(
         if missing_clip_metrics:
             from tests.e2e_harness.contracts import MetricResult
 
-            clip = _compute_task_eval_clip_metrics(
+            clip = _compute_validation_clip_metrics(
                 str(trt_output.data["frames_dir"]),
                 str(hf_output.data["frames_dir"]),
                 str(trt_output.data["prompt"]),
@@ -5695,12 +5680,12 @@ def work_manifest(work_dir: Path) -> dict[str, Any]:
 
 
 def hf_generation_overrides(work_dir: Path) -> dict[str, Any]:
-    task_eval_config = work_manifest(work_dir).get("task_eval", {})
-    if not isinstance(task_eval_config, dict):
+    validation_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(validation_config, dict):
         return {}
     overrides: dict[str, Any] = {}
-    if "hf_use_cache" in task_eval_config:
-        overrides["use_cache"] = bool(task_eval_config["hf_use_cache"])
+    if "hf_use_cache" in validation_config:
+        overrides["use_cache"] = bool(validation_config["hf_use_cache"])
     return overrides
 
 
@@ -5746,6 +5731,10 @@ def _is_vision_task_dataset_kind(kind: str) -> bool:
 
 def _is_reranking_dataset_kind(kind: str) -> bool:
     return kind == "reranking_json"
+
+
+def _is_model_plugin_dataset_kind(kind: str) -> bool:
+    return kind == "model_plugin_json"
 
 
 def work_scoring(work_dir: Path) -> dict[str, Any]:
@@ -5894,7 +5883,7 @@ def _load_pil_images(image_paths: list[str]) -> list[Any]:
     try:
         from PIL import Image
     except Exception as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError("VLM task eval requires Pillow") from exc
+        raise RuntimeError("VLM reference-consistency validation requires Pillow") from exc
     images: list[Any] = []
     for image_path in image_paths:
         with Image.open(image_path) as image:
@@ -6153,7 +6142,7 @@ def _run_deepseek_ocr_hf_reference(
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
             print(
-                f"[task_eval.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr
+                f"[validation.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr
             )
     write_predictions(pred_path, responses)
 
@@ -6172,11 +6161,11 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
     if len(prompt_rows) != len(answers["requests"]):
         raise ValueError("answers.json and prompts.jsonl must contain the same number of samples")
     defaults = generation_defaults(work_dir)
-    task_eval_config = work_manifest(work_dir).get("task_eval", {})
-    if not isinstance(task_eval_config, dict):
-        task_eval_config = {}
+    validation_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(validation_config, dict):
+        validation_config = {}
     vlm_fallback_prompt_template = str(
-        task_eval_config.get("vlm_fallback_prompt_template", "") or ""
+        validation_config.get("vlm_fallback_prompt_template", "") or ""
     )
     max_new_tokens = (
         args.max_new_tokens
@@ -6302,7 +6291,7 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
             print(
-                f"[task_eval.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr
+                f"[validation.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr
             )
     write_predictions(pred_path, responses)
     del model
@@ -6403,7 +6392,7 @@ def run_asr_hf_reference(args: argparse.Namespace) -> None:
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
             print(
-                f"[task_eval.asr_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr
+                f"[validation.asr_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr
             )
     write_predictions(pred_path, responses)
     del model
@@ -6492,7 +6481,7 @@ def _run_nemo_asr_hf_reference(args: argparse.Namespace) -> None:
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.nemo_asr_hf] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(f"[validation.nemo_asr_hf] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
     write_predictions(pred_path, responses)
     del model
     gc.collect()
@@ -6575,7 +6564,7 @@ def _run_nemotron35_transformers_reference(
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
             print(
-                f"[task_eval.nemotron35_hf] sample={idx + 1}/{len(prompt_rows)}",
+                f"[validation.nemotron35_hf] sample={idx + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -6641,19 +6630,19 @@ def _run_nemo_asr_hf_pipeline_reference(
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
             print(
-                f"[task_eval.nemo_asr_hf_pipeline] sample={idx + 1}/{len(prompt_rows)}",
+                f"[validation.nemo_asr_hf_pipeline] sample={idx + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
 
 
-def _load_vision_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
-    task_eval_config = work_manifest(work_dir).get("task_eval", {})
-    if not isinstance(task_eval_config, dict):
-        task_eval_config = {}
-    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+def _load_vision_validation_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
+    validation_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(validation_config, dict):
+        validation_config = {}
+    manifest_ref = str(validation_config.get("model_manifest", "") or "")
     if not manifest_ref:
-        raise ValueError("vision task eval requires task_eval.model_manifest")
+        raise ValueError("vision reference-consistency validation requires task_eval.model_manifest")
     manifest_path = Path(manifest_ref)
     if not manifest_path.is_absolute():
         manifest_path = REPO_ROOT / manifest_path
@@ -6671,13 +6660,13 @@ def _load_vision_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
     return case, reference, runner
 
 
-def _load_time_series_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
-    task_eval_config = work_manifest(work_dir).get("task_eval", {})
-    if not isinstance(task_eval_config, dict):
-        task_eval_config = {}
-    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+def _load_time_series_validation_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
+    validation_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(validation_config, dict):
+        validation_config = {}
+    manifest_ref = str(validation_config.get("model_manifest", "") or "")
     if not manifest_ref:
-        raise ValueError("time-series task eval requires task_eval.model_manifest")
+        raise ValueError("time-series reference-consistency validation requires task_eval.model_manifest")
     manifest_path = Path(manifest_ref)
     if not manifest_path.is_absolute():
         manifest_path = REPO_ROOT / manifest_path
@@ -6746,7 +6735,7 @@ def run_time_series_hf_reference(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
-    template, reference, _runner = _load_time_series_task_eval_plugins(work_dir)
+    template, reference, _runner = _load_time_series_validation_plugins(work_dir)
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     artifacts_dir = work_dir / "hf_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -6768,7 +6757,7 @@ def run_time_series_hf_reference(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[task_eval.time_series_hf] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.time_series_hf] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -6778,7 +6767,7 @@ def run_time_series_trtfb(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
-    template, _reference, runner = _load_time_series_task_eval_plugins(work_dir)
+    template, _reference, runner = _load_time_series_validation_plugins(work_dir)
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     artifacts_dir = work_dir / "trtfb_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -6827,7 +6816,7 @@ def run_time_series_trtfb(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[task_eval.time_series_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.time_series_trtfb] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -6836,13 +6825,13 @@ def run_time_series_trtfb(args: argparse.Namespace) -> None:
 def _vision_case_for_request(
     template: Any,
     prompt_row: dict[str, Any],
-    task_eval_config: dict[str, Any],
+    validation_config: dict[str, Any],
     index: int,
 ) -> Any:
     case = copy.deepcopy(template)
     case.name = str(prompt_row.get("sample_id", f"vision_{index:06d}"))
     case.inputs["image"] = str(prompt_row["image"])
-    prompt_mode = str(task_eval_config.get("prompt_mode", "") or "")
+    prompt_mode = str(validation_config.get("prompt_mode", "") or "")
     if prompt_mode == "point":
         case.inputs["point_x"] = float(prompt_row["point_x"])
         case.inputs["point_y"] = float(prompt_row["point_y"])
@@ -6959,11 +6948,11 @@ def run_vision_hf_reference(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
-    template, reference, _runner = _load_vision_task_eval_plugins(work_dir)
+    template, reference, _runner = _load_vision_validation_plugins(work_dir)
     manifest = work_manifest(work_dir)
     dataset_kind = str(manifest.get("dataset_kind", ""))
-    task_eval_config = manifest.get("task_eval", {})
-    task_eval_config = task_eval_config if isinstance(task_eval_config, dict) else {}
+    validation_config = manifest.get("task_eval", {})
+    validation_config = validation_config if isinstance(validation_config, dict) else {}
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     artifacts_dir = work_dir / "hf_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -6972,7 +6961,7 @@ def run_vision_hf_reference(args: argparse.Namespace) -> None:
     responses: list[dict[str, Any]] = []
     with raw_path.open("w", encoding="utf-8") as raw_file:
         for index, prompt_row in enumerate(prompt_rows):
-            case = _vision_case_for_request(template, prompt_row, task_eval_config, index)
+            case = _vision_case_for_request(template, prompt_row, validation_config, index)
             context = RunContext(
                 case=case,
                 artifacts_dir=str(artifacts_dir),
@@ -6994,7 +6983,7 @@ def run_vision_hf_reference(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[task_eval.vision_hf] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.vision_hf] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -7004,11 +6993,11 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
-    template, _reference, runner = _load_vision_task_eval_plugins(work_dir)
+    template, _reference, runner = _load_vision_validation_plugins(work_dir)
     manifest = work_manifest(work_dir)
     dataset_kind = str(manifest.get("dataset_kind", ""))
-    task_eval_config = manifest.get("task_eval", {})
-    task_eval_config = task_eval_config if isinstance(task_eval_config, dict) else {}
+    validation_config = manifest.get("task_eval", {})
+    validation_config = validation_config if isinstance(validation_config, dict) else {}
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     artifacts_dir = work_dir / "trtfb_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -7019,7 +7008,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
     _reset_native_trtmc_commands(work_dir)
     with raw_path.open("w", encoding="utf-8") as raw_file:
         for index, prompt_row in enumerate(prompt_rows):
-            case = _vision_case_for_request(template, prompt_row, task_eval_config, index)
+            case = _vision_case_for_request(template, prompt_row, validation_config, index)
             case.bundle = bundle_path.name
             context = RunContext(
                 case=case,
@@ -7051,19 +7040,19 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[task_eval.vision_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.vision_trtfb] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
 
 
-def _load_reranking_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any, Any]:
-    task_eval_config = work_manifest(work_dir).get("task_eval", {})
-    if not isinstance(task_eval_config, dict):
-        task_eval_config = {}
-    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+def _load_reranking_validation_plugins(work_dir: Path) -> tuple[Any, Any, Any, Any]:
+    validation_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(validation_config, dict):
+        validation_config = {}
+    manifest_ref = str(validation_config.get("model_manifest", "") or "")
     if not manifest_ref:
-        raise ValueError("reranking task eval requires task_eval.model_manifest")
+        raise ValueError("reranking reference-consistency validation requires task_eval.model_manifest")
     manifest_path = Path(manifest_ref)
     if not manifest_path.is_absolute():
         manifest_path = REPO_ROOT / manifest_path
@@ -7138,7 +7127,7 @@ def run_reranking_hf_reference(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
-    template, reference, _runner, _comparator = _load_reranking_task_eval_plugins(
+    template, reference, _runner, _comparator = _load_reranking_validation_plugins(
         work_dir
     )
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
@@ -7171,7 +7160,7 @@ def run_reranking_hf_reference(args: argparse.Namespace) -> None:
             raw_file.flush()
             _write_reranking_run_metadata(metadata_file, case.name, output)
             print(
-                f"[task_eval.reranking_hf] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.reranking_hf] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -7181,7 +7170,7 @@ def run_reranking_trtfb(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
-    template, _reference, runner, _comparator = _load_reranking_task_eval_plugins(
+    template, _reference, runner, _comparator = _load_reranking_validation_plugins(
         work_dir
     )
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
@@ -7221,20 +7210,20 @@ def run_reranking_trtfb(args: argparse.Namespace) -> None:
             raw_file.flush()
             _write_reranking_run_metadata(metadata_file, case.name, output)
             print(
-                f"[task_eval.reranking_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.reranking_trtfb] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
 
 
-def _load_diffusion_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
-    task_eval_config = work_manifest(work_dir).get("task_eval", {})
-    if not isinstance(task_eval_config, dict):
-        task_eval_config = {}
-    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+def _load_diffusion_validation_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
+    validation_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(validation_config, dict):
+        validation_config = {}
+    manifest_ref = str(validation_config.get("model_manifest", "") or "")
     if not manifest_ref:
         raise ValueError(
-            "diffusion task eval requires task_eval.model_manifest in the work manifest"
+            "diffusion reference-consistency validation requires task_eval.model_manifest in the work manifest"
         )
     manifest_path = Path(manifest_ref)
     if not manifest_path.is_absolute():
@@ -7304,6 +7293,8 @@ def _diffusion_response(
         "initial_latents_sha256": str(data.get("initial_latents_sha256", "")),
         "wall_ms": float(output.timing_s) * 1000.0,
     }
+    if data.get("native_acceptance") is not None:
+        response["native_acceptance"] = copy.deepcopy(data["native_acceptance"])
     if case is not None:
         response["seed"] = int(case.inputs.get("seed", case.determinism.get("seed", 42)))
         response["action"] = str(case.inputs.get("action", ""))
@@ -7321,7 +7312,12 @@ def run_diffusion_hf_reference(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
-    template, reference, _runner = _load_diffusion_task_eval_plugins(work_dir)
+    template, reference, _runner = _load_diffusion_validation_plugins(work_dir)
+    requested_precision = _REFERENCE_DTYPE_TO_PRECISION.get(
+        str(getattr(args, "dtype", "auto"))
+    )
+    if requested_precision:
+        template.metadata["reference_precision"] = requested_precision
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     generation = generation_defaults(work_dir)
     artifacts_dir = work_dir / "hf_artifacts"
@@ -7352,7 +7348,7 @@ def run_diffusion_hf_reference(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[task_eval.diffusion_hf] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.diffusion_hf] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -7445,7 +7441,7 @@ def run_tts_hf_reference(args: argparse.Namespace) -> None:
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.tts_hf] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(f"[validation.tts_hf] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
 
     del model
     gc.collect()
@@ -7590,7 +7586,7 @@ def run_encoder_embedding_hf_reference(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[task_eval.encoder_hf] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.encoder_hf] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -7755,7 +7751,7 @@ def run_hf_reference(args: argparse.Namespace) -> None:
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr)
+            print(f"[validation.hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr)
     write_predictions(pred_path, responses)
     # Release the HF torch model and its GPU allocations so any in-process TRT
     # build/run that follows does not contend with a resident reference model.
@@ -7769,7 +7765,7 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
-    template, _reference, runner = _load_diffusion_task_eval_plugins(work_dir)
+    template, _reference, runner = _load_diffusion_validation_plugins(work_dir)
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     generation = generation_defaults(work_dir)
     artifacts_dir = work_dir / "trtfb_artifacts"
@@ -7823,7 +7819,7 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[task_eval.diffusion_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.diffusion_trtfb] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -7849,13 +7845,13 @@ _ELF_REPLAY_INPUT_KEYS = {
 }
 
 
-def _load_diffusion_text_task_eval_runner(work_dir: Path) -> tuple[Any, Any]:
-    task_eval_config = work_manifest(work_dir).get("task_eval", {})
-    if not isinstance(task_eval_config, dict):
-        task_eval_config = {}
-    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+def _load_diffusion_text_validation_runner(work_dir: Path) -> tuple[Any, Any]:
+    validation_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(validation_config, dict):
+        validation_config = {}
+    manifest_ref = str(validation_config.get("model_manifest", "") or "")
     if not manifest_ref:
-        raise ValueError("diffusion text task eval requires task_eval.model_manifest")
+        raise ValueError("diffusion text reference-consistency validation requires task_eval.model_manifest")
     manifest_path = Path(manifest_ref)
     if not manifest_path.is_absolute():
         manifest_path = REPO_ROOT / manifest_path
@@ -7871,7 +7867,7 @@ def run_diffusion_text_trtfb(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext, StageSpec
 
     work_dir = Path(args.work_dir)
-    template, runner = _load_diffusion_text_task_eval_runner(work_dir)
+    template, runner = _load_diffusion_text_validation_runner(work_dir)
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     generation = generation_defaults(work_dir)
     artifacts_dir = work_dir / "trtfb_artifacts"
@@ -7958,7 +7954,7 @@ def run_diffusion_text_trtfb(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[task_eval.diffusion_text_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.diffusion_text_trtfb] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -8149,17 +8145,17 @@ def run_tts_trtfb(args: argparse.Namespace) -> None:
                     log_f.write("\n")
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"TRTFB TTS task eval failed for sample {idx} rc={proc.returncode}; see {log_path}"
+                    f"TRTFB TTS reference-consistency validation failed for sample {idx} rc={proc.returncode}; see {log_path}"
                 )
             if not wav_path.is_file():
                 raise RuntimeError(
-                    f"TRTFB TTS task eval produced no WAV for sample {idx}: {wav_path}"
+                    f"TRTFB TTS reference-consistency validation produced no WAV for sample {idx}: {wav_path}"
                 )
             row = _tts_response_row(sample_id, wav_path, wall_ms, "trtfb")
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.tts_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(f"[validation.tts_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
     scoring = work_scoring(work_dir)
     transcripts = _transcribe_audio_files(
         [Path(row["wav_path"]) for row in responses],
@@ -8253,7 +8249,100 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[task_eval.encoder_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.encoder_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
+def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    manifest = work_manifest(work_dir)
+    manifest_path = manifest_path_from_work_manifest(
+        manifest,
+        repo_root=REPO_ROOT,
+    )
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    metadata_path = work_dir / (args.log or "trtfb_run.log")
+    bundle_path = Path(args.bundle).resolve()
+    responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        metadata_path.open("w", encoding="utf-8") as metadata_file,
+    ):
+        for index, prompt_row in enumerate(prompt_rows):
+            case, stage = select_case(
+                manifest_path,
+                prompt_row,
+                source_index=index,
+            )
+            case.bundle = bundle_path.name
+            activate_model_plugins(
+                str(case.metadata.get("model_test_dir", "") or "")
+            )
+            runner = get_runner(case.task_strategy)
+            if runner is None:
+                raise RuntimeError(
+                    f"No runner plugin {case.task_strategy!r} for {case.family}"
+                )
+            sample_id = str(
+                prompt_row.get("sample_id", f"model_plugin_{index:06d}")
+            )
+            sample_artifacts = artifacts_dir / sample_id
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(sample_artifacts),
+                binary_path=str(args.trtmc_binary),
+                hf_python=str(getattr(args, "hf_python", "") or ""),
+                runtime_python=str(getattr(args, "hf_python", "") or ""),
+                reference_python=str(getattr(args, "hf_python", "") or ""),
+                engine_dir=str(bundle_path.parent),
+                model_plugin_dir=str(
+                    getattr(args, "model_plugin_dir", "") or ""
+                ),
+            )
+            output = runner.run_stage(case, stage, context)
+            _record_output_native_command(work_dir, sample_id, output)
+            serialized = serialize_stage_output(
+                output,
+                artifact_dir=sample_artifacts / "serialized",
+                sample_id=sample_id,
+            )
+            response = response_from_output(
+                sample_id=sample_id,
+                source="trtfb",
+                testcase=case.metadata["validation_manifest_case_name"],
+                output=output,
+                serialized_output=serialized,
+            )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            metadata_file.write(
+                json.dumps(
+                    {
+                        "sample_id": sample_id,
+                        "testcase": case.metadata[
+                            "validation_manifest_case_name"
+                        ],
+                        "stage": stage.name,
+                        "timing_s": float(output.timing_s),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            metadata_file.flush()
+            print(
+                f"[validation.model_plugin_trtfb] "
+                f"sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -8262,6 +8351,9 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
 def run_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     dataset_kind = _work_dataset_kind(work_dir)
+    if _is_model_plugin_dataset_kind(dataset_kind):
+        run_model_plugin_trtfb(args)
+        return
     if _is_reranking_dataset_kind(dataset_kind):
         run_reranking_trtfb(args)
         return
@@ -8354,7 +8446,7 @@ def run_trtfb(args: argparse.Namespace) -> None:
             cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env
         )
     if proc.returncode != 0:
-        raise RuntimeError(f"TRTFB task eval failed with rc={proc.returncode}; see {log_path}")
+        raise RuntimeError(f"TRTFB reference-consistency validation failed with rc={proc.returncode}; see {log_path}")
     convert_trtfb_jsonl_to_predictions(raw_output, predictions)
 
 
@@ -8498,12 +8590,15 @@ def requested_build_max_cache_length(
 def generation_cache_headroom(
     *,
     scorer: str,
-    task_eval_config: dict[str, Any],
+    validation_config: dict[str, Any],
     generation: dict[str, Any],
     max_new_tokens: int | None,
 ) -> int:
+    # A prompt that exactly fills the measured cache still needs room for the
+    # first generated token. Reserve the declared generation budget unless a
+    # non-continuation workload explicitly proves that it does not generate.
     reserve_headroom = scorer == "continuation" or bool(
-        task_eval_config.get("build_generation_headroom", False)
+        validation_config.get("build_generation_headroom", True)
     )
     if not reserve_headroom:
         return 0
@@ -8765,6 +8860,7 @@ _REFERENCE_DTYPE_TO_PRECISION = {
 _NATIVE_PRECISION_DATASET_KINDS = {
     "asr_chat_json",
     "mmlu_five_shot_json",
+    "model_plugin_json",
     "seedtts_json",
     "text_generation_json",
     "sts_pair_jsonl",
@@ -8795,11 +8891,11 @@ def _model_quantization_format(model: Mapping[str, Any]) -> str:
 
 def apply_comparison_precision(
     model: Mapping[str, Any],
-    task_eval_config: Mapping[str, Any],
+    validation_config: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Apply one validation base precision to both TRTMC and its reference."""
 
-    configured = task_eval_config.get("comparison_precision")
+    configured = validation_config.get("comparison_precision")
     updated = copy.deepcopy(dict(model))
     if configured in (None, ""):
         return updated
@@ -8838,6 +8934,29 @@ def _configured_reference_precision(
         configured,
         field="task_eval.reference_precision",
     )
+
+
+def _allows_declared_reference_precision_mismatch(
+    model: Mapping[str, Any],
+    work_dir: Path,
+) -> bool:
+    task_config = model.get("task_eval", {})
+    allowed = (
+        bool(task_config.get("allow_reference_precision_mismatch", False))
+        if isinstance(task_config, Mapping)
+        else False
+    )
+    manifest_path = work_dir / "manifest.json"
+    if manifest_path.is_file():
+        work_config = work_manifest(work_dir).get("task_eval", {})
+        if isinstance(work_config, Mapping):
+            allowed = bool(
+                work_config.get(
+                    "allow_reference_precision_mismatch",
+                    allowed,
+                )
+            )
+    return allowed
 
 
 def resolve_reference_precision_contract(
@@ -8883,7 +9002,16 @@ def resolve_reference_precision_contract(
             else "auto"
         )
 
-    if not quantization and reference_precision not in {"auto", base_precision}:
+    dataset_kind = _work_dataset_kind(work_dir)
+    declared_mismatch_allowed = bool(configured) and (
+        _allows_declared_reference_precision_mismatch(model, work_dir)
+    )
+    if (
+        not quantization
+        and dataset_kind in _NATIVE_PRECISION_DATASET_KINDS
+        and reference_precision not in {"auto", base_precision}
+        and not declared_mismatch_allowed
+    ):
         raise ValueError(
             f"reference precision {reference_precision} does not match "
             f"TRTMC base precision {base_precision}"
@@ -9409,7 +9537,7 @@ def compare_encoder_embedding_prediction_sets(
     }
 
 
-def _task_eval_response_rows(data: dict[str, Any], label: str) -> list[dict[str, Any]]:
+def _validation_response_rows(data: dict[str, Any], label: str) -> list[dict[str, Any]]:
     rows = data.get("responses", [])
     if not isinstance(rows, list):
         raise ValueError(f"{label} predictions must contain a response list")
@@ -9423,8 +9551,8 @@ def compare_time_series_prediction_sets(
     gates: dict[str, Any],
 ) -> dict[str, Any]:
     """Gate every numeric sample with the model-owned E2E parity metrics."""
-    hf_rows = _task_eval_response_rows(hf_data, "HF")
-    trtfb_rows = _task_eval_response_rows(trtfb_data, "TRTMC")
+    hf_rows = _validation_response_rows(hf_data, "HF")
+    trtfb_rows = _validation_response_rows(trtfb_data, "TRTMC")
     if len(hf_rows) != len(trtfb_rows):
         raise ValueError(
             f"Time-series HF/TRTMC prediction count mismatch: {len(hf_rows)} != {len(trtfb_rows)}"
@@ -9546,8 +9674,8 @@ def compare_image_classification_prediction_sets(
     *,
     gates: dict[str, Any],
 ) -> dict[str, Any]:
-    hf_rows = _task_eval_response_rows(hf_data, "HF")
-    trtfb_rows = _task_eval_response_rows(trtfb_data, "TRTMC")
+    hf_rows = _validation_response_rows(hf_data, "HF")
+    trtfb_rows = _validation_response_rows(trtfb_data, "TRTMC")
     requests = answers.get("requests", [])
     if not isinstance(requests, list):
         raise ValueError("Classification answers must contain requests")
@@ -9680,11 +9808,11 @@ def compare_semantic_segmentation_prediction_sets(
 
     hf_by_id = {
         str(row["sample_id"]): row
-        for row in _task_eval_response_rows(hf_data, "HF")
+        for row in _validation_response_rows(hf_data, "HF")
     }
     trtfb_by_id = {
         str(row["sample_id"]): row
-        for row in _task_eval_response_rows(trtfb_data, "TRTMC")
+        for row in _validation_response_rows(trtfb_data, "TRTMC")
     }
     requests = answers.get("requests", [])
     hf_ground = np.zeros((num_classes, num_classes), dtype=np.int64)
@@ -9832,11 +9960,11 @@ def compare_prompted_segmentation_prediction_sets(
 ) -> dict[str, Any]:
     hf_by_id = {
         str(row["sample_id"]): row
-        for row in _task_eval_response_rows(hf_data, "HF")
+        for row in _validation_response_rows(hf_data, "HF")
     }
     trtfb_by_id = {
         str(row["sample_id"]): row
-        for row in _task_eval_response_rows(trtfb_data, "TRTMC")
+        for row in _validation_response_rows(trtfb_data, "TRTMC")
     }
     cases: list[dict[str, Any]] = []
     for request in answers.get("requests", []):
@@ -9926,11 +10054,11 @@ def compare_reranking_prediction_sets(
 
     hf_by_id = {
         str(row["sample_id"]): row
-        for row in _task_eval_response_rows(hf_data, "HF")
+        for row in _validation_response_rows(hf_data, "HF")
     }
     trtfb_by_id = {
         str(row["sample_id"]): row
-        for row in _task_eval_response_rows(trtfb_data, "TRTMC")
+        for row in _validation_response_rows(trtfb_data, "TRTMC")
     }
     metric_thresholds = {
         "pairwise_ordering_agreement": float(
@@ -10066,6 +10194,228 @@ def write_encoder_embedding_summary_markdown(summary: dict[str, Any], path: Path
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def compare_model_plugin_prediction_sets(
+    hf_predictions: dict[str, Any],
+    trtfb_predictions: dict[str, Any],
+    answers_data: dict[str, Any],
+    *,
+    work_dir: Path,
+    gates: Mapping[str, Any],
+) -> dict[str, Any]:
+    from tests.e2e_harness.contracts import StageStatus, ThresholdProfile
+
+    hf_rows = hf_predictions.get("responses", [])
+    trt_rows = trtfb_predictions.get("responses", [])
+    requests = answers_data.get("requests", [])
+    if not all(isinstance(rows, list) for rows in (hf_rows, trt_rows, requests)):
+        raise ValueError(
+            "model-plugin predictions and answers must contain response/request lists"
+        )
+    if len(hf_rows) != len(trt_rows) or len(hf_rows) != len(requests):
+        raise ValueError(
+            "HF predictions, TRTMC predictions, and model-plugin requests must "
+            f"have the same length: {len(hf_rows)}, {len(trt_rows)}, "
+            f"{len(requests)}"
+        )
+
+    manifest = work_manifest(work_dir)
+    manifest_path = manifest_path_from_work_manifest(
+        manifest,
+        repo_root=REPO_ROOT,
+    )
+    min_sample_pass_rate = float(gates.get("min_sample_pass_rate", 1.0))
+    threshold_overrides = {
+        str(name): float(value)
+        for name, value in gates.items()
+        if name != "min_sample_pass_rate"
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+    }
+    cases: list[dict[str, Any]] = []
+    metric_values: dict[str, list[float]] = defaultdict(list)
+    valid_count = 0
+    passed_count = 0
+    skipped_count = 0
+    execution_errors: list[dict[str, Any]] = []
+
+    for index, (request, hf_row, trt_row) in enumerate(
+        zip(requests, hf_rows, trt_rows, strict=True)
+    ):
+        if not all(
+            isinstance(row, dict) for row in (request, hf_row, trt_row)
+        ):
+            raise ValueError(f"model-plugin row {index} must contain objects")
+        sample_id = str(
+            request.get("sample_id", f"model_plugin_{index:06d}")
+        )
+        if (
+            str(hf_row.get("sample_id", "")) != sample_id
+            or str(trt_row.get("sample_id", "")) != sample_id
+        ):
+            raise ValueError(
+                f"model-plugin sample id mismatch at index {index}: "
+                f"expected={sample_id!r} hf={hf_row.get('sample_id')!r} "
+                f"trtfb={trt_row.get('sample_id')!r}"
+            )
+        case, stage = select_case(
+            manifest_path,
+            request,
+            source_index=index,
+        )
+        expected_case = str(
+            case.metadata["validation_manifest_case_name"]
+        )
+        if (
+            str(hf_row.get("testcase", "")) != expected_case
+            or str(trt_row.get("testcase", "")) != expected_case
+            or str(hf_row.get("stage", "")) != stage.name
+            or str(trt_row.get("stage", "")) != stage.name
+        ):
+            raise ValueError(
+                f"model-plugin contract mismatch for {sample_id}: "
+                f"expected testcase={expected_case!r} stage={stage.name!r}"
+            )
+        activate_model_plugins(
+            str(case.metadata.get("model_test_dir", "") or "")
+        )
+        comparator = get_comparator(case.task_strategy)
+        if comparator is None:
+            raise RuntimeError(
+                f"No comparator plugin {case.task_strategy!r} for {case.family}"
+            )
+        hf_payload = hf_row.get("stage_output")
+        trt_payload = trt_row.get("stage_output")
+        if not isinstance(hf_payload, Mapping) or not isinstance(
+            trt_payload, Mapping
+        ):
+            raise ValueError(
+                f"model-plugin predictions for {sample_id} have no stage_output"
+            )
+        hf_output = deserialize_stage_output(hf_payload)
+        trt_output = deserialize_stage_output(trt_payload)
+        backend_failures = []
+        for backend, output in (("hf", hf_output), ("trtmc", trt_output)):
+            metadata = output.metadata if isinstance(output.metadata, Mapping) else {}
+            data = output.data if isinstance(output.data, Mapping) else {}
+            returncode = int(metadata.get("returncode", data.get("returncode", 0)) or 0)
+            if returncode:
+                backend_failures.append(
+                    {
+                        "backend": backend,
+                        "returncode": returncode,
+                        "stderr": str(
+                            metadata.get("stderr", data.get("stderr", ""))
+                        )[-1000:],
+                    }
+                )
+        if backend_failures:
+            execution_errors.append(
+                {
+                    "sample_id": sample_id,
+                    "testcase": expected_case,
+                    "stage": stage.name,
+                    "failures": backend_failures,
+                }
+            )
+            skipped_count += 1
+            cases.append(
+                {
+                    "sample_id": sample_id,
+                    "testcase": expected_case,
+                    "stage": stage.name,
+                    "passed": False,
+                    "status": StageStatus.ERROR.value,
+                    "message": "; ".join(
+                        f"{failure['backend']} exited with "
+                        f"returncode {failure['returncode']}"
+                        for failure in backend_failures
+                    ),
+                    "composite_rule": "",
+                    "metrics": {},
+                }
+            )
+            continue
+        threshold = ThresholdProfile(
+            task_strategy=case.task_strategy,
+            profile_name=case.comparison_profile,
+            metrics={
+                **{
+                    str(name): float(value)
+                    for name, value in case.threshold_overrides.items()
+                },
+                **threshold_overrides,
+            },
+        )
+        comparison = comparator.compare(
+            trt_output,
+            hf_output,
+            threshold,
+            stage,
+        )
+        metrics = {
+            name: {
+                "value": float(metric.value),
+                "threshold": metric.threshold,
+                "operator": metric.operator,
+                "passed": bool(metric.passed),
+                "note": metric.note,
+            }
+            for name, metric in comparison.metrics.items()
+        }
+        for name, metric in comparison.metrics.items():
+            metric_values[name].append(float(metric.value))
+        is_valid = comparison.status in {
+            StageStatus.PASSED.value,
+            StageStatus.FAILED.value,
+        }
+        is_passed = comparison.status == StageStatus.PASSED.value
+        valid_count += int(is_valid)
+        passed_count += int(is_passed)
+        skipped_count += int(not is_valid)
+        cases.append(
+            {
+                "sample_id": sample_id,
+                "testcase": expected_case,
+                "stage": stage.name,
+                "passed": is_passed,
+                "status": comparison.status,
+                "message": comparison.message,
+                "composite_rule": comparison.composite_rule,
+                "metrics": metrics,
+            }
+        )
+
+    sample_pass_rate = passed_count / valid_count if valid_count else 0.0
+    status = (
+        "passed"
+        if valid_count == len(cases)
+        and sample_pass_rate >= min_sample_pass_rate
+        else "failed"
+    )
+    metrics_summary = {
+        name: {
+            "mean": _mean(values),
+            "min": min(values),
+            "max": max(values),
+            "count": len(values),
+        }
+        for name, values in sorted(metric_values.items())
+        if values
+    }
+    return {
+        "status": status,
+        "sample_count": len(cases),
+        "valid_count": valid_count,
+        "passed_count": passed_count,
+        "skipped_count": skipped_count,
+        "sample_pass_rate": sample_pass_rate,
+        "metrics": metrics_summary,
+        "gates": {"min_sample_pass_rate": min_sample_pass_rate},
+        "cases": cases,
+        "execution_errors": execution_errors,
+    }
+
+
 def eval_one_model(
     *,
     suite: dict[str, Any],
@@ -10085,22 +10435,22 @@ def eval_one_model(
     reference_backend = reference_mode or str(
         model.get("reference_backend", "hf_transformers") or "hf_transformers"
     )
-    task_eval_config = effective_task_eval_config(suite, model)
-    model = apply_comparison_precision(model, task_eval_config)
+    validation_config = effective_validation_config(suite, model)
+    model = apply_comparison_precision(model, validation_config)
     suite_reference = suite.get("reference", {})
     if isinstance(suite_reference, dict) and suite_reference:
-        task_eval_config["reference"] = suite_reference
+        validation_config["reference"] = suite_reference
     if model.get("manifest"):
-        task_eval_config["model_manifest"] = str(model["manifest"])
+        validation_config["model_manifest"] = str(model["manifest"])
     if model.get("family"):
-        task_eval_config["family"] = str(model["family"])
+        validation_config["family"] = str(model["family"])
     if model.get("task_strategy"):
-        task_eval_config["task_strategy"] = str(model["task_strategy"])
+        validation_config["task_strategy"] = str(model["task_strategy"])
     runtime_config = model.get("runtime_config", {})
     if isinstance(runtime_config, dict) and runtime_config:
-        task_eval_config["runtime_config"] = runtime_config
+        validation_config["runtime_config"] = runtime_config
     if model.get("max_new_tokens") is not None:
-        task_eval_config["model_max_new_tokens"] = model["max_new_tokens"]
+        validation_config["model_max_new_tokens"] = model["max_new_tokens"]
     prepare_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
@@ -10108,7 +10458,7 @@ def eval_one_model(
         limit=args.limit,
         subject=args.subject,
         sample_seed=args.sample_seed,
-        task_eval_config=task_eval_config,
+        validation_config=validation_config,
     )
     precision_contract = (
         None
@@ -10116,7 +10466,7 @@ def eval_one_model(
         else resolve_reference_precision_contract(args, model, work_dir)
     )
 
-    prompt_token_limit = int(task_eval_config.get("prompt_token_limit", 0) or 0)
+    prompt_token_limit = int(validation_config.get("prompt_token_limit", 0) or 0)
     prompt_normalization: dict[str, Any] | None = None
     if prompt_token_limit:
         if bool(suite.get("generation", {}).get("apply_chat_template", False)):
@@ -10129,7 +10479,7 @@ def eval_one_model(
             model_id=str(model["hf_id"]),
             model_revision=str(model.get("hf_revision", "") or ""),
             token_limit=prompt_token_limit,
-            truncation_side=str(task_eval_config.get("prompt_truncation_side", "left")),
+            truncation_side=str(validation_config.get("prompt_truncation_side", "left")),
             local_files_only=args.local_files_only,
             trust_remote_code=(
                 args.trust_remote_code or bool(model.get("trust_remote_code", False))
@@ -10154,7 +10504,7 @@ def eval_one_model(
         engine_dir = Path(args.engine_dir or (work_root / "_bundles"))
         bundle_path = engine_dir / str(model["bundle"])
     if getattr(args, "require_prebuilt_bundles", False) and not bundle_path.is_file():
-        raise FileNotFoundError(f"Required prebuilt task-eval bundle is missing: {bundle_path}")
+        raise FileNotFoundError(f"Required prebuilt validation bundle is missing: {bundle_path}")
 
     max_prompt_len = None
     if (
@@ -10165,6 +10515,7 @@ def eval_one_model(
         and not _is_tts_dataset_kind(dataset_kind)
         and not _is_time_series_dataset_kind(dataset_kind)
         and not _is_vision_task_dataset_kind(dataset_kind)
+        and not _is_model_plugin_dataset_kind(dataset_kind)
     ):
         prompt_rows_path = work_dir / "prompts.jsonl"
         max_prompt_len = max_prompt_token_length(
@@ -10177,7 +10528,7 @@ def eval_one_model(
     generation = generation_defaults(work_dir)
     generation_headroom = generation_cache_headroom(
         scorer=scorer,
-        task_eval_config=task_eval_config,
+        validation_config=validation_config,
         generation=generation,
         max_new_tokens=args.max_new_tokens,
     )
@@ -10262,7 +10613,42 @@ def eval_one_model(
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 
-    if scorer == "time_series_parity":
+    if scorer == "model_plugin_parity":
+        hf_data = json.loads(
+            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
+        )
+        trtfb_data = json.loads(
+            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        )
+        summary = compare_model_plugin_prediction_sets(
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+            work_dir=work_dir,
+            gates=suite.get("gates", {}),
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "skipped_count": summary["skipped_count"],
+            "sample_pass_rate": summary["sample_pass_rate"],
+            "metrics": summary["metrics"],
+        }
+        if summary["execution_errors"]:
+            result["error_type"] = "ModelPluginExecutionError"
+            result["error"] = (
+                f"{len(summary['execution_errors'])} model-plugin sample(s) "
+                "failed during native backend execution"
+            )
+            result["execution_errors"] = summary["execution_errors"]
+    elif scorer == "time_series_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
         summary = compare_time_series_prediction_sets(
@@ -10354,9 +10740,9 @@ def eval_one_model(
             trtfb_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             gates=suite.get("gates", {}),
-            prompt_mode=str(task_eval_config.get("prompt_mode", "")),
+            prompt_mode=str(validation_config.get("prompt_mode", "")),
             ground_truth_mask_field=str(
-                task_eval_config.get("ground_truth_mask_field", "instance_mask")
+                validation_config.get("ground_truth_mask_field", "instance_mask")
             ),
         )
         (work_dir / "summary.json").write_text(
@@ -10383,7 +10769,7 @@ def eval_one_model(
             (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
         )
         _template, _reference, _runner, comparator = (
-            _load_reranking_task_eval_plugins(work_dir)
+            _load_reranking_validation_plugins(work_dir)
         )
         summary = compare_reranking_prediction_sets(
             hf_data,
@@ -10633,9 +11019,9 @@ def eval_one_model(
             trtfb_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             scorer=scorer,
-            answer_parser=str(task_eval_config.get("answer_parser", "") or ""),
+            answer_parser=str(validation_config.get("answer_parser", "") or ""),
             require_valid_prediction=bool(
-                task_eval_config.get("require_valid_prediction", False)
+                validation_config.get("require_valid_prediction", False)
             ),
         )
         (work_dir / "summary.json").write_text(
@@ -10652,36 +11038,30 @@ def eval_one_model(
             "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
             "trtfb_valid_prediction_rate": summary["trtfb"].get("valid_prediction_rate"),
         }
-        if scorer == "asr_transcript":
-            gates = suite.get("gates", {})
-            max_accuracy_drop = float(
-                gates.get("max_accuracy_drop_from_hf", 0.05)
-            )
-            min_agreement = float(gates.get("min_prediction_agreement", 0.90))
-            accuracy_drop = (
-                summary["hf"]["overall_accuracy"]
-                - summary["trtfb"]["overall_accuracy"]
-            )
+        if scorer in {"mcq", "asr_transcript"}:
             result.update(
-                {
-                    "status": (
-                        "passed"
-                        if accuracy_drop <= max_accuracy_drop
-                        and summary["prediction_agreement_rate"] >= min_agreement
-                        else "failed"
-                    ),
-                    "accuracy_drop_from_hf": accuracy_drop,
+                prediction_agreement_gate_result(
+                    summary,
+                    suite.get("gates", {}),
+                )
+            )
+            if scorer == "asr_transcript":
+                result.update(
+                    {
                     "normalized_transcript_exact_agreement_rate": summary[
                         "normalized_transcript_exact_agreement_rate"
                     ],
                     "correctness_agreement_rate": summary[
                         "correctness_agreement_rate"
                     ],
-                    "gates": {
-                        "max_accuracy_drop_from_hf": max_accuracy_drop,
-                        "min_prediction_agreement": min_agreement,
-                    },
-                }
+                    }
+                )
+        elif scorer == "tts_intelligibility":
+            result.update(
+                tts_intelligibility_gate_result(
+                    summary,
+                    suite.get("gates", {}),
+                )
             )
     (work_dir / "eval_result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),
@@ -11028,6 +11408,12 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
             f"min_pairwise={result['min_pairwise_ordering_agreement']:.4f} "
             f"status={result.get('status', '')} {common}"
         )
+    if result.get("mode") == "model_plugin_parity":
+        return (
+            f"model={model['name']} sample_pass_rate={result['sample_pass_rate']:.4f} "
+            f"passed={result['passed_count']}/{result['valid_count']} "
+            f"status={result.get('status', '')} {common}"
+        )
     if result.get("mode") == "time_series_parity":
         return (
             f"model={model['name']} agreement={result['sample_agreement_rate']:.4f} "
@@ -11133,7 +11519,7 @@ def add_generation_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Local dataset task evaluation for TRTMC bundles.")
+    parser = argparse.ArgumentParser(description="Local dataset reference-consistency validation for TRTMC bundles.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("list-suites")
@@ -11264,14 +11650,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--include-waived", action="store_true", help="Include models listed in the waives file."
     )
-    p.add_argument("--work-root", default="/tmp/trtmc-task-eval")
+    p.add_argument("--work-root", default="/tmp/trtmc-validation")
     p.add_argument("--engine-dir", default="")
     p.add_argument(
         "--ci-lane",
         default="",
         help="Run the suite's fail-closed CI profile for this lane.",
     )
-    p.add_argument("--dataset-cache-root", default=".ci/task-eval-data")
+    p.add_argument("--dataset-cache-root", default=".ci/validation-data")
     p.add_argument("--artifact-dir", default="")
     p.add_argument(
         "--bundle", default="", help="Prebuilt bundle path; only valid with one --model."
@@ -11696,7 +12082,7 @@ def cmd_eval_worker(args: argparse.Namespace) -> int:
 
 
 def cmd_prepare_media(args: argparse.Namespace) -> int:
-    from tools.prepare_media_task_eval_datasets import prepare_media_datasets
+    from tools.prepare_media_validation_datasets import prepare_media_datasets
 
     outputs = prepare_media_datasets(
         output_root=args.output_root,
@@ -11729,6 +12115,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         "asr_chat_json",
         "diffusion_prompt_tsv",
         "diffusion_prompt_json",
+        "model_plugin_json",
         "conditional_text_jsonl",
         "unconditional_text_json",
         "seedtts_json",
@@ -11758,16 +12145,16 @@ def cmd_eval(args: argparse.Namespace) -> int:
     results = []
     use_workers = should_use_model_workers(args, selected)
     for idx, model in enumerate(selected, start=1):
-        print(f"[task_eval] ({idx}/{len(selected)}) suite={suite['id']} model={model['name']}")
+        print(f"[validation] ({idx}/{len(selected)}) suite={suite['id']} model={model['name']}")
         if use_workers:
             result = run_eval_model_worker(suite=suite, model=model, args=args)
             if result.get("status") == "failed":
                 results.append(result)
                 if result.get("mode"):
-                    print(f"[task_eval] {_format_result_line(model, result)}")
+                    print(f"[validation] {_format_result_line(model, result)}")
                 else:
                     print(
-                        f"[task_eval] model={model['name']} status=failed "
+                        f"[validation] model={model['name']} status=failed "
                         f"error_type={result.get('error_type', '')} "
                         f"error={result.get('error', '')} log={result.get('worker_log', '')}"
                     )
@@ -11779,7 +12166,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
                     reason = (
                         f"Skipped because GPU cleanup after {model['name']} OOM was not confirmed"
                     )
-                    print(f"[task_eval] {reason}")
+                    print(f"[validation] {reason}")
                     for skipped_model in selected[idx:]:
                         results.append(
                             model_skipped_result(
@@ -11800,16 +12187,16 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 result = model_failure_result(suite=suite, model=model, args=args, exc=exc)
                 results.append(result)
                 print(
-                    f"[task_eval] model={model['name']} status=failed "
+                    f"[validation] model={model['name']} status=failed "
                     f"error_type={type(exc).__name__} error={exc}"
                 )
                 continue
         result.setdefault("status", "passed")
         results.append(result)
-        print(f"[task_eval] {_format_result_line(model, result)}")
+        print(f"[validation] {_format_result_line(model, result)}")
         if result.get("gpu_cleanup_confirmed") is False:
             reason = f"Skipped because GPU cleanup after {model['name']} was not confirmed"
-            print(f"[task_eval] {reason}")
+            print(f"[validation] {reason}")
             for skipped_model in selected[idx:]:
                 results.append(
                     model_skipped_result(
@@ -11835,7 +12222,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     summary_path = Path(args.work_root) / suite["id"] / "eval_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"[task_eval] summary={summary_path}")
+    print(f"[validation] summary={summary_path}")
     artifact_dir = str(getattr(args, "artifact_dir", ""))
     if artifact_dir:
         write_public_ci_artifacts(

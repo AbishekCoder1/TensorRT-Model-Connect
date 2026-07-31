@@ -158,7 +158,7 @@ if raw_latents.size != expected_size:
         f"expected {{expected_shape}} = {{expected_size}}"
     )
 initial_latents = torch.from_numpy(raw_latents.reshape(expected_shape)).to(
-    device="cuda", dtype=torch.float32)
+    device="cuda", dtype=torch.float16)
 """
             generation_input = "latents=initial_latents,"
         else:
@@ -179,10 +179,48 @@ import numpy as np
 from PIL import Image
 import os
 import transformers
+from transformers import T5EncoderModel
 from diffusers import PixArtSigmaPipeline
 
 transformers.logging.set_verbosity_error()
-pipe = PixArtSigmaPipeline.from_pretrained({model_ref!r}, torch_dtype=torch.float32)
+text_encoder = T5EncoderModel.from_pretrained(
+    {model_ref!r},
+    subfolder="text_encoder",
+    torch_dtype=torch.float32,
+)
+pipe = PixArtSigmaPipeline.from_pretrained(
+    {model_ref!r},
+    text_encoder=text_encoder,
+    torch_dtype=torch.float16,
+)
+
+# TRTMC keeps scheduler state and component bindings in FP32, then casts
+# inside the FP16 DiT engine and casts its output back to FP32. Diffusers
+# otherwise derives the latent dtype from the FP32 T5 output and sends an
+# FP32 tensor directly into the FP16 transformer.
+def _cast_floating(value, dtype):
+    if isinstance(value, torch.Tensor):
+        return value.to(dtype=dtype) if value.is_floating_point() else value
+    if isinstance(value, tuple):
+        return tuple(_cast_floating(item, dtype) for item in value)
+    if isinstance(value, list):
+        return [_cast_floating(item, dtype) for item in value]
+    if isinstance(value, dict):
+        return {{key: _cast_floating(item, dtype) for key, item in value.items()}}
+    return value
+
+def _fp16_transformer_inputs(_module, args, kwargs):
+    return (
+        _cast_floating(args, torch.float16),
+        _cast_floating(kwargs, torch.float16),
+    )
+
+def _fp32_transformer_output(_module, _args, output):
+    return _cast_floating(output, torch.float32)
+
+pipe.transformer.register_forward_pre_hook(
+    _fp16_transformer_inputs, with_kwargs=True)
+pipe.transformer.register_forward_hook(_fp32_transformer_output)
 pipe.to("cuda")
 {latent_setup}
 output = pipe(

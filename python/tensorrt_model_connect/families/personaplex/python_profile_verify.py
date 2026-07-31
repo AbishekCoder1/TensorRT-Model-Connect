@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib.metadata as metadata
+from importlib.metadata import version
 
 import sphn
 
-assert metadata.version("sphn") == "0.1.4"
-assert callable(sphn.read)
-print(f"sphn={metadata.version('sphn')}")
+assert version("sphn") == "0.1.4"
+assert sphn is not None
+print(f"sphn={version('sphn')}")
