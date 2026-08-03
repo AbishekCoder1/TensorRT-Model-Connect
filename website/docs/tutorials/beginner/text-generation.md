@@ -2,10 +2,17 @@
 title: Beginner Tutorial - Text Generation
 ---
 
-import useBaseUrl from '@docusaurus/useBaseUrl';
-
+import Diagram from '@site/src/components/Diagram';
 
 This handout teaches the full path for decoder text generation: build a bundle, inspect the artifact, run the C++ runtime, and explain the request loop. It assumes you can run shell commands, but it does not assume prior deep learning inference knowledge.
+
+Select the CLI before using this page directly:
+
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
+```
 
 <div className="trtmc-handout-meta">
   <div>
@@ -26,12 +33,11 @@ This handout teaches the full path for decoder text generation: build a bundle, 
   </div>
 </div>
 
-<figure className="trtmc-diagram trtmc-diagram--wide">
-  <div className="trtmc-diagram__media">
-    <img src={useBaseUrl('/img/diagrams/trtmc-inference-loop.svg')} alt="Text generation inference loop" />
-  </div>
-  <figcaption>Use this loop to connect each tutorial command to the runtime work it triggers.</figcaption>
-</figure>
+<Diagram
+  src="/img/diagrams/trtmc-inference-loop.svg"
+  alt="Text generation prefill and decode loop with KV-cache reuse"
+  caption="Use this loop to connect each tutorial command to the runtime work it triggers."
+/>
 
 ## Outcomes
 
@@ -44,7 +50,11 @@ After this tutorial, you should be able to explain:
 - Which source-level building blocks are involved in `IPipeline::generate`.
 
 :::info Required reading
-Before running commands, read [Glossary](/getting-started/glossary), [Environment and First Repro](/getting-started/environment-and-repro), [Inference Fundamentals](/getting-started/inference-fundamentals), and [Inspect Bundles](inspect-bundles.md). Keep the glossary and bundle-inspection page open while working through this tutorial.
+Before running commands, read [Glossary](/getting-started/glossary),
+[Prerequisites and Environment](/getting-started/environment-and-repro),
+[Inference Fundamentals](/getting-started/inference-fundamentals), and
+[Inspect Bundles](inspect-bundles.md). Keep the glossary and bundle-inspection
+page open while working through this tutorial.
 :::
 
 ## Stage 1: Understand the Artifact You Are Building
@@ -77,31 +87,20 @@ Do not use "Qwen support" and "text generation support" as if they mean the same
 
 ## Stage 2: Build the Bundle
 
-Run this inside the dev container:
+Run this in the wheel or source-build environment selected in Getting Started:
 
 ```bash
-./build/trtmc build Qwen/Qwen3-0.6B
+$TRTMC build Qwen/Qwen3-0.6B
 ```
 
 What happens:
 
-```mermaid
-sequenceDiagram
-  participant CLI as trtmc build
-  participant Config as ModelConfig
-  participant Family as qwen FamilyPlugin
-  participant Builder as decoder builder
-  participant Bundle as bundle_writer
-
-  CLI->>Config: read config.json
-  Config-->>CLI: normalized architecture fields
-  CLI->>Family: matches(model_type)
-  Family->>Family: load_weights
-  Family->>Builder: build_engine
-  Builder-->>Family: serialized TensorRT plan
-  Family-->>Bundle: BundleInfo + split engine sections
-  Bundle-->>CLI: Qwen3-0.6B.trtfb
-```
+<Diagram
+  src="/img/diagrams/tutorials/beginner/qwen3-bundle-build-sequence.svg"
+  alt="Qwen3 bundle build sequence from CLI configuration through split prefill and decode TensorRT plan construction and bundle writing"
+  caption="The CLI resolves Qwen ownership, the family builds separate prefill and decode plans by default, and the bundle writer records both deployable sections."
+  sequence
+/>
 
 | Omitted option | Effect |
 | --- | --- |
@@ -131,7 +130,7 @@ The first run may download model files from Hugging Face and compile TensorRT en
 Inspect the bundle metadata:
 
 ```bash
-./build/trtmc inspect Qwen3-0.6B.trtfb
+$TRTMC inspect Qwen3-0.6B.trtfb
 ```
 
 Confirm that the output reports:
@@ -143,7 +142,7 @@ Confirm that the output reports:
 Then list engine sections:
 
 ```bash
-./build/trtmc inspect Qwen3-0.6B.trtfb --list-engines
+$TRTMC inspect Qwen3-0.6B.trtfb --list-engines
 ```
 
 You are looking for the pieces that the C++ runtime will later consume:
@@ -172,7 +171,7 @@ implementation path first.
 ## Stage 4: Run Deterministic Generation
 
 ```bash
-./build/trtmc run Qwen3-0.6B.trtfb \
+$TRTMC run Qwen3-0.6B.trtfb \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --greedy
@@ -184,20 +183,11 @@ For Qwen3-0.6B, the runtime should log `Using native BPE tokenizer`; no `--hf-py
 
 Runtime creation follows this path:
 
-```mermaid
-flowchart TD
-  Run["./build/trtmc run"] --> Load["trtmc::load"]
-  Load --> Factory["PipelineFactory"]
-  Factory --> Read["ReadBundleFile"]
-  Read --> Strategy["qwen_decoder_kv_cache"]
-  Strategy --> Loader["ModelPluginLoader"]
-  Loader --> DSO["libtrtmc_model_qwen.so"]
-  DSO --> Registry["PipelineRegistry"]
-  Registry --> Plugin["QwenDecoderPlugin"]
-  Plugin --> Backend["IBackend creates ITrtModule"]
-  Plugin --> Pipeline["QwenTextGenerationPipeline"]
-  Pipeline --> Generate["generate(prompt, cfg)"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/beginner/native-runtime-dispatch.svg"
+  alt="Native runtime dispatch from bundle strategy metadata through model plugin loading to a task pipeline"
+  caption="For Qwen, the generic native dispatch layers resolve qwen_decoder_kv_cache and create QwenTextGenerationPipeline."
+/>
 
 Inside `generate`, the pipeline:
 

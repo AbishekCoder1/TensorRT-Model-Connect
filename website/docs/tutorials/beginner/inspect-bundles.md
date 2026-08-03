@@ -2,7 +2,20 @@
 title: Beginner Tutorial - Inspect Bundles
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 A `.trtfb` bundle is the portable handoff between the Python builder and C++ runtime. Inspecting it is the first debugging step.
+
+Select the CLI before using this page directly:
+
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
+```
+
+The source-ownership checks near the end require a repository checkout; bundle
+inspection itself does not.
 
 <div className="trtmc-handout-meta">
   <div>
@@ -23,15 +36,11 @@ A `.trtfb` bundle is the portable handoff between the Python builder and C++ run
   </div>
 </div>
 
-```mermaid
-flowchart TD
-  Bundle["model.trtfb"] --> Header["Header metadata"]
-  Bundle --> Native["native config, engines, and assets"]
-  Bundle --> Optimized["optimized_runtime.json and artifact tree"]
-  Header --> Identity["model, family, native strategy, and ABI metadata"]
-  Native --> NativeExecution["native model/backend dispatch"]
-  Optimized --> OptimizedExecution["optimized implementation dispatch"]
-```
+<Diagram
+  src="/img/diagrams/getting-started/trtfb-bundle-contents.svg"
+  alt="TRTFB bundle contents split between identity metadata, native sections, and optimized runtime artifacts"
+  caption="The section inventory tells you whether the bundle will use native model/backend dispatch or an embedded optimized implementation."
+/>
 
 ## Why inspect first
 
@@ -62,8 +71,8 @@ are part of the contract.
 ## Use the inspector
 
 ```bash
-./build/trtmc inspect /tmp/qwen3-0.6b.trtfb
-./build/trtmc inspect /tmp/qwen3-0.6b.trtfb --list-engines
+$TRTMC inspect Qwen3-0.6B.trtfb
+$TRTMC inspect Qwen3-0.6B.trtfb --list-engines
 ```
 
 The second command is a native-bundle check. `--list-engines` recognizes native
@@ -84,9 +93,10 @@ Family:              qwen
 Runtime strategy:    qwen_decoder_kv_cache
 TRT version:         <version recorded at build time>
 TRT ABI:             <ABI key>
-Precision:           fp16
+Precision:           bf16
 Sections:
   config.json: 0.0 MB
+  prefill_engine_plan: <size> MB
   engine_plan: <size> MB
   tokenizer.json: <size> MB
 ```
@@ -132,15 +142,11 @@ from section names alone.
 For a native bundle, `runtime_strategy` is the bridge from artifact to C++
 implementation:
 
-```mermaid
-flowchart LR
-  Strategy["runtime_strategy"] --> Index["generated model-plugin index"]
-  Index --> DSO["libtrtmc_model_owner.so"]
-  DSO --> Registry["PipelineRegistry"]
-  Registry --> Plugin["IPipelinePlugin"]
-  Plugin --> Pipeline["IPipeline implementation"]
-  Pipeline --> Method["generate / transcribe / solve / segment / detect"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/beginner/native-runtime-dispatch.svg"
+  alt="Native runtime strategy resolution through the generated plugin index, model DSO, registry, and task API"
+  caption="runtime_strategy connects native bundle metadata to a registered model plugin and its concrete IPipeline implementation."
+/>
 
 Do not confuse it with `family`. `family` explains the Python builder that
 created the native bundle. `runtime_strategy` explains its C++ runtime shape.
@@ -189,12 +195,12 @@ If `runtime_strategy` is present but runtime creation fails with "No plugin regi
 
 | Check | Command or source |
 | --- | --- |
-| Bundle header parses | `./build/trtmc inspect model.trtfb` |
+| Bundle header parses | `$TRTMC inspect model.trtfb` |
 | Qwen strategy is declared | `rg -n 'qwen_decoder_kv_cache' src/runtime/models/qwen/MODEL.toml` |
 | Qwen registrar is implemented | `rg -n 'REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST' src/runtime/models/qwen/plugin.cpp` |
 | Runtime DSO was built | `find build/models/qwen -name 'libtrtmc_model_qwen.so' -print` |
-| Native engine sections exist | `./build/trtmc inspect model.trtfb --list-engines` |
-| Optimized descriptor/artifact section names exist | `./build/trtmc inspect model.trtfb` |
+| Native engine sections exist | `$TRTMC inspect model.trtfb --list-engines` |
+| Optimized descriptor/artifact section names exist | `$TRTMC inspect model.trtfb` |
 | Exact optimized descriptor identity is valid | Family-owned provider qualification and bundle-contract tests; the current inspector is only a section-presence check. |
 | E2E manifest matches expected contract | `tests/e2e/models/<family>/manifests/<model>.json` |
 

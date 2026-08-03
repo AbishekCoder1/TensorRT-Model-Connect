@@ -2,6 +2,8 @@
 title: Performance Benchmarking
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 `trtmc-bench` measures public TRTMC pipeline calls across text, vision-language,
 diffusion, audio, segmentation, classification, encoder, reranking,
 speech-transcription, and neural-operator models. The default path is one
@@ -50,7 +52,20 @@ profiles described in `benchmarks/performance/README.md` are additional
 operator prerequisites; dependency installation is outside the measured
 campaign.
 
-Run the complete matrix, one exact row, or resume an interrupted run:
+Reference precision is resolved from the suite row's explicit
+`baseline.precision`, then the selected testcase's `reference_precision`, then
+the model manifest's top-level `reference_precision`, and finally the resolved
+TRTMC model precision. The chosen value is passed to the reference runner,
+recorded as `resolved_settings.baseline_precision` in `results.json`, and
+checked against the runner result. A mismatch is a contract mismatch and does
+not receive a performance light.
+
+Diffusers media references also reject non-finite numeric pixels before image
+conversion can hide the invalid values. Such output is a reference execution
+failure, not a completed performance comparison.
+
+Run the complete matrix, one exact row, resume an interrupted run, or
+regenerate an existing report with task-level preparation evidence:
 
 ```bash
 python3 tools/perf_matrix.py run \
@@ -60,14 +75,28 @@ python3 tools/perf_matrix.py run \
   benchmarks/performance/release.yaml \
   --environment benchmarks/performance/environments/gb300.yaml \
   --entry gpt2.generate
-python3 tools/perf_matrix.py resume artifacts/perf/<run-id>
+python3 tools/perf_matrix.py resume artifacts/perf/example-run
+python3 tools/perf_matrix.py report artifacts/perf/example-run \
+  --preparation-receipt artifacts/perf/bundle-preparation.json
 ```
 
 Every new run writes `results.json` and `report.html` below the configured
 results root. The JSON records resolved configuration, provenance, raw
 samples, exact leaf commands, timing policies, and bundle preparation; the
-HTML shows candidate/reference p50 values and the traffic light. Green,
-yellow, and red are completed comparison results and therefore return zero.
+HTML shows candidate/reference p50 values and the traffic light. The report's
+self-contained controls can filter by text, traffic light, or bundle
+preparation status without a server.
+
+A separately run bundle-preparation step can be attached with the `report`
+command shown above. The receipt must use schema
+`trtmc.perf-bundle-preparation/v1`, scope `test_task`, the run's exact Git
+commit, and the exact model and bundle paths consumed by that campaign.
+Revision mismatches, duplicate records, invalid build times, and unused bundle
+paths are rejected. A matching preparation receipt takes precedence over a
+later cache hit, so a task-level rebuild remains visible as `Built`.
+
+Green, yellow, and red are completed comparison results and therefore return
+zero.
 Configuration errors, command failures, incomplete measurements, and timing or
 output-contract mismatches return nonzero and do not receive a performance
 light.
@@ -225,28 +254,17 @@ Additional resolver and execution controls are:
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  CLI[trtmc-bench run] --> Catalog[MODEL.toml + manifest]
-  Catalog --> Adapter[Task adapter]
-  Adapter --> Case[Resolved operation + request]
-  Case --> Bundle{Bundle available?}
-  Bundle -->|yes| Service[Python run service]
-  Bundle -->|no| Build[Existing trtmc build]
-  Build --> Cache[Platform-aware bundle cache]
-  Cache --> Service
-  Service --> Worker[C++ measurement worker]
-  Worker --> Load["trtmc::load"]
-  Load -->|native bundle| Native["runtime_strategy<br/>model DSO + backend DSO"]
-  Load -->|optimized_runtime.json| Optimized["embedded implementation DSO<br/>and artifacts"]
-  Native --> API[TRTMC public IPipeline]
-  Optimized --> API
-  API --> Runner[Public operation runner]
-  Worker --> Raw[Raw observations]
-  Raw --> Metrics[Task-aware metrics]
-  Metrics --> Report[JSON + HTML]
-  Service -. low-rate, optional .-> Telemetry[nvidia-smi telemetry]
-```
+<Diagram
+  src="/img/diagrams/reference/benchmark-orchestration.svg"
+  alt="Benchmark orchestration from catalog resolution through an existing bundle path or managed build to the Python service and C++ worker"
+  caption="Python resolves one concrete case and bundle path, building a managed-cache entry only when needed, then starts the native worker; explicit bundle paths are not shown as compatibility-verified."
+/>
+
+<Diagram
+  src="/img/diagrams/reference/benchmark-measurement-reporting.svg"
+  alt="Benchmark measurement boundary where native and optimized bundles converge on IPipeline before raw observations, metrics, and reports"
+  caption="Both bundle formats load through trtmc::load and converge on the public IPipeline operation; the worker records raw timing while Python computes task-aware metrics and reports."
+/>
 
 Python owns configuration, matrix expansion, orchestration, metrics, and
 reporting. The native worker owns the timed loop and calls the same public C++

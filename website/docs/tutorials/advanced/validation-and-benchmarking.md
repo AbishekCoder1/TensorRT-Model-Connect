@@ -2,19 +2,26 @@
 title: Advanced Tutorial - Validation and Benchmarking
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 Validation should prove that the runtime under test matches an appropriate oracle. Benchmarking should state exactly what is measured.
 
-```mermaid
-flowchart TB
-  Bundle["Bundle under test"] --> Runtime["TRTMC runtime"]
-  Input["Canonical input"] --> Runtime
-  Input --> Oracle["Reference oracle"]
-  Runtime --> Output["TRTMC output"]
-  Oracle --> Reference["Reference output"]
-  Output --> Compare["Comparator and thresholds"]
-  Reference --> Compare
-  Compare --> Report["Pass/fail + artifacts"]
+Select the CLI before running a standalone bundle command:
+
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
 ```
+
+The repository E2E and unit-test sections later on require a source checkout
+and its configured `./build/trtmc`; they state that path explicitly.
+
+<Diagram
+  src="/img/diagrams/tutorials/advanced/validation-contract.svg"
+  alt="Validation contract sending the same canonical input to a tested bundle and declared reference oracle before task-specific comparison and reporting"
+  caption="The manifest defines the input, oracle, comparator, and thresholds; a passing report must retain exact artifact and revision provenance."
+/>
 
 For release model-profile comparisons, GB300 prerequisites, traffic-light
 semantics, and retained performance evidence, use the
@@ -37,12 +44,17 @@ For this native case, the model manifest supplies the family, exact
 reference backend, and test contract.
 
 An optimized-runtime case uses a different selection chain:
-`IMPLEMENTATION.toml`, an exact qualified profile under `profiles/*.toml`, and
-a matching `QUALIFICATION.*.toml` producer descriptor. The resulting bundle
-contains `optimized_runtime.json`, implementation metadata, integrity-bound
-artifacts, and an embedded `libtrtmc_impl_*.so`. Its public
+`IMPLEMENTATION.toml`, an exact profile under `profiles/*.toml`, its
+semantic-source digest, and Source-side adapter/runtime-contract tests. The
+resulting bundle contains `optimized_runtime.json`, implementation metadata,
+integrity-bound artifacts, and an embedded `libtrtmc_impl_*.so`. Its public
 `runtime_strategy` may be empty because it bypasses the native strategy,
 model-DSO, and backend-DSO selection path.
+
+The profile digest is not target-hardware proof. The public Source tree does
+not publish the former qualification descriptor, runner, or retained target
+artifacts; record separately retained external evidence whenever compatibility,
+parity, or performance is claimed.
 
 Read the manifest before debugging a failure. It tells you what the test is trying to prove.
 
@@ -87,7 +99,7 @@ Use tool tests when changing diff tools, report generation, performance comparis
 ## Runtime microbenchmark
 
 ```bash
-./build/trtmc run /tmp/qwen3.trtfb \
+$TRTMC run Qwen3-0.6B.trtfb \
   --prompt "Benchmark prompt" \
   --max-new-tokens 64 \
   --benchmark 20 \
@@ -98,18 +110,18 @@ Report:
 
 - GPU, driver, CUDA, and TensorRT version.
 - For a native bundle: exact `runtime_strategy`, model DSO, and backend DSO.
-- For an optimized bundle: implementation ID, profile ID,
-  `QUALIFICATION.*.toml` producer, and embedded implementation DSO.
+- For an optimized bundle: implementation ID, profile ID, profile
+  semantic-source digest, embedded implementation DSO, and the separately
+  retained external qualification evidence being cited.
 - Bundle path and build command.
 - Prompt length and generated token count.
 - Whether the number is wall-clock CLI latency, per-token decode time, or raw engine enqueue time.
 
-```mermaid
-flowchart LR
-  Wall["Wall-clock CLI time"] --> Includes["argument parsing, load, tokenize, host work, engine, postprocess"]
-  Decode["Per-token decode time"] --> Loop["steady-state token loop"]
-  Enqueue["Raw engine enqueue time"] --> Engine["TensorRT execution only"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/advanced/benchmark-timing-scopes.svg"
+  alt="Comparison of wall-clock command latency, provider-reported per-token decode latency, and raw TensorRT engine enqueue latency"
+  caption="Each metric covers a different boundary, so reports must name the scope and must not compare the three values as equivalents."
+/>
 
 These numbers answer different questions. Do not compare them as if they measure the same thing.
 
@@ -121,7 +133,7 @@ pipeline populates them, use the same benchmark command with a fixed prompt,
 warmup count, iteration count, and decoding flags:
 
 ```bash
-./build/trtmc run /tmp/qwen3.trtfb \
+$TRTMC run Qwen3-0.6B.trtfb \
   --prompt "Benchmark prompt" \
   --max-new-tokens 64 \
   --greedy \
@@ -136,11 +148,11 @@ may return zero. The qualified Qwen Edge-LLM adapter does exactly that, so its
 zero prefill/decode values and any throughput derived from them are
 unavailable—not zero-latency results.
 
-When phase timing is unavailable, use a benchmark worker or qualification
-runner that synchronizes the device and measures wall time around the public
+When phase timing is unavailable, use a controlled target-environment
+benchmark that synchronizes the device and measures wall time around the public
 pipeline call. Record that result as public-call wall latency. Use a
-model-specific profiler for engine-only timing, and identify the exact tool and
-measurement boundary in the report.
+model-specific profiler for engine-only timing, and identify the exact tool,
+revision, artifact location, and measurement boundary in the report.
 
 ## Validation taxonomy
 
@@ -166,7 +178,8 @@ Execution path: native | optimized
 Runtime strategy:
 Implementation ID:
 Profile ID:
-Qualification descriptor:
+Profile semantic-source digest:
+External qualification evidence:
 Build command:
 Run command:
 GPU:

@@ -2,29 +2,40 @@
 title: Intermediate Tutorial - Multimodal and Speech
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 This tutorial exercises non-text modalities that still use the same bundle/runtime contract.
+
+Select the CLI before running an example:
+
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
+```
+
+Commands that use `tests/...` sample assets require a repository checkout and
+must run from its root; the CLI itself may still come from the installed wheel.
 
 By this point you should recognize the common pattern:
 
-```mermaid
-flowchart LR
-  Input["Modality input"] --> Pre["Preprocess"]
-  Pre --> Engines["One or more TensorRT engines"]
-  Engines --> Post["Postprocess"]
-  Post --> Result["Typed result"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/task-pipeline-patterns.svg"
+  alt="Shared task pipeline from typed input through task-owned preprocessing, TensorRT engines, postprocessing, and a typed result"
+  caption="The public pipeline shape stays stable while each model owner supplies the preprocessing, engine topology, processing loop, and typed result for its task."
+/>
 
 The difference between text, vision, and speech is mostly the preprocessing, component layout, and postprocessing. The bundle and plugin registry model stays the same.
 
 ## Vision-language
 
 ```bash
-./build/trtmc build Qwen/Qwen2.5-VL-3B-Instruct \
+$TRTMC build Qwen/Qwen2.5-VL-3B-Instruct \
   -o /tmp/qwen25vl.trtfb \
   --precision fp16 \
   --max-cache-length 384
 
-./build/trtmc run /tmp/qwen25vl.trtfb \
+$TRTMC run /tmp/qwen25vl.trtfb \
   --prompt "Describe this image in one sentence." \
   --image tests/assets/test_image.jpg \
   --max-new-tokens 48
@@ -35,11 +46,43 @@ runtime plugin creates `QwenVlPipeline`, preprocesses the image, injects image
 embeddings into the prompt flow, and decodes text. InternVL uses its own
 `InternVlPipeline` in a separate model DSO.
 
+On GitHub `main` commit `e6b798cdb145c38caf1ede8eda7f5ce83f894138`,
+Qwen2.5-VL opts its embed-input decoder into separate `prefill_engine_plan`
+and `engine_plan` sections; the runtime loads both and uses the matching
+prefill/decode module. That split applies to the default single-GPU,
+fixed-cache, non-TriAttention request. Qwen3-VL's deepstack decoder,
+tensor-parallel builds, dynamic-KV/TriAttention builds, and an explicit
+`dual_profile` request use their supported fallback layouts. Inspect
+`config.json` and the section list instead of assuming every Qwen-VL
+generation uses the same engine shape.
+
+The split decoder can opt into decomposed decode attention with
+`--set qwen_vl_decoder.decode_attention=decomposed`. The same namespace exposes
+`max_prefill_length`, `opt_prefill_length`, and `builder_workspace_gib` as
+build-time profile controls. Decomposed attention is rejected outside an active
+split-decode build. For dynamic Qwen2.5-VL images, the runtime derives the
+merged mRoPE grid from the preprocessed image grid instead of assuming the
+fixed-profile dimensions.
+
+The Qwen3-VL decoder builder also accepts BF16. In that mode the decoder and
+KV cache use BF16 while the separate vision tower stays FP32:
+
+```bash
+$TRTMC build Qwen/Qwen3-VL-2B-Instruct \
+  -o /tmp/qwen3vl-bf16.trtfb \
+  --precision bf16 \
+  --max-cache-length 384
+```
+
+This is an implementation contract, not a qualification claim: the checked-in
+`qwen3-vl-2b` E2E manifest still selects FP16. Retain target-hardware parity
+evidence before presenting a BF16 build as qualified.
+
 Qwen2.5-VL can instead build a dynamic vision profile that applies Qwen
 smart-resize at runtime:
 
 ```bash
-./build/trtmc build Qwen/Qwen2.5-VL-3B-Instruct \
+$TRTMC build Qwen/Qwen2.5-VL-3B-Instruct \
   -o /tmp/qwen25vl-dynamic.trtfb \
   --precision fp16 \
   --max-cache-length 384 \
@@ -51,18 +94,11 @@ the model's patch/merge factor, and uses the checkpoint's packaged pixel limits
 when available. Qwen3-VL does not currently support the dynamic profile. Use
 the fixed-profile command above for that family.
 
-```mermaid
-flowchart TD
-  Prompt["Text prompt"] --> Tok["Tokenizer"]
-  Image["Image pixels"] --> Preprocess["Image preprocessor"]
-  Preprocess --> Vision["Vision engine"]
-  Vision --> Embeds["Image embeddings"]
-  Tok --> Merge["Prompt + image token embedding merge"]
-  Embeds --> Merge
-  Merge --> Decoder["Text decoder engine"]
-  Decoder --> Sampler["Sampler"]
-  Sampler --> Text["TextResult"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/vision-language-pipeline.svg"
+  alt="Vision-language pipeline merging tokenized text and image embeddings before following the decoder layout recorded in the bundle"
+  caption="Text and vision branches merge before generation; inspect the bundle to determine whether the decoder uses a combined fallback layout or the qualified split prefill and decode plans."
+/>
 
 Key ideas:
 
@@ -76,11 +112,11 @@ Key ideas:
 ## Speech-to-text
 
 ```bash
-./build/trtmc build openai/whisper-large-v3-turbo \
+$TRTMC build openai/whisper-large-v3-turbo \
   -o /tmp/whisper.trtfb \
   --precision fp16
 
-./build/trtmc transcribe /tmp/whisper.trtfb \
+$TRTMC transcribe /tmp/whisper.trtfb \
   --audio tests/e2e/models/whisper/data/Recording.wav \
   --max-new-tokens 224
 ```
@@ -93,22 +129,23 @@ the separate `canary_speech_to_text` strategy for the same broad task.
 For local Canary checkpoints, multilingual prompts, beam search, batching, and
 segment controls, continue with [Configurable Canary Decoding](canary-decoding.md).
 
-```mermaid
-flowchart LR
-  Audio["PCM audio"] --> Resample["Resample if needed"]
-  Resample --> Mel["Mel feature extraction"]
-  Mel --> Encoder["Speech encoder"]
-  Encoder --> Decoder["Text decoder"]
-  Decoder --> Tok["Token decode"]
-  Tok --> Text["Transcript"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/speech-to-text-pipeline.svg"
+  alt="Speech-to-text pipeline converting PCM audio into mel features before encoder, decoder, and transcript generation"
+  caption="Speech runtimes prepare feature frames before model execution; raw waveform is not passed directly to the text decoder."
+/>
 
 The important beginner mistake is to treat audio as if it were text. Speech models usually do not consume raw waveform directly inside the decoder. They first convert audio into feature frames.
 
 ## Streaming ASR
 
 ```bash
-./build/trtmc transcribe /tmp/nemotron-rnnt.trtfb \
+$TRTMC build nvidia/nemotron-speech-streaming-en-0.6b \
+  -o /tmp/nemotron-rnnt.trtfb \
+  --precision fp16 \
+  --max-cache-length 128
+
+$TRTMC transcribe /tmp/nemotron-rnnt.trtfb \
   --audio tests/e2e/models/whisper/data/Recording.wav \
   --stream \
   --chunk-ms 160 \
@@ -117,26 +154,12 @@ The important beginner mistake is to treat audio as if it were text. Speech mode
 
 Cache-aware streaming uses `TranscriptionStreamConfig` in `include/trtmc/pipeline.h`. Right contexts `{0, 1, 6, 13}` correspond to the supported FastConformer-RNNT schedules documented in code comments.
 
-```mermaid
-sequenceDiagram
-  participant App
-  participant Stream as ITranscriptionStream
-  participant Feature as Feature cache
-  participant Encoder as Streaming encoder/RNNT path
-  participant Text as Partial transcript
-
-  App->>Stream: accept_audio(chunk 0)
-  Stream->>Feature: update cached features
-  Feature->>Encoder: chunk features + right context
-  Encoder-->>Text: partial hypothesis
-  Text-->>App: TranscriptionStreamResult
-  App->>Stream: accept_audio(chunk 1)
-  Stream->>Feature: reuse overlap/cache
-  Feature->>Encoder: next chunk
-  Encoder-->>Text: updated hypothesis
-  App->>Stream: finish()
-  Text-->>App: final transcript
-```
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/streaming-asr-sequence.svg"
+  alt="Streaming ASR sequence showing early chunks buffered until the schedule is ready, a later partial result, and finish processing all pending features"
+  caption="accept_audio() always returns the current TranscriptionStreamResult, which may still be empty before enough features are ready. finish() runs process_ready(true) so pending features and remaining RNNT frames are processed before the final result."
+  sequence
+/>
 
 Streaming adds two concerns that offline transcription does not have:
 
@@ -150,21 +173,22 @@ Streaming adds two concerns that offline transcription does not have:
 ## Text-to-audio
 
 ```bash
-./build/trtmc generate-audio /tmp/magpie.trtfb \
+$TRTMC build nvidia/magpie_tts_multilingual_357m \
+  -o /tmp/magpie.trtfb \
+  --precision fp16
+
+$TRTMC generate-audio /tmp/magpie.trtfb \
   --prompt "A calm narration for a product demo." \
   --output /tmp/out.wav
 ```
 
 Magpie supports chunked audio callbacks in the C++ API and `trtmc serve-audio` in the CLI.
 
-```mermaid
-flowchart LR
-  Prompt["Text prompt"] --> TextTok["Text or phoneme tokens"]
-  TextTok --> Acoustic["Acoustic/token model"]
-  Acoustic --> Codec["Codec or vocoder stage"]
-  Codec --> PCM["PCM samples"]
-  PCM --> Wav["WAV file or streaming callback"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/text-to-audio-pipeline.svg"
+  alt="Text-to-audio pipeline from prompt and phoneme tokens through acoustic and codec stages to PCM output"
+  caption="The task returns audio samples as an AudioResult, a WAV file, or streaming chunks rather than returning generated text."
+/>
 
 Text-to-audio is a good example of why `IPipeline` has task-specific methods. The output is not token IDs or a string; it is `AudioResult` or chunks delivered through `generate_audio_streaming`.
 

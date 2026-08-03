@@ -16,7 +16,7 @@ physical names usually match, but their link is the exact
 `runtime_strategy`, not filename equality: current builder/E2E owners
 `magpie_tts` and `wan_t2v` map to runtime owners `magpie` and `wan`,
 respectively. At this revision, all three trees contain 78 descriptors. The E2E
-descriptors declare 204 JSON manifests; runtime descriptors declare 79 unique
+descriptors declare 205 JSON manifests; runtime descriptors declare 79 unique
 strategy keys because one runtime owner exposes two strategies. Treat these
 numbers as a checked snapshot, not a constant: the descriptor files are the
 source of truth.
@@ -71,15 +71,28 @@ contract and is normally family-qualified (for example,
 
 ## Verify the layout
 
-Run the repository-owned consistency checks:
+Run the repository-owned descriptor and focused contract checks:
 
 ```bash
-PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
+PYTHONPATH=python:. python3 tools/model_ci.py validate
+PYTHONPATH=python:. python3 tools/test_impact.py --validate
 PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_model_plugin_encapsulation_static.py \
   tests/builder/test_manifest_validation.py \
   tests/tools/test_runtime_strategy_matrix_checker.py -q
 ```
+
+The broader runtime-strategy matrix command is a drift diagnostic:
+
+```bash
+PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
+```
+
+At GitHub `main` commit
+`e6b798cdb145c38caf1ede8eda7f5ce83f894138`, it exits nonzero because
+`diffusion_sana_wm` is absent from the matrix and five speech/omni task entries
+have no discoverable runner class. Report that known baseline separately from
+new changes; do not present the command as a passing consistency check.
 
 Use `tools/test_impact.py` for change selection. Do not infer ownership from an
 old document count or from a removed shared runtime directory.

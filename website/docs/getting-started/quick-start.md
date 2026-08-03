@@ -1,10 +1,15 @@
 ---
-title: Quick Start
+title: Your First NLP Inference
 ---
 
-This quick start builds one text-generation bundle, inspects it, and runs it through the C++ runtime.
+import Diagram from '@site/src/components/Diagram';
 
-Complete [Installation](installation.md) first. If you installed a release
+This is the single first-inference path for the site. It builds one
+text-generation bundle, inspects it, and runs it through the native C++
+runtime.
+
+Complete [Prerequisites and Environment](environment-and-repro.md), then
+[Installation](installation.md), before starting. If you installed a release
 wheel, the command is `trtmc`. If you built from source in the dev container,
 the command is `./build/trtmc`.
 
@@ -85,7 +90,12 @@ $TRTMC run Qwen3-0.6B.trtfb \
   --greedy
 ```
 
-`--greedy` makes the smoke test deterministic: each step chooses the highest-score token instead of sampling randomly. For Qwen3-0.6B, the runtime should log `Using native BPE tokenizer`; no `--hf-python` path is needed for this text-generation smoke test.
+`--greedy` makes token selection deterministic for a fixed bundle and runtime
+environment: each step chooses the highest-score token instead of sampling
+randomly. It does not guarantee identical output after changing the checkpoint,
+engine build, TensorRT/CUDA cohort, hardware/numeric path, or runtime code. For
+Qwen3-0.6B, the runtime should log `Using native BPE tokenizer`; no
+`--hf-python` path is needed for this text-generation smoke test.
 
 Add `--hf-python /opt/venv/bin/python` only when a runtime strategy still needs helper Python code, such as speech-to-speech prompt handling or a legacy fallback path.
 
@@ -93,15 +103,11 @@ Add `--hf-python /opt/venv/bin/python` only when a runtime strategy still needs 
 
 If generation succeeds, you have proven this path:
 
-```mermaid
-flowchart LR
-  Build["trtmc build"] --> Bundle["Qwen3-0.6B.trtfb"]
-  Bundle --> Inspect["inspect metadata"]
-  Bundle --> Load["trtmc::load"]
-  Load --> Strategy["qwen_decoder_kv_cache"]
-  Strategy --> Generate["IPipeline::generate"]
-  Generate --> Text["TextResult"]
-```
+<Diagram
+  src="/img/diagrams/getting-started/qwen3-first-inference.svg"
+  alt="Qwen3 first-inference path from trtmc build through bundle inspection and text generation"
+  caption="A successful first run proves bundle construction, inspection, native strategy dispatch, and deterministic generation."
+/>
 
 If generation fails, classify the failure before changing code:
 
@@ -111,9 +117,12 @@ If generation fails, classify the failure before changing code:
 | Build fails inside TensorRT | Unsupported graph, shape/profile issue, or TensorRT environment issue. |
 | Inspection fails | Bundle was not written correctly, the path is wrong, or the runtime library environment is incomplete. |
 | Runtime says no plugin registered | The strategy has no manifest owner, or its owning model DSO is missing/unloadable from the model-plugin search path. |
-| Output differs between runs | Sampling is enabled. Use `--greedy` or a fixed `--seed` for smoke tests. |
+| Output differs between runs | First check sampling and use `--greedy` or a fixed `--seed`; if it persists, compare the exact bundle, checkpoint revision, runtime/software cohort, hardware path, and logs. |
 
-## Jetson Thor: Wan2.2 720p In Two Commands
+## Optional Advanced Example: Jetson Thor Wan2.2 720p
+
+This example is not required for the newcomer milestone above. Continue to the
+Learning Path if your goal is only to complete the first NLP inference.
 
 Use a Model Connect wheel built against the official TensorRT 11.1.0.106
 release for CUDA 13.3. Its pinned public TensorRT dependency is installed
@@ -174,7 +183,10 @@ to use the portable BF16 path.
 
 ## What To Read Next
 
-- [Build and Run](build-and-run.md) covers common tasks for text, vision-language, audio, diffusion, segmentation, and time-series bundles.
+- [Learning Path](../learning-path.md) continues from this bundle and orders
+  the tutorials from beginner concepts through advanced validation and
+  extension work.
+- [Model Recipes](build-and-run.md) is an optional index for other modalities.
 - [Model Support](model-support.md) explains the current supported model surface from the manifest set.
 - [Inspect Bundles](../tutorials/beginner/inspect-bundles.md) teaches the artifact-debugging workflow.
 - [CLI Reference](../api/cli-reference.md) lists the build and runtime command surfaces.

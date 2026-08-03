@@ -2,35 +2,43 @@
 title: Intermediate Tutorial - Diffusion, Vision, and Time-Series Pipelines
 ---
 
+import Diagram from '@site/src/components/Diagram';
+
 This tutorial covers pipelines that do not return generated text.
 
 These pipelines still use `IPipeline`, but their task methods and internal loops differ.
 
-The commands below assume that you completed
-[Installation](../../getting-started/installation.md), built the source tree,
-and are running from the repository root in a TensorRT/CUDA environment with a
-supported NVIDIA GPU. Model builds download checkpoint data unless it is
-already cached, so they also need network access or a populated local cache.
+Select the CLI before running an example:
 
-```mermaid
-flowchart LR
-  TextTask["Text generation"] --> TokenLoop["token loop"]
-  DiffTask["Diffusion"] --> DenoiseLoop["denoising loop"]
-  SegmentTask["Segmentation/detection"] --> VisionPost["vision postprocess"]
-  SeriesTask["Time-series forecasting"] --> Forecast["context to quantile forecast"]
+```bash
+export TRTMC=trtmc
+# Source build inside the development container:
+# export TRTMC=./build/trtmc
 ```
+
+The commands below assume that you completed
+[Installation](../../getting-started/installation.md) and are in a
+TensorRT/CUDA environment with a supported NVIDIA GPU. Model builds download
+checkpoint data unless it is already cached, so they also need network access
+or a populated local cache.
+
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/task-pipeline-patterns.svg"
+  alt="Shared task pipeline showing stable typed input and result boundaries around task-specific TensorRT execution patterns"
+  caption="Text, diffusion, audio, vision, and forecasting use the same public pipeline pattern, but the work inside the model-owned execution stage is task specific."
+/>
 
 ## FLUX image generation
 
 ```bash
-./build/trtmc build black-forest-labs/FLUX.2-dev \
+$TRTMC build black-forest-labs/FLUX.2-dev \
   -o /tmp/flux2.trtfb \
   --precision fp16 \
   --image-height 1024 \
   --image-width 1024 \
   --num-inference-steps 28
 
-./build/trtmc generate-video /tmp/flux2.trtfb \
+$TRTMC generate-video /tmp/flux2.trtfb \
   --prompt "A photo of a cat sitting on a windowsill at sunset" \
   --output /tmp/flux2-frames \
   --num-steps 28
@@ -38,18 +46,11 @@ flowchart LR
 
 The command is named `generate-video` because the C++ API returns an `ImageResult` with `num_frames`; single-frame image generation is the same surface as video generation.
 
-```mermaid
-flowchart TD
-  Prompt["Prompt text"] --> TextEnc["Text encoder"]
-  TextEnc --> Conditioning["Conditioning embeddings"]
-  Noise["Initial latent noise"] --> Denoiser["Denoiser engine"]
-  Conditioning --> Denoiser
-  Denoiser --> Scheduler["Scheduler step"]
-  Scheduler --> Denoiser
-  Scheduler --> Latents["Final latents"]
-  Latents --> VAE["VAE decoder"]
-  VAE --> Frames["ImageResult pixels/frames"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/flux-denoising-pipeline.svg"
+  alt="FLUX diffusion pipeline combining prompt conditioning and latent noise in a denoiser and scheduler loop before VAE decoding"
+  caption="Diffusion repeatedly updates latent tensors for a configured number of steps, then the VAE decoder converts the final latents into ImageResult pixels or frames."
+/>
 
 Diffusion inference is iterative like text generation, but the loop is over denoising steps rather than generated tokens.
 
@@ -60,17 +61,65 @@ Diffusion inference is iterative like text generation, but the loop is over deno
 | Samples from logits. | Decodes final latents into pixels. |
 | Stops at EOS or token budget. | Stops after configured denoising steps. |
 
+### Advanced FLUX context parallelism
+
+The build CLI also exposes `--context-parallel-size` (or `--cp-size`) for
+families that implement context parallelism. The current checked multi-device
+contract is `tests/e2e/models/flux/manifests/flux-schnell-l0-cp4.json`:
+it uses FLUX.1 Schnell, four ranks, `mpirun`, NCCL rendezvous, and four GPUs.
+The FLUX builder stores one shared rank-dynamic Ulysses denoiser plan while
+replicating weights and sharding sequence activations. Tensor-parallel and
+context-parallel build options cannot be combined.
+
+Treat the manifest and its retained E2E result as the runnable qualification
+contract. Parser acceptance or a successful single-rank build does not prove
+the four-rank runtime path.
+
+## PixArt-Sigma image generation
+
+This recipe mirrors the repository's
+`tests/e2e/models/pixart/manifests/pixart-sigma-1024-l0.json` contract: the
+same checkpoint, FP16 precision, FP32 text-encoder selector, 256-token cache,
+512-by-512 spatial profile, prompt, and 20 denoising steps.
+
+```bash
+$TRTMC build PixArt-alpha/PixArt-Sigma-XL-2-1024-MS \
+  -o /tmp/pixart-sigma-512.trtfb \
+  --precision fp16 \
+  --fp32-layers 0 \
+  --max-cache-length 256 \
+  --image-height 512 \
+  --image-width 512 \
+  --num-inference-steps 20
+
+$TRTMC generate-video /tmp/pixart-sigma-512.trtfb \
+  --prompt "A photo of a cat sitting on a windowsill at sunset" \
+  --output /tmp/pixart-sigma-512-frames \
+  --num-steps 20
+```
+
+Success creates a single image frame in
+`/tmp/pixart-sigma-512-frames`. The bundle should inspect as family `pixart`
+with runtime strategy `diffusion_pixart`. The E2E manifest classifies that
+runtime under the `diffusion_media_generation` task strategy; the regular
+bundle inspector does not print the E2E task-strategy field.
+
+This direct smoke test uses the L0 manifest's public inputs, but it is not by
+itself the repository's parity proof. The E2E harness controls the initial
+latents and runs its configured framework comparison so both implementations
+start from equivalent data.
+
 ## Wan video generation
 
 ```bash
-./build/trtmc build Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
+$TRTMC build Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
   -o /tmp/wan21.trtfb \
   --precision fp16 \
   --video-height 480 \
   --video-width 832 \
   --video-num-frames 81
 
-./build/trtmc generate-video /tmp/wan21.trtfb \
+$TRTMC generate-video /tmp/wan21.trtfb \
   --prompt "A cinematic shot of clouds moving over mountains" \
   --output /tmp/wan21-frames
 ```
@@ -78,6 +127,20 @@ Diffusion inference is iterative like text generation, but the loop is over deno
 Diffusion bundles often have multiple engine sections: text encoder, denoiser, and VAE decoder.
 
 Video generation adds temporal dimensions. The output is still `ImageResult`, but `num_frames` is greater than one and the latent tensor includes time.
+
+## Advanced recipe: Jetson Thor Wan2.2 720p
+
+This is an advanced target-specific example, not an environment smoke test.
+Use the maintained
+[Jetson Thor Wan2.2 example](../../getting-started/quick-start.md#optional-advanced-example-jetson-thor-wan22-720p)
+for the current official TensorRT 11.1.0.106 install, build, and generation
+commands. Keeping one command source prevents this tutorial from drifting from
+the packaged profile.
+
+The public source tree does not retain the earlier internal-SDK performance
+receipt as qualification for the official TensorRT release path. A latency,
+quality, or release-readiness claim requires a fresh target-hardware run with
+the exact bundle, software cohort, prompt, seed, and retained artifacts.
 
 ## Chronos-Bolt time-series forecasting
 
@@ -91,7 +154,7 @@ name, and input values.
 ### Build the official tiny model
 
 ```bash
-./build/trtmc build amazon/chronos-bolt-tiny \
+$TRTMC build amazon/chronos-bolt-tiny \
   -o /tmp/chronos-bolt-tiny-official.trtfb \
   --precision fp32
 ```
@@ -112,7 +175,7 @@ pre-populated profile/cache. A successful build exits with status 0 and creates
 ### Forecast from the manifest input
 
 ```bash
-./build/trtmc solve /tmp/chronos-bolt-tiny-official.trtfb \
+$TRTMC solve /tmp/chronos-bolt-tiny-official.trtfb \
   --branch-input "100.1,100.15,100.18,100.22,100.21,100.27,100.31,100.35,100.37,100.4,100.44,100.5"
 ```
 
@@ -138,13 +201,11 @@ NVIDIA GPU, TensorRT, CUDA, and the model runtime DSO.
 
 Segmentation and detection are covered by feature and E2E docs, but the runtime shape is similar to other vision pipelines:
 
-```mermaid
-flowchart LR
-  Pixels["Image pixels"] --> Preprocess["Resize/normalize/layout"]
-  Preprocess --> Engine["Vision engine"]
-  Engine --> Post["Decode masks or boxes"]
-  Post --> Result["SegmentResult or detection JSON"]
-```
+<Diagram
+  src="/img/diagrams/tutorials/intermediate/segmentation-detection-pipeline.svg"
+  alt="Vision task pipeline from image preprocessing through engine execution and model-owned mask or box decoding"
+  caption="This is the shared API shape. Current checked-in model qualification covers the named segmentation owners below, not a model-owned object-detection strategy."
+/>
 
 Current segmentation owners use qualified strategies: SegFormer emits
 `segformer_segmentation`, while SAM and SAM3 emit

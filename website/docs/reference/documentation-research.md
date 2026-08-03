@@ -7,7 +7,7 @@ The site structure follows patterns from current public documentation:
 | Project | Pattern used here |
 | --- | --- |
 | [Docusaurus](https://docusaurus.io/docs/docs-introduction) | Docs-only mode with hierarchical pages and sidebar-driven navigation. |
-| [Docusaurus Mermaid diagrams](https://docusaurus.io/docs/3.8.1/markdown-features/diagrams) | Versioned architecture diagrams as Mermaid code blocks rendered by `@docusaurus/theme-mermaid`. |
+| [Viz.js](https://viz-js.com/) and [Graphviz DOT](https://graphviz.org/documentation/) | Readable checked-in SVG diagrams generated deterministically from reviewable DOT or constrained sequence sources. |
 | [Diataxis](https://diataxis.fr/) | Separate learning-oriented tutorials, goal-oriented guides, information-oriented reference, and understanding-oriented explanation. |
 | [Google documentation best practices](https://google.github.io/styleguide/docguide/best_practices.html) | Keep docs fresh with code, prefer simple direct language, and put the simplest use case first. |
 | [Universal Design for Learning](https://www.cast.org/resources/about-universal-design-for-learning/) | Present concepts in multiple forms: motivation, visual representation, and hands-on proof points. |
@@ -23,15 +23,22 @@ Applied rules:
 - The first screen is documentation, not marketing.
 - Quick start is short and runnable.
 - The home page now acts as a course entry point: it explains the promise, shows a visual map, and routes by learner intent.
-- Tutorials are grouped by beginner, intermediate, and advanced workflows.
+- Learning and tutorials share one beginner-to-advanced path with optional
+  modality and contributor branches.
 - The learning path includes outcomes and proof points, not only reading links.
 - Learning pages now use course-handout units: required reading, required tasks, progress checks, common traps, learning-log prompts, further reading, and optional exercises.
-- Reference pages are separated from conceptual architecture pages.
+- API reference is separated from conceptual architecture pages.
 - Extension docs are task-oriented and name exact files to edit.
-- Architecture and unit design pages use diagrams first, then source-level tables.
-- Selected high-traffic surfaces use standalone SVG illustrations. These are
-  maintained assets, not automatic fallbacks for Mermaid blocks; Mermaid-only
-  diagrams depend on the client-side renderer.
+- Architecture and unit design share one section and use canonical block or
+  sequence diagrams before source-level tables.
+- Current feature contracts and historical feature context share a categorized
+  archive that is intentionally outside the newcomer path.
+- The former Wiki Archive and Operations menus are not active navigation
+  areas; their useful content is integrated into maintained sections and old
+  routes redirect for compatibility.
+- Reader-facing diagrams use checked-in SVG illustrations generated from
+  reviewable DOT or constrained sequence sources. The site does not depend on
+  a client-side diagram renderer.
 - Beginner material teaches inference vocabulary before asking users to debug TensorRT runtime behavior.
 - The visual style favors technical documentation over marketing: square corners, light borders, neutral surfaces, concise tables, and NVIDIA-green accents.
 - Source-derived counts and strategy names are taken from the current checkout, not copied from older wiki text.
