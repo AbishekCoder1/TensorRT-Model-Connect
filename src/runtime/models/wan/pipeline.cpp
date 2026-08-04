@@ -17,6 +17,7 @@
 #include "runtime/models/wan/wan_matmul_policy.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -99,6 +100,26 @@ struct DDIMState {
         }
     }
 };
+
+std::vector<float> initialize_wan_step_timesteps(const WanDiffusionConfig& config,
+                                                 const diffusion::WanGenerationPlan& plan,
+                                                 DDIMState& ddim_scheduler,
+                                                 UniPCFlowState& unipc_scheduler,
+                                                 FlowMatchEulerState& fm_scheduler) {
+    if (plan.use_ddim) {
+        ddim_scheduler.num_train_timesteps = 1000;
+        ddim_scheduler.set_timesteps(plan.num_inference_steps);
+        return ddim_scheduler.timesteps;
+    }
+
+    if (plan.use_unipc) {
+        unipc_scheduler = diffusion::make_wan_unipc_scheduler(config, plan);
+        return unipc_scheduler.timesteps;
+    }
+
+    fm_scheduler = diffusion::make_wan_flow_match_scheduler(plan);
+    return fm_scheduler.timesteps;
+}
 
 // ---------------------------------------------------------------------------
 // CPU math helpers (standalone — replaces DiffusionBackendBase methods)
@@ -557,10 +578,10 @@ WanPipeline::WanPipeline(std::unique_ptr<TrtModule> text_encoder,
                          std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
                          WanDiffusionConfig config, WanPreprocessorWeights weights,
                          std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
-                         std::shared_ptr<void> distributed_owner, int32_t tensor_parallel_rank,
-                         int32_t tensor_parallel_size, std::unique_ptr<TrtModule> vae_first_frame)
-    : distributed_owner_(std::move(distributed_owner)), tensor_parallel_rank_(tensor_parallel_rank),
-      tensor_parallel_size_(tensor_parallel_size), text_encoder_(std::move(text_encoder)),
+                         std::shared_ptr<void> distributed_owner, int32_t distributed_rank,
+                         int32_t distributed_world_size, std::unique_ptr<TrtModule> vae_first_frame)
+    : distributed_owner_(std::move(distributed_owner)), distributed_rank_(distributed_rank),
+      distributed_world_size_(distributed_world_size), text_encoder_(std::move(text_encoder)),
       denoiser_(std::move(denoiser)), vae_(std::move(vae)),
       vae_first_frame_(std::move(vae_first_frame)), config_(std::move(config)),
       weights_(std::move(weights)), tokenizer_(std::move(tokenizer)),
@@ -1194,8 +1215,8 @@ ImageResult WanPipeline::finish_wan_generation(int32_t z_dim, int32_t t_lat, int
                                                WanVideoResult& result) {
     denormalize_wan_latents(config_, z_dim, t_lat, h_lat, w_lat, latents);
 
-    if (tensor_parallel_size_ > 1 && tensor_parallel_rank_ != 0) {
-        std::cerr << "[wan-t2v] TP rank " << tensor_parallel_rank_
+    if (distributed_world_size_ > 1 && distributed_rank_ != 0) {
+        std::cerr << "[wan-t2v] Distributed rank " << distributed_rank_
                   << " skips VAE decode; rank 0 writes video artifacts\n";
         ImageResult empty;
         empty.num_frames = 0;
@@ -1226,6 +1247,9 @@ std::vector<int32_t> WanPipeline::tokenize_wan_prompt(const std::string& prompt)
 }
 
 ImageResult WanPipeline::generate_image(const std::string& prompt, const GenerateConfig& cfg) {
+    using Clock = std::chrono::steady_clock;
+    const auto t_start = Clock::now();
+
     // Tokenize prompt
     const std::vector<int32_t> input_ids = tokenize_wan_prompt(prompt);
 
@@ -1255,6 +1279,8 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
         return video_to_image(result, config_.video_height, config_.video_width);
     }
 
+    const auto t_cond = Clock::now();
+
     // Build conditioning inputs for denoising (need encoder_attn_mask)
     const diffusion::WanConditioningInputs conditioning_inputs =
         diffusion::make_wan_conditioning_inputs(config_, layout, input_ids);
@@ -1279,18 +1305,8 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
     FlowMatchEulerState fm_scheduler;
     UniPCFlowState unipc_scheduler;
     DDIMState ddim_scheduler;
-    std::vector<float> step_timesteps;
-    if (plan.use_ddim) {
-        ddim_scheduler.num_train_timesteps = 1000;
-        ddim_scheduler.set_timesteps(plan.num_inference_steps);
-        step_timesteps = ddim_scheduler.timesteps;
-    } else if (plan.use_unipc) {
-        unipc_scheduler = diffusion::make_wan_unipc_scheduler(config_, plan);
-        step_timesteps = unipc_scheduler.timesteps;
-    } else {
-        fm_scheduler = diffusion::make_wan_flow_match_scheduler(plan);
-        step_timesteps = fm_scheduler.timesteps;
-    }
+    const std::vector<float> step_timesteps =
+        initialize_wan_step_timesteps(config_, plan, ddim_scheduler, unipc_scheduler, fm_scheduler);
 
     // Build lambda closures for the denoising loop
     const auto compute_temb = [this](float timestep, std::vector<float>& temb_6d,
@@ -1321,6 +1337,8 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
                                       rope_sin, output, encoder_mask);
         };
 
+    const auto t_prep = Clock::now();
+
     // Run denoising loop
     if (!run_wan_denoising_loop(plan.num_inference_steps, plan.use_ddim, plan.use_unipc,
                                 plan.guidance_scale, layout, step_timesteps, pos_embed_2d,
@@ -1332,8 +1350,32 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
         return video_to_image(result, config_.video_height, config_.video_width);
     }
 
-    return finish_wan_generation(layout.z_dim, layout.t_lat, layout.h_lat, layout.w_lat, latents,
-                                 result);
+    const auto t_denoise = Clock::now();
+
+    ImageResult output = finish_wan_generation(layout.z_dim, layout.t_lat, layout.h_lat,
+                                               layout.w_lat, latents, result);
+    const auto t_vae = Clock::now();
+
+    if (distributed_rank_ == 0) {
+        const auto ms = [](auto start, auto end) {
+            return std::chrono::duration<double, std::milli>(end - start).count();
+        };
+        std::cerr << "\n[wan-perf] ===== Timing Summary =====\n"
+                  << "[wan-perf] Text encoding (T5):               " << ms(t_start, t_cond)
+                  << " ms\n"
+                  << "[wan-perf] Denoise prep (conditioning+RoPE): " << ms(t_cond, t_prep)
+                  << " ms\n"
+                  << "[wan-perf] Denoising (" << plan.num_inference_steps
+                  << " steps):            " << ms(t_prep, t_denoise) << " ms ("
+                  << ms(t_prep, t_denoise) / plan.num_inference_steps << " ms/step)\n"
+                  << "[wan-perf] VAE decode:                       " << ms(t_denoise, t_vae)
+                  << " ms\n"
+                  << "[wan-perf] Total E2E:                        " << ms(t_start, t_vae)
+                  << " ms\n"
+                  << "[wan-perf] ===========================\n";
+    }
+
+    return output;
 }
 
 } // namespace trtmc
