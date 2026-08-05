@@ -9197,23 +9197,30 @@ def apply_comparison_precision(
     model: Mapping[str, Any],
     validation_config: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Apply one validation base precision to both TRTMC and its reference."""
+    """Apply validation-owned precision settings without changing CI manifests."""
 
     configured = validation_config.get("comparison_precision")
     updated = copy.deepcopy(dict(model))
-    if configured in (None, ""):
-        return updated
-    quantization = _model_quantization_format(updated)
-    if quantization:
-        model_name = str(updated.get("name", "") or "quantized model")
-        raise ValueError(
-            f"{model_name} uses {quantization.upper()} quantization; "
-            "comparison_precision may only override unquantized base precision"
+    fp32_layers = validation_config.get("trtmc_fp32_layers")
+    if configured not in (None, ""):
+        quantization = _model_quantization_format(updated)
+        if quantization:
+            model_name = str(updated.get("name", "") or "quantized model")
+            raise ValueError(
+                f"{model_name} uses {quantization.upper()} quantization; "
+                "comparison_precision may only override unquantized base precision"
+            )
+        updated["precision"] = _canonical_reference_precision(
+            configured,
+            field="validation.comparison_precision",
         )
-    updated["precision"] = _canonical_reference_precision(
-        configured,
-        field="task_eval.comparison_precision",
-    )
+    if fp32_layers is not None:
+        if not isinstance(fp32_layers, list) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in fp32_layers
+        ):
+            raise ValueError("validation.trtmc_fp32_layers must be non-negative integers")
+        updated["fp32_layers"] = list(fp32_layers)
     return updated
 
 
@@ -10720,6 +10727,92 @@ def compare_model_plugin_prediction_sets(
     }
 
 
+def run_full_duplex_bench_comparison(
+    *,
+    python: str,
+    hf_predictions: Path,
+    trtfb_predictions: Path,
+    answers: Path,
+    work_dir: Path,
+    gates: Mapping[str, Any],
+    local_files_only: bool,
+) -> dict[str, Any]:
+    """Run the dependency-heavy paper metric scorer in the reference env."""
+    required_gates = (
+        "max_tor_abs_delta",
+        "max_backchannel_frequency_abs_delta",
+        "max_backchannel_jsd_abs_delta",
+    )
+    missing = [name for name in required_gates if name not in gates]
+    if missing:
+        raise ValueError(
+            "Full-Duplex-Bench scoring requires gates: " + ", ".join(missing)
+        )
+    output_path = work_dir / "summary.json"
+    command = [
+        python,
+        str(REPO_ROOT / "tools" / "full_duplex_bench_score.py"),
+        "--hf-predictions",
+        str(hf_predictions),
+        "--trtmc-predictions",
+        str(trtfb_predictions),
+        "--requests",
+        str(answers),
+        "--cache-root",
+        str(work_dir / "full_duplex_bench_score_cache"),
+        "--output",
+        str(output_path),
+        "--max-tor-abs-delta",
+        str(float(gates["max_tor_abs_delta"])),
+        "--max-backchannel-frequency-abs-delta",
+        str(float(gates["max_backchannel_frequency_abs_delta"])),
+        "--max-backchannel-jsd-abs-delta",
+        str(float(gates["max_backchannel_jsd_abs_delta"])),
+    ]
+    if local_files_only:
+        command.append("--local-files-only")
+    completed = subprocess.run(command, check=False, text=True, capture_output=True)
+    (work_dir / "full_duplex_bench_score.log").write_text(
+        f"$ {' '.join(shlex.quote(token) for token in command)}\n"
+        f"{completed.stdout}{completed.stderr}",
+        encoding="utf-8",
+    )
+    if completed.returncode not in {0, 1}:
+        raise RuntimeError(
+            "Full-Duplex-Bench scorer failed "
+            f"(rc={completed.returncode}); see "
+            f"{work_dir / 'full_duplex_bench_score.log'}"
+        )
+    if not output_path.is_file():
+        raise RuntimeError(
+            "Full-Duplex-Bench scorer failed without producing summary.json "
+            f"(rc={completed.returncode}); see "
+            f"{work_dir / 'full_duplex_bench_score.log'}"
+        )
+    summary = json.loads(output_path.read_text(encoding="utf-8"))
+    expected_status = "passed" if completed.returncode == 0 else "failed"
+    if summary.get("status") != expected_status:
+        raise RuntimeError(
+            "Full-Duplex-Bench scorer exit status does not match summary; "
+            f"see {work_dir / 'full_duplex_bench_score.log'}"
+        )
+    return summary
+
+
+def validate_full_duplex_bench_answers(answers: Path) -> None:
+    """Reject non-formal slices before starting either inference backend."""
+    from tools.full_duplex_bench_score import validate_requests_manifest
+
+    payload = json.loads(answers.read_text(encoding="utf-8"))
+    try:
+        validate_requests_manifest(payload)
+    except ValueError as error:
+        raise ValueError(
+            "Full-Duplex-Bench formal validation input is invalid before "
+            f"inference: {error}"
+        ) from error
+
+
 def eval_one_model(
     *,
     suite: dict[str, Any],
@@ -10764,6 +10857,9 @@ def eval_one_model(
         sample_seed=args.sample_seed,
         validation_config=validation_config,
     )
+    answers_path = work_dir / "answers.json"
+    if scorer == "full_duplex_bench_behavior_parity":
+        validate_full_duplex_bench_answers(answers_path)
     precision_contract = (
         None
         if no_hf_reference
@@ -10790,7 +10886,6 @@ def eval_one_model(
             ),
         )
 
-    answers_path = work_dir / "answers.json"
     hf_reused = False
     if not no_hf_reference:
         # Run HF in its own process so its GPU memory is fully reclaimed before
@@ -10917,7 +11012,82 @@ def eval_one_model(
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 
-    if scorer == "model_plugin_parity":
+    if scorer == "full_duplex_bench_behavior_parity":
+        scoring = suite.get("scoring", {})
+        scorer_profile = str(scoring.get("python_profile", "") or "")
+        base_python = str(getattr(args, "hf_python", "") or sys.executable)
+        scorer_python = (
+            resolve_profile_python(scorer_profile, base_python)
+            if scorer_profile
+            else model_reference_python(model, base_python)
+        )
+        summary = run_full_duplex_bench_comparison(
+            python=scorer_python,
+            hf_predictions=work_dir / "hf_predictions.json",
+            trtfb_predictions=work_dir / "trtfb_predictions.json",
+            answers=answers_path,
+            work_dir=work_dir,
+            gates=suite.get("gates", {}),
+            local_files_only=bool(args.local_files_only),
+        )
+        report_metrics: dict[str, dict[str, float]] = {}
+        for metric_name, metric in summary["metrics"].items():
+            for value_name in (
+                "hf",
+                "trtmc",
+                "abs_delta",
+                "threshold",
+                "paired_changed_count",
+                "paired_mean_abs_delta",
+                "paired_max_abs_delta",
+            ):
+                report_metrics[f"{metric_name}.{value_name}"] = {
+                    "mean": float(metric[value_name])
+                }
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "sample_count": summary["sample_count"],
+            "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "metric_gate_count": summary["metric_gate_count"],
+            "metric_gate_pass_rate": summary["metric_gate_pass_rate"],
+            "metrics": report_metrics,
+            "gates": summary["gates"],
+            "gate_failures": summary["gate_failures"],
+            "benchmark_provenance": {
+                "dataset": summary.get("dataset", ""),
+                "dataset_source_revision": summary.get(
+                    "dataset_source_revision", ""
+                ),
+                "dataset_selection_seed": summary.get(
+                    "dataset_selection_seed", ""
+                ),
+                "samples_per_category": summary.get(
+                    "samples_per_category", 0
+                ),
+                "metric_definition_revision": summary.get(
+                    "metric_definition_revision", ""
+                ),
+                "metric_implementation": summary.get(
+                    "metric_implementation", ""
+                ),
+                "asr_model": summary.get("asr_model", ""),
+                "asr_revision": summary.get("asr_revision", ""),
+            },
+        }
+        if summary["gate_failures"]:
+            result.update(
+                {
+                    "error_type": "BenchmarkGateError",
+                    "error": (
+                        f"{len(summary['gate_failures'])} Full-Duplex-Bench "
+                        "HF/TRTMC metric delta gate(s) failed"
+                    ),
+                }
+            )
+    elif scorer == "model_plugin_parity":
         hf_data = json.loads(
             (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
         )
@@ -11762,6 +11932,13 @@ def write_diffusion_text_summary_markdown(summary: dict[str, Any], path: Path) -
 
 def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     common = f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
+    if result.get("mode") == "full_duplex_bench_behavior_parity":
+        return (
+            f"model={model['name']} metric_gate_pass_rate="
+            f"{result['metric_gate_pass_rate']:.4f} "
+            f"passed={result['passed_count']}/{result['metric_gate_count']} "
+            f"status={result.get('status', '')} {common}"
+        )
     if result.get("mode") == "reranking_parity":
         return (
             f"model={model['name']} sample_pass_rate={result['sample_pass_rate']:.4f} "

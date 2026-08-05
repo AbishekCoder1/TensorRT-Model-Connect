@@ -122,6 +122,50 @@ read the existing root-level public `VBench` asset directly. Dev/QA machines
 and NAS mirrors should copy the six directories without changing their
 relative layouts and verify the manifest after transfer.
 
+PersonaPlex's default `full_duplex_bench_behavior_parity` workload uses a
+separate, deterministic behavioral slice of the public Full-Duplex-Bench v1.0
+asset. Prepare it from the complete 727-sample benchmark:
+
+```bash
+python tools/prepare_full_duplex_bench_validation.py \
+  --source-root /mnt/data/FullDuplexBench-v1.0-public \
+  --icc-distribution /mnt/data/FullDuplexBench-v1.0-public/icc_backchannel/all_data_distribution.json \
+  --output-root /mnt/data/FullDuplexBench-v1.0-public/trtmc-validate-v1 \
+  --samples-per-category 30
+```
+
+The resulting 150 samples contain 30 fixed SHA-ranked inputs from each of the
+five benchmark categories. This fixed, balanced slice is the formal validation
+contract; changing its size requires reviewing both the sampling uncertainty
+and the metric-delta gates rather than silently changing `--limit`.
+
+The source root must include its managed `DATASET_MANIFEST.json`; preparation
+rejects a different upstream revision, subset count, or license declaration.
+
+HF and TRTMC process the exact same normalized audio independently. Each
+backend is then scored with pinned Full-Duplex-Bench TOR, backchannel frequency,
+and JSD definitions. Validation gates the absolute backend delta at 0.10 TOR,
+0.01 backchannel events/second, and 0.02 JSD. These are behavioral consistency
+gates, not paper-score or semantic-content accuracy gates. The generated
+manifest preserves the per-category source licenses; CANDOR and ICC subsets
+remain non-commercial and subject to their upstream terms.
+Prepared 24 kHz mono float WAVs use deterministic headers, and the scorer
+verifies every prepared-audio SHA before evaluation.
+The scorer is TRTMC-owned code following the metric definitions from
+`DanielLin94144/Full-Duplex-Bench` revision
+`3e799c45a045256f47d5f1c9cda90157e2d2ec9e`; the repository does not vendor or
+execute the upstream evaluator source. Dataset use remains governed by the
+per-category licenses recorded in the prepared manifest.
+Because those aggregate gates are sized for 30 samples per category, the
+validation engine rejects a reduced `--limit` before launching HF or TRTMC
+instead of reporting a statistically unsupported pass.
+
+PersonaPlex also retains `full_duplex_bench_speech_parity` as a five-sample
+diagnostic regression. It contains the original `000000` and `000002`
+synthetic-interruption failures from issue #767 and provides per-sample token,
+waveform, and vanilla reproduction evidence. It complements the aggregate
+behavior suite; it does not replace the 150-sample behavioral gate.
+
 LocateAnything grounding accuracy uses the public `lscpku/RefCOCO_rec`
 dataset pinned at revision
 `566810e1ad62821ed3c6ab569ea33d80f5bdb874`. Stage that exact Hugging Face

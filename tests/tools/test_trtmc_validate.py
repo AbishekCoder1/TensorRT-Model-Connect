@@ -53,10 +53,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         "e2e" not in spec.get("workloads", [])
         for spec in catalog["models"].values()
     )
-    assert (
-        catalog["models"]["personaplex-7b"]["reference_cache_identity"]
-        == "personaplex-official-greedy-fp16-v1"
-    )
+    assert "reference_cache_identity" not in catalog["models"]["personaplex-7b"]
     assert (
         catalog["models"]["flux-2-dev"]["reference_cache_identity"]
         == catalog["models"]["flux-2-dev-fp8"]["reference_cache_identity"]
@@ -115,7 +112,8 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
     }
-    assert max(catalog["sample_limits"].values()) == 100
+    assert max(catalog["sample_limits"].values()) == 150
+    assert catalog["sample_limits"]["full_duplex_bench_behavior_parity"] == 150
     assert catalog["sample_limits"]["mmlu_five_shot_mcq"] == 20
     assert catalog["sample_limits"]["dpg_bench_diffusion_image"] == 5
     assert catalog["sample_limits"]["gedit_bench_image_edit"] == 5
@@ -853,6 +851,31 @@ def test_model_specific_reference_environment_keeps_common_validation_base() -> 
     )
 
 
+def test_suite_specific_scorer_environment_is_materialized_on_demand() -> None:
+    profiles = trtmc_validate._binding_profiles(
+        trtmc_validate.Binding("personaplex-7b", "full-duplex"),
+        task_models={
+            "personaplex-7b": {
+                "family": "personaplex",
+                "runtime_strategy": "personaplex_speech_to_speech",
+                "reference_backend": "torch_reference",
+            }
+        },
+        suites={
+            "full-duplex": {
+                "scoring": {
+                    "python_profile": "personaplex_full_duplex_evaluator"
+                }
+            }
+        },
+    )
+
+    assert profiles == (
+        trtmc_validate.COMMON_REFERENCE_PROFILE,
+        "personaplex_full_duplex_evaluator",
+    )
+
+
 def test_ensure_environments_reports_create_only_when_resolver_creates(monkeypatch, capsys):
     calls = 0
 
@@ -1356,6 +1379,27 @@ def test_mcq_report_exposes_reference_tie_equivalence_metrics():
     assert comparison["metrics"]["reference_tie_equivalent_count"] == 1
 
 
+def test_full_duplex_report_uses_metric_gate_pass_rate() -> None:
+    comparison = trtmc_validate._comparison_details(
+        {
+            "status": "passed",
+            "mode": "full_duplex_bench_behavior_parity",
+            "metric_gate_pass_rate": 1.0,
+            "metrics": {
+                "icc_backchannel.jsd.abs_delta": {"mean": 0.006},
+            },
+        },
+        {"status": "completed"},
+    )
+
+    assert comparison["status"] == "agreement"
+    assert comparison["primary_metric"] == {
+        "name": "metric_gate_pass_rate",
+        "value": 1.0,
+    }
+    assert comparison["metrics"]["icc_backchannel.jsd.abs_delta"] == 0.006
+
+
 def test_legacy_e2e_result_is_not_reported_as_reference_agreement(tmp_path):
     case_dir = tmp_path / "model-a" / "e2e"
     case_dir.mkdir(parents=True)
@@ -1799,6 +1843,10 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
         "$ python validation/engine.py run-trtfb\n",
         encoding="utf-8",
     )
+    (work_dir / "full_duplex_bench_score.log").write_text(
+        "$ python tools/full_duplex_bench_score.py --trtmc-predictions out.json\n",
+        encoding="utf-8",
+    )
     commands = (
         {
             "sample_id": "sample-1",
@@ -1823,6 +1871,7 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
     assert reproduction["command_logs"]["trtmc"] == [
         "trtfb_native_commands.jsonl"
     ]
+    assert "full_duplex_bench_score.py" not in json.dumps(reproduction)
 
 
 def test_commands_from_logs_prefer_native_reference_jsonl(tmp_path: Path) -> None:

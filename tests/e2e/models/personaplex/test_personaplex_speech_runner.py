@@ -48,6 +48,7 @@ def test_runner_uses_total_frame_budget_without_adding_tail_frames(
         binary_path="/runtime/trtmc",
         engine_dir=str(tmp_path / "engines"),
         artifacts_dir=str(tmp_path / "artifacts"),
+        model_plugin_dir="/runtime/models",
     )
     seen_command: list[str] = []
 
@@ -71,7 +72,11 @@ def test_runner_uses_total_frame_budget_without_adding_tail_frames(
     )
 
     assert seen_command[seen_command.index("--max-new-tokens") + 1] == "100"
+    assert seen_command[seen_command.index("--model-plugin-dir") + 1] == "/runtime/models"
     assert "--tail-frames" not in seen_command
     assert output.data["num_frames"] == 2
     assert output.data["wav_exists"] is True
+    assert Path(output.data["wav_path"]) == (
+        tmp_path / "artifacts" / case.name / "trt_speech_out.wav"
+    )
     assert Path(output.data["wav_path"]).is_file()

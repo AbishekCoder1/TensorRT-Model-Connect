@@ -186,13 +186,21 @@ class SpeechToSpeechRunner:
             "speech_test_max_frames",
             case.metadata.get("speech_test_max_frames", 50),
         )
+        artifact_dir = (
+            Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+            if ctx.artifacts_dir
+            else None
+        )
 
         with tempfile.TemporaryDirectory(prefix="trtmc_s2s_") as tmpdir:
             distributed_runtime = _distributed_runtime_config(case)
             output_root = os.path.join(tmpdir, "rank_outputs")
             wav_path = (
                 os.path.join(output_root, "rank_0", "output.wav")
-                if distributed_runtime else os.path.join(tmpdir, "output.wav")
+                if distributed_runtime
+                else str(artifact_dir / "trt_speech_out.wav")
+                if artifact_dir is not None
+                else os.path.join(tmpdir, "output.wav")
             )
             tokens_path = (
                 os.path.join(output_root, "rank_0", "output_tokens.npy")
@@ -213,6 +221,8 @@ class SpeechToSpeechRunner:
                 cmd = ["bash", "-lc", wrapper, "trtmc_rank_speech", output_root] + cmd
             else:
                 cmd.extend(["--audio-out", wav_path])
+            if ctx.model_plugin_dir:
+                cmd.extend(["--model-plugin-dir", ctx.model_plugin_dir])
             cmd = _wrap_distributed_command(cmd, case)
 
             env = {
@@ -259,10 +269,10 @@ class SpeechToSpeechRunner:
 
                 # Persist WAV to artifacts_dir — update wav_path so
                 # comparators can access it after the tempdir is cleaned up.
-                if ctx.artifacts_dir:
-                    art_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
-                    dst = str(art_dir / "trt_speech_out.wav")
-                    shutil.copy2(wav_path, dst)
+                if artifact_dir is not None:
+                    dst = str(artifact_dir / "trt_speech_out.wav")
+                    if Path(wav_path) != Path(dst):
+                        shutil.copy2(wav_path, dst)
                     data["wav_path"] = dst
             else:
                 data["wav_exists"] = False

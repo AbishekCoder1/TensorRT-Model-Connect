@@ -21,7 +21,107 @@ import pytest
 from PIL import Image
 
 from tools import prepare_media_validation_datasets as prepare_media
+from tools import prepare_full_duplex_bench_validation as prepare_fdb
 from tools.validation import engine as validation_engine
+
+
+def test_full_duplex_bench_scorer_runs_in_reference_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        seen.extend(command)
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "status": "passed",
+                    "metrics": {},
+                    "gate_failures": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="scored", stderr="")
+
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+
+    result = validation_engine.run_full_duplex_bench_comparison(
+        python="/profiles/personaplex/bin/python",
+        hf_predictions=tmp_path / "hf.json",
+        trtfb_predictions=tmp_path / "trtmc.json",
+        answers=tmp_path / "answers.json",
+        work_dir=tmp_path,
+        gates={
+            "max_tor_abs_delta": 0.10,
+            "max_backchannel_frequency_abs_delta": 0.01,
+            "max_backchannel_jsd_abs_delta": 0.02,
+        },
+        local_files_only=True,
+    )
+
+    assert result["status"] == "passed"
+    assert seen[0] == "/profiles/personaplex/bin/python"
+    assert seen[1].endswith("tools/full_duplex_bench_score.py")
+    assert "--local-files-only" in seen
+    assert "--max-tor-abs-delta" in seen
+
+
+def test_full_duplex_bench_scorer_rejects_stale_summary_after_crash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "summary.json").write_text(
+        json.dumps({"status": "passed"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        validation_engine.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=2, stdout="", stderr="crashed"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="scorer failed"):
+        validation_engine.run_full_duplex_bench_comparison(
+            python="/profiles/personaplex/bin/python",
+            hf_predictions=tmp_path / "hf.json",
+            trtfb_predictions=tmp_path / "trtmc.json",
+            answers=tmp_path / "answers.json",
+            work_dir=tmp_path,
+            gates={
+                "max_tor_abs_delta": 0.10,
+                "max_backchannel_frequency_abs_delta": 0.01,
+                "max_backchannel_jsd_abs_delta": 0.02,
+            },
+            local_files_only=True,
+        )
+
+
+def test_full_duplex_bench_rejects_short_slice_before_inference(tmp_path: Path) -> None:
+    answers = {
+        "schema_version": "trtmc.full-duplex-bench-validation/v1",
+        "source_revision": prepare_fdb.FDB_REVISION,
+        "sampling": {"seed": prepare_fdb.SELECTION_SEED},
+        "requests": [
+            {"sample_id": f"{category}-0", "category": category}
+            for category in (
+                "synthetic_pause_handling",
+                "candor_pause_handling",
+                "icc_backchannel",
+                "candor_turn_taking",
+                "synthetic_user_interruption",
+            )
+        ],
+    }
+    answers_path = tmp_path / "answers.json"
+    answers_path.write_text(json.dumps(answers), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="invalid before inference.*exactly 30 samples per category",
+    ):
+        validation_engine.validate_full_duplex_bench_answers(answers_path)
 
 
 def _write_mmlu(path: Path) -> None:
@@ -4608,6 +4708,58 @@ def test_comparison_precision_overrides_both_candidate_and_reference(
     assert contract["comparison"] == "aligned"
 
 
+def test_validation_can_override_component_precision_without_changing_manifest() -> None:
+    original = {
+        "name": "personaplex-7b",
+        "precision": "fp16",
+        "fp32_layers": [0, 1],
+    }
+
+    model = validation_engine.apply_comparison_precision(
+        original,
+        {
+            "comparison_precision": "bf16",
+            "trtmc_fp32_layers": [2, 3],
+        },
+    )
+
+    assert original == {
+        "name": "personaplex-7b",
+        "precision": "fp16",
+        "fp32_layers": [0, 1],
+    }
+    assert model["precision"] == "bf16"
+    assert model["fp32_layers"] == [2, 3]
+
+
+def test_personaplex_behavior_suite_owns_precision_outside_ci_manifest() -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
+        "full_duplex_bench_behavior_parity",
+    )
+    model = next(
+        record
+        for record in validation_engine.load_manifest_records()
+        if record["name"] == "personaplex-7b"
+    )
+
+    config = validation_engine.effective_validation_config(suite, model)
+    resolved = validation_engine.apply_comparison_precision(model, config)
+
+    assert model["precision"] == "fp16"
+    assert model["fp32_layers"] == [0, 1]
+    assert resolved["precision"] == "bf16"
+    assert resolved["fp32_layers"] == [2, 3]
+    command = validation_engine.build_bundle_command(
+        resolved,
+        trtmc_binary="/runtime/trtmc",
+        bundle_path=Path("/runs/engines/personaplex-7b.trtfb"),
+        max_cache_length=1280,
+    )
+    assert command[command.index("--precision") + 1] == "bf16"
+    assert command[command.index("--fp32-layers") + 1] == "2,3"
+
+
 @pytest.mark.parametrize("model_name", ["fnet-base", "xlnet-base"])
 def test_encoder_validation_compares_candidate_and_reference_in_fp32(
     model_name: str,
@@ -5292,7 +5444,7 @@ def test_native_trtmc_command_recorder_extracts_nested_model_command(
                     "--prompt",
                     "hello",
                 ]
-            }
+            },
         }
     )
 
@@ -5308,7 +5460,6 @@ def test_native_trtmc_command_recorder_extracts_nested_model_command(
     assert row["sample_id"] == "sample-7"
     assert row["command"][0:2] == ["/workspace/build/trtmc", "run"]
     assert "validation_engine.py" not in " ".join(row["command"])
-
 
 def test_run_diffusion_trtfb_writes_image_artifact_predictions(
     tmp_path: Path, monkeypatch

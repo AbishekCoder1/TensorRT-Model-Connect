@@ -235,6 +235,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "lance_reference",
         "magpie_tts_reference",
         "nemotron_h_reference",
+        "personaplex_full_duplex_evaluator",
         "phi4_multimodal",
         "sana_wm_reference",
         "reference_common",
@@ -248,6 +249,14 @@ def test_family_profile_registry_is_fully_exact_pinned():
         )
         pins = shared_profiles._exact_pinned_requirements(requirements)
         assert pins, name
+
+
+def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
+    registry = shared_profiles.load_python_profile_registry()
+    prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
+
+    assert "personaplex_full_duplex_evaluator" not in prebuilt
+    assert "reference_common" in prebuilt
 
 def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
     with pytest.raises(ValueError, match="exact name==version pins"):
