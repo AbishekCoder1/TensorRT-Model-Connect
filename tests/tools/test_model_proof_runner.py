@@ -2825,6 +2825,216 @@ def test_capacity_waiter_reserves_one_gpu_without_blocking_other_gpu(
 
 
 @pytest.mark.model_proof_allocator
+def test_capacity_waiter_switches_to_an_alternate_that_drains_first(
+    tmp_path: Path,
+) -> None:
+    context = _fake_gpu_lease_context(
+        tmp_path,
+        "2, 284208, 34208, 250000\n3, 284208, 34208, 250000",
+        timeout_seconds=3,
+    )
+    capacity_lease = GpuLease(
+        context,
+        "minimax_h3",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=184320,
+    )
+    younger_lease = GpuLease(
+        CiContext(REPO_ROOT, context.env.copy()),
+        "qwen_vl",
+        "shared",
+    )
+    lock_dir = capacity_lease.lock_dir
+    gpu2_holder = lock_dir / "gpu-2-slot-0.lock"
+    gpu3_reservation = lock_dir / "gpu-3-reservation.lock"
+    gpu3_slots = [lock_dir / f"gpu-3-slot-{slot}.lock" for slot in range(2)]
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    acquired = threading.Event()
+    candidate_reserved = threading.Event()
+    younger_queued = threading.Event()
+    younger_acquired = threading.Event()
+    release_younger = threading.Event()
+    failure: list[BaseException] = []
+    younger_failure: list[BaseException] = []
+    capacity_thread: threading.Thread | None = None
+    younger_thread: threading.Thread | None = None
+
+    reserve_candidate = capacity_lease._reserve_capacity_candidate
+    create_younger_ticket = younger_lease._create_ticket
+
+    def record_candidate(deadline: float, *, exclude: set[int]) -> bool:
+        reserved = reserve_candidate(deadline, exclude=exclude)
+        if reserved:
+            candidate_reserved.set()
+        return reserved
+
+    capacity_lease._reserve_capacity_candidate = record_candidate  # type: ignore[method-assign]
+
+    def record_younger_ticket(scope: str, deadline: float) -> gpu_lease_module.FileLock:
+        ticket = create_younger_ticket(scope, deadline)
+        younger_queued.set()
+        return ticket
+
+    younger_lease._create_ticket = record_younger_ticket  # type: ignore[method-assign]
+
+    def acquire_capacity() -> None:
+        try:
+            capacity_lease.acquire()
+        except BaseException as error:
+            failure.append(error)
+        finally:
+            acquired.set()
+
+    def acquire_younger() -> None:
+        try:
+            younger_lease.acquire()
+            younger_acquired.set()
+            release_younger.wait(timeout=6)
+        except BaseException as error:
+            younger_failure.append(error)
+        finally:
+            younger_lease.release()
+
+    try:
+        with (
+            gpu2_holder.open("w", encoding="utf-8") as gpu2_stream,
+            gpu3_reservation.open("w", encoding="utf-8") as gpu3_reservation_stream,
+            gpu3_slots[0].open("w", encoding="utf-8") as gpu3_slot0_stream,
+            gpu3_slots[1].open("w", encoding="utf-8") as gpu3_slot1_stream,
+        ):
+            fcntl.flock(gpu2_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(gpu3_reservation_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(gpu3_slot0_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(gpu3_slot1_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            capacity_thread = threading.Thread(target=acquire_capacity)
+            capacity_thread.start()
+            assert candidate_reserved.wait(timeout=2)
+            assert _lock_is_busy(lock_dir / "gpu-2-reservation.lock")
+            assert not acquired.is_set()
+
+            younger_thread = threading.Thread(target=acquire_younger)
+            younger_thread.start()
+            assert younger_queued.wait(timeout=2)
+            assert not younger_acquired.is_set()
+
+            fcntl.flock(gpu3_slot0_stream, fcntl.LOCK_UN)
+            fcntl.flock(gpu3_slot1_stream, fcntl.LOCK_UN)
+            fcntl.flock(gpu3_reservation_stream, fcntl.LOCK_UN)
+
+            assert acquired.wait(timeout=4)
+            capacity_thread.join(timeout=1)
+            assert not capacity_thread.is_alive()
+            assert not failure
+            assert capacity_lease.gpu_id == 3
+            assert capacity_lease.slot_ids == [0, 1]
+            assert younger_acquired.wait(timeout=2)
+            assert not younger_failure
+            assert younger_lease.gpu_id == 2
+            assert younger_lease.slot_ids == [1]
+            assert not list(lock_dir.glob("admission-global-*.lock"))
+            assert capacity_lease.evidence("a" * 40)["gpu_memory_admission"] == {
+                "source": "nvidia-smi",
+                "required_free_mib": 184320,
+                "observed_total_mib": 284208,
+                "observed_used_mib": 34208,
+                "observed_free_mib": 250000,
+            }
+            assert _lock_is_busy(lock_dir / "gpu-3-reservation.lock")
+            assert all(_lock_is_busy(path) for path in gpu3_slots)
+            assert not _lock_is_busy(lock_dir / "gpu-2-reservation.lock")
+            assert _lock_is_busy(lock_dir / "gpu-2-slot-1.lock")
+            assert _lock_is_busy(gpu2_holder)
+    finally:
+        release_younger.set()
+        if younger_thread is not None:
+            younger_thread.join(timeout=7)
+        if capacity_thread is not None:
+            capacity_thread.join(timeout=4)
+        younger_lease.release()
+        capacity_lease.release()
+
+    for gpu in (2, 3):
+        assert not _lock_is_busy(lock_dir / f"gpu-{gpu}-reservation.lock")
+        assert not _lock_is_busy(lock_dir / f"gpu-{gpu}-slot-0.lock")
+        assert not _lock_is_busy(lock_dir / f"gpu-{gpu}-slot-1.lock")
+
+
+@pytest.mark.model_proof_allocator
+def test_capacity_waiter_timeout_releases_retained_ticket_and_partial_lease(
+    tmp_path: Path,
+) -> None:
+    context = _fake_gpu_lease_context(
+        tmp_path,
+        "2, 284208, 34208, 250000\n3, 284208, 34208, 250000",
+        timeout_seconds=1,
+    )
+    lease = GpuLease(
+        context,
+        "minimax_h3",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=184320,
+    )
+    lock_dir = lease.lock_dir
+    gpu2_holder = lock_dir / "gpu-2-slot-0.lock"
+    gpu3_reservation = lock_dir / "gpu-3-reservation.lock"
+    gpu3_slots = [lock_dir / f"gpu-3-slot-{slot}.lock" for slot in range(2)]
+    retained_ticket: list[Path] = []
+    drain_reserved_gpu = lease._drain_reserved_gpu
+
+    def observe_retained_ticket(
+        deadline: float,
+        *,
+        exclude: set[int] | None = None,
+    ) -> None:
+        assert lease.hold_ticket_while_capacity_drains
+        assert lease.ticket is not None
+        assert _lock_is_busy(lease.ticket.path)
+        retained_ticket.append(lease.ticket.path)
+        drain_reserved_gpu(deadline, exclude=exclude)
+
+    lease._drain_reserved_gpu = observe_retained_ticket  # type: ignore[method-assign]
+
+    with (
+        gpu2_holder.open("w", encoding="utf-8") as gpu2_stream,
+        gpu3_reservation.open("w", encoding="utf-8") as gpu3_reservation_stream,
+        gpu3_slots[0].open("w", encoding="utf-8") as gpu3_slot0_stream,
+        gpu3_slots[1].open("w", encoding="utf-8") as gpu3_slot1_stream,
+    ):
+        fcntl.flock(gpu2_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(gpu3_reservation_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(gpu3_slot0_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(gpu3_slot1_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        with pytest.raises(
+            CiError,
+            match="timed out after 1s.*exclusive_gpu.*from: 2",
+        ):
+            lease.acquire()
+
+        assert len(retained_ticket) == 1
+        assert not retained_ticket[0].exists()
+        assert lease.ticket is None
+        assert lease.reservation is None
+        assert lease.slots == []
+        assert lease.slot_ids == []
+        assert lease.gpu_id is None
+        assert lease.machine is None
+        assert not lease.hold_ticket_while_capacity_drains
+        assert not _lock_is_busy(lock_dir / "gpu-2-reservation.lock")
+        assert not _lock_is_busy(lock_dir / "gpu-2-slot-1.lock")
+        assert _lock_is_busy(gpu2_holder)
+        assert _lock_is_busy(gpu3_reservation)
+        assert all(_lock_is_busy(path) for path in gpu3_slots)
+
+    assert not list(lock_dir.glob("admission-global-*.lock"))
+    for gpu in (2, 3):
+        assert not _lock_is_busy(lock_dir / f"gpu-{gpu}-reservation.lock")
+        assert not _lock_is_busy(lock_dir / f"gpu-{gpu}-slot-0.lock")
+        assert not _lock_is_busy(lock_dir / f"gpu-{gpu}-slot-1.lock")
+
+
+@pytest.mark.model_proof_allocator
 def test_capacity_waiter_reconsiders_recovered_gpu_when_other_gpu_is_reserved(
     tmp_path: Path,
 ) -> None:
@@ -3420,6 +3630,64 @@ def test_poll_interval_cannot_sleep_past_the_lease_timeout(tmp_path: Path) -> No
         f"lease timeout was pierced by the poll interval: {lease_elapsed:.3f}s"
     )
     assert not list(lock_dir.glob("admission-global-*.lock"))
+
+
+@pytest.mark.model_proof_allocator
+def test_exclusive_drain_observes_release_before_timeout_with_long_poll(
+    tmp_path: Path,
+) -> None:
+    context = _fake_gpu_lease_context(tmp_path, "", timeout_seconds=1)
+    context.env.update(
+        {
+            "TRTMC_MODEL_PROOF_GPU_IDS": "9",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "1",
+            "TRTMC_MODEL_PROOF_POLL_INTERVAL": "300",
+        }
+    )
+    lease = GpuLease(context, "minimax_h3", "exclusive_gpu")
+    lock_dir = lease.lock_dir
+    busy_slot = lock_dir / "gpu-9-slot-0.lock"
+    reservation_acquired = threading.Event()
+    holder_failure: list[BaseException] = []
+    reserve_one_gpu = lease._reserve_one_gpu
+
+    def record_reservation(deadline: float) -> bool:
+        reserved = reserve_one_gpu(deadline)
+        if reserved:
+            reservation_acquired.set()
+        return reserved
+
+    lease._reserve_one_gpu = record_reservation  # type: ignore[method-assign]
+
+    with busy_slot.open("w", encoding="utf-8") as busy_stream:
+        fcntl.flock(busy_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        def release_slot() -> None:
+            try:
+                assert reservation_acquired.wait(timeout=1)
+                time.sleep(0.1)
+                fcntl.flock(busy_stream, fcntl.LOCK_UN)
+            except BaseException as error:
+                holder_failure.append(error)
+
+        holder = threading.Thread(target=release_slot)
+        holder.start()
+        try:
+            lease.acquire()
+            assert lease.gpu_id == 9
+            assert lease.slot_ids == [0]
+            assert _lock_is_busy(lock_dir / "gpu-9-reservation.lock")
+            assert _lock_is_busy(busy_slot)
+        finally:
+            holder.join(timeout=2)
+            lease.release()
+
+        assert not holder.is_alive()
+        assert not holder_failure
+
+    assert not list(lock_dir.glob("admission-global-*.lock"))
+    assert not _lock_is_busy(lock_dir / "gpu-9-reservation.lock")
+    assert not _lock_is_busy(busy_slot)
 
 
 @pytest.mark.model_proof_allocator
