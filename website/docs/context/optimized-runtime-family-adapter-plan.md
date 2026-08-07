@@ -13,7 +13,7 @@ implementation descriptor and three exact Qwen3/A100 SM80/FP16 profiles marked
 Current selection truth comes from the family-owned `IMPLEMENTATION.toml`,
 profile TOMLs, and their semantic-source digests. Source publishes no A100
 producer descriptor or target-hardware runner. See
-[Model Support](../getting-started/model-support.md). Prose retained from the
+[Model Support](../models-recipes/overview.md). Prose retained from the
 planning phase is not fresh qualification evidence.
 
 The current builder also evaluates a family-owned `default_build_route` before
@@ -571,3 +571,5 @@ profile declarations retain their exact semantic qualification snapshot.
   implementation; it must not inherit support from these three tuples.
 - Qualification logs, comparison output, benchmark results, and generated
   engines remain external artifacts and must not be committed as proof.
+
+{/* Collaborative review anchor. */}

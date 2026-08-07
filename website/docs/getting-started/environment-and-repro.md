@@ -1,5 +1,5 @@
 ---
-title: Prerequisites and Environment
+title: System Requirements
 description: Select and verify the environment before installing TensorRT-Model-Connect.
 ---
 
@@ -118,3 +118,5 @@ cache files; do not use it as a total-memory estimate.
 
 Continue to [Installation](installation.md). Return here instead of changing
 model flags when the failure is an environment mismatch.
+
+{/* Collaborative review anchor. */}

@@ -15,8 +15,8 @@ Each directory name must agree with the `id` in its own descriptor. The three
 physical names usually match, but their link is the exact
 `runtime_strategy`, not filename equality: current builder/E2E owners
 `magpie_tts` and `wan_t2v` map to runtime owners `magpie` and `wan`,
-respectively. At this revision, all three trees contain 78 descriptors. The E2E
-descriptors declare 205 JSON manifests; runtime descriptors declare 79 unique
+respectively. At this revision, all three trees contain 79 descriptors. The E2E
+descriptors declare 207 JSON manifests; runtime descriptors declare 80 unique
 strategy keys because one runtime owner exposes two strategies. Treat these
 numbers as a checked snapshot, not a constant: the descriptor files are the
 source of truth.
@@ -96,3 +96,5 @@ new changes; do not present the command as a passing consistency check.
 
 Use `tools/test_impact.py` for change selection. Do not infer ownership from an
 old document count or from a removed shared runtime directory.
+
+{/* Collaborative review anchor. */}

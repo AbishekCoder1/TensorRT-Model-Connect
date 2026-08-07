@@ -84,7 +84,7 @@ validation produces. The commands below are the current GB300/aarch64 release
 path.
 
 Continue in the repository-root dev-container shell opened by
-[Prerequisites and Environment](environment-and-repro.md#3-prepare-the-source-container).
+[System Requirements](environment-and-repro.md#3-prepare-the-source-container).
 Do not clone again or try to start Docker from inside that container. Build one
 Python 3.12 wheel there:
 
@@ -164,3 +164,5 @@ cmake --build build -j
 
 CI and release validation use the wheel path, not the Python-only editable
 install.
+
+{/* Collaborative review anchor. */}

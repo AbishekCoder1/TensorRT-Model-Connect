@@ -18,7 +18,7 @@ TRTMC=trtmc
 ```
 
 If the command itself is unavailable, return to
-[Prerequisites and Environment](environment-and-repro.md) and
+[System Requirements](environment-and-repro.md) and
 [Installation](installation.md). If you have not yet built and run the Qwen
 first-inference bundle, complete the Quick Start before choosing a recipe here.
 
@@ -43,6 +43,17 @@ $TRTMC run /tmp/qwen25vl.bundle \
   --image tests/assets/test_image.jpg \
   --max-new-tokens 48
 ```
+
+These length controls have different scopes. `--max-cache-length 384` fixes
+the bundle's KV-cache capacity. The Qwen-VL build field
+`qwen_vl_decoder.max_prefill_length` defaults to `0`, which uses that cache
+length as the prefill-profile maximum; an explicit value is clamped to the
+cache length, and `opt_prefill_length` is clamped to the resulting prefill
+maximum. `--max-new-tokens 48` is only the request-time decode-loop limit: it
+does not resize either build-time profile. After the Qwen-VL cache fills, its
+runtime advances with a sliding cache, so earlier context rows are evicted.
+See [Configuration and Backends](../features/config-and-backends.md) for the
+exact family fields and defaults.
 
 This Qwen-VL bundle routes through the model-owned
 `runtime_strategy="qwen_vl_vision_language"`. Other vision-language families
@@ -144,3 +155,5 @@ Success means both commands exit with status 0, the named bundle exists, and
 floating-point forecast values. See
 [Diffusion, Vision, and Time-Series Pipelines](../tutorials/intermediate/diffusion-and-time-series.md)
 for the input/output mental model and dependency boundaries.
+
+{/* Collaborative review anchor. */}
