@@ -71,7 +71,7 @@ std::string build_bundle_header_json(const std::vector<BundleSectionSpec>& secti
 
 void write_bundle_with_sections(const std::filesystem::path& path,
                                 const std::vector<BundleSectionSpec>& sections) {
-    static constexpr unsigned char kBundleMagic[8] = {'T', 'R', 'T', 'F', 'B', '\0', '\x01', '\0'};
+    static constexpr unsigned char kBundleMagic[8] = {'B', 'U', 'N', 'D', 'L', 'E', '\x01', '\0'};
 
     const std::string header = build_bundle_header_json(sections);
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -94,7 +94,7 @@ bool message_contains_any(const std::string& msg, std::initializer_list<const ch
 void test_legacy_diffusion_alias_reports_wan_section_guard() {
     trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
-        std::filesystem::path(dir.path()) / "wan_legacy_alias_missing_sections.trtfb";
+        std::filesystem::path(dir.path()) / "wan_legacy_alias_missing_sections.bundle";
 
     const std::string config = R"({
   "runtime_strategy": "diffusion",
