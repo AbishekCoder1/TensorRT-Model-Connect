@@ -965,6 +965,7 @@ def build_bundle(
             verbose=verbose, t0=t0,
             fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales,
             rtx=rtx,
+            family_build_options=family_build_options,
             diffusion_overrides=diffusion_overrides,
             build_timing=build_timing,
             parallel_config=parallel,
@@ -1624,6 +1625,7 @@ def _build_diffusion_bundle(
     fp8_scales: dict | None = None,
     save_fp8_scales: str | None = None,
     rtx: bool = False,
+    family_build_options: dict | None = None,
     diffusion_overrides: dict | None = None,
     build_timing: dict | None = None,
     parallel_config: ParallelConfig | None = None,
@@ -1657,6 +1659,7 @@ def _build_diffusion_bundle(
     config = ModelConfig(model_type=model_type, raw=dict(pipeline_config))
     config.raw["max_cache_length"] = max_cache_length
     config.raw["_fp32_layers"] = sorted(set(fp32_layers or ()))
+    config.raw["_family_build_options"] = dict(family_build_options or {})
     if diffusion_overrides:
         config.raw.update(diffusion_overrides)
     config.raw["_source_model_ref"] = getattr(
