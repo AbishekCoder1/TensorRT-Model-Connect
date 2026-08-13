@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import csv
 import copy
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -57,6 +59,7 @@ from tools.reporting_html import (  # noqa: E402
 )
 from tools.validation import catalog as validation_catalog  # noqa: E402
 from tools import trtmc_disagreements  # noqa: E402
+from tools import model_selection  # noqa: E402
 
 
 DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
@@ -71,6 +74,18 @@ DEFAULT_REUSED_BUNDLE_REVALIDATION_LIMIT = 1
 LEGACY_E2E_REASON = (
     "E2E execution does not compare aligned reference and TRTMC outputs."
 )
+HF_CACHE_ENVIRONMENT_NAMES = (
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "HUGGINGFACE_HUB_CACHE",
+    "HF_DATASETS_CACHE",
+    "TRANSFORMERS_CACHE",
+    "HF_ASSETS_CACHE",
+    "HF_XET_CACHE",
+)
+RETENTION_POLICIES = ("retain", "delete_on_pass", "delete_always")
+
+
 class ValidationError(RuntimeError):
     """The requested validation cannot be resolved or executed."""
 
@@ -89,15 +104,15 @@ class Binding:
 
 def _required_workload(binding: Binding) -> str:
     if binding.workload is None:
-        raise ValidationError(
-            f"model {binding.model} has no reference-consistency workload"
-        )
+        raise ValidationError(f"model {binding.model} has no reference-consistency workload")
     return binding.workload
 
 
 def _case_directory(output: Path, binding: Binding) -> Path:
-    return output / binding.model / (
-        binding.workload if binding.workload is not None else NOT_COMPARED_DIRECTORY
+    return (
+        output
+        / binding.model
+        / (binding.workload if binding.workload is not None else NOT_COMPARED_DIRECTORY)
     )
 
 
@@ -142,19 +157,24 @@ SANA_WM_SOURCE = ReferenceSource(
 def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
     if not isinstance(name, str) or not isinstance(spec, dict):
         raise ValidationError(f"{path}: invalid model binding {name!r}")
+    obsolete_fields = sorted(
+        {"default", "additional_workloads", "diagnostic_workloads"}.intersection(spec)
+    )
+    if obsolete_fields:
+        raise ValidationError(
+            f"{path}: {name} uses obsolete fields: {', '.join(obsolete_fields)}; "
+            "list every normally selected benchmark under workloads"
+        )
     not_compared_reason = spec.get("not_compared_reason")
     if not_compared_reason is not None:
         if not isinstance(not_compared_reason, str) or not not_compared_reason.strip():
-            raise ValidationError(
-                f"{path}: {name}.not_compared_reason must be a non-empty string"
-            )
-        if "default" in spec or "workloads" in spec:
+            raise ValidationError(f"{path}: {name}.not_compared_reason must be a non-empty string")
+        if "workloads" in spec:
             raise ValidationError(
                 f"{path}: {name} cannot declare workloads while marked not compared"
             )
         return
     workloads = spec.get("workloads")
-    default = spec.get("default")
     valid_workloads = (
         isinstance(workloads, list)
         and bool(workloads)
@@ -164,19 +184,20 @@ def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
         raise ValidationError(f"{path}: {name}.workloads must contain names")
     if "e2e" in workloads:
         raise ValidationError(
-            f"{path}: {name}.workloads cannot use e2e; reference consistency "
+            f"{path}: {name} workloads cannot use e2e; reference consistency "
             "requires aligned reference and TRTMC outputs"
         )
-    if default not in workloads:
-        raise ValidationError(f"{path}: {name}.default must be one of {name}.workloads")
     reference_cache_identity = spec.get("reference_cache_identity")
     if reference_cache_identity is not None and (
-        not isinstance(reference_cache_identity, str)
-        or not reference_cache_identity.strip()
+        not isinstance(reference_cache_identity, str) or not reference_cache_identity.strip()
     ):
-        raise ValidationError(
-            f"{path}: {name}.reference_cache_identity must be a non-empty string"
-        )
+        raise ValidationError(f"{path}: {name}.reference_cache_identity must be a non-empty string")
+
+
+def declared_workloads(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the benchmarks selected for a model's Accuracy matrix."""
+
+    return tuple(dict.fromkeys(spec.get("workloads", [])))
 
 
 def _validate_sample_limits(path: Path, raw: Mapping[str, Any]) -> None:
@@ -186,9 +207,9 @@ def _validate_sample_limits(path: Path, raw: Mapping[str, Any]) -> None:
     for workload, limit in sample_limits.items():
         if not isinstance(workload, str) or not workload:
             raise ValidationError(f"{path}: invalid sample-limit workload {workload!r}")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        if isinstance(limit, bool) or not isinstance(limit, int) or (limit != -1 and limit <= 0):
             raise ValidationError(
-                f"{path}: sample_limits.{workload} must be a positive integer"
+                f"{path}: sample_limits.{workload} must be -1 or a positive integer"
             )
 
 
@@ -306,7 +327,7 @@ def audit_catalog(
         {
             workload
             for spec in models.values()
-            for workload in spec.get("workloads", [])
+            for workload in declared_workloads(spec)
             if workload not in known_workloads
         }
     )
@@ -314,20 +335,15 @@ def audit_catalog(
         raise ValidationError(f"unknown workloads: {', '.join(unknown)}")
 
     declared_sampled = {
-        workload
-        for spec in models.values()
-        for workload in spec.get("workloads", [])
+        workload for spec in models.values() for workload in declared_workloads(spec)
     }
     configured_sampled = set(catalog["sample_limits"])
     missing_limits = sorted(declared_sampled - configured_sampled)
-    stale_limits = sorted(configured_sampled - declared_sampled)
-    if missing_limits or stale_limits:
-        details = []
-        if missing_limits:
-            details.append(f"missing sample limits: {', '.join(missing_limits)}")
-        if stale_limits:
-            details.append(f"unused sample limits: {', '.join(stale_limits)}")
-        raise ValidationError("; ".join(details))
+    unknown_limits = sorted(configured_sampled - known_workloads)
+    if missing_limits:
+        raise ValidationError(f"missing sample limits: {', '.join(missing_limits)}")
+    if unknown_limits:
+        raise ValidationError(f"unknown sample-limit workloads: {', '.join(unknown_limits)}")
 
 
 def audit_workload_compatibility(
@@ -339,16 +355,14 @@ def audit_workload_compatibility(
     incompatible = []
     reference_cache_contracts: dict[str, set[tuple[str, ...]]] = {}
     for model_name, spec in catalog["models"].items():
-        for workload in spec.get("workloads", []):
+        for workload in declared_workloads(spec):
             matched, reason = validation_catalog.suite_match_reason(
                 suites[workload],
                 task_models[model_name],
             )
             if not matched:
                 incompatible.append(f"{model_name}/{workload}: {reason}")
-            reference_cache_identity = str(
-                spec.get("reference_cache_identity", "") or ""
-            )
+            reference_cache_identity = str(spec.get("reference_cache_identity", "") or "")
             if reference_cache_identity:
                 model = task_models[model_name]
                 contract = (
@@ -366,11 +380,39 @@ def audit_workload_compatibility(
     for identity, contracts in sorted(reference_cache_contracts.items()):
         if len(contracts) > 1:
             incompatible.append(
-                f"reference cache identity {identity!r} spans "
-                "different reference contracts"
+                f"reference cache identity {identity!r} spans different reference contracts"
             )
     if incompatible:
         raise ValidationError("incompatible model/workload bindings: " + "; ".join(incompatible))
+
+
+def audit_binding_compatibility(
+    bindings: Iterable[Binding],
+    *,
+    suites: Mapping[str, dict[str, Any]],
+    task_models: Mapping[str, dict[str, Any]],
+) -> None:
+    """Validate explicitly selected bindings against suite selectors."""
+
+    incompatible = []
+    for binding in bindings:
+        if not binding.runnable:
+            continue
+        assert binding.workload is not None
+        suite = suites.get(binding.workload)
+        model = task_models.get(binding.model)
+        if suite is None or model is None:
+            incompatible.append(
+                f"{binding.model}/{binding.workload}: missing suite or model metadata"
+            )
+            continue
+        matched, reason = validation_catalog.suite_match_reason(suite, model)
+        if not matched:
+            incompatible.append(f"{binding.model}/{binding.workload}: {reason}")
+    if incompatible:
+        raise ValidationError(
+            "incompatible selected model/workload bindings: " + "; ".join(incompatible)
+        )
 
 
 def resolve_binding(
@@ -386,27 +428,90 @@ def resolve_binding(
     if not_compared_reason:
         if workload:
             raise ValidationError(
-                f"model {model} has no reference-consistency workloads: "
-                f"{not_compared_reason}"
+                f"model {model} has no reference-consistency workloads: {not_compared_reason}"
             )
         return Binding(
             model=model,
             workload=None,
             not_compared_reason=not_compared_reason,
         )
-    selected = workload or spec["default"]
-    if selected not in spec["workloads"]:
-        available = ", ".join(spec["workloads"])
-        raise ValidationError(
-            f"model {model} does not declare workload {selected}; available: {available}"
-        )
+    available_workloads = declared_workloads(spec)
+    if workload is None:
+        if len(available_workloads) != 1:
+            raise ValidationError(
+                f"model {model} selects {len(available_workloads)} workloads; "
+                "resolve the model matrix or name one workload explicitly"
+            )
+        selected = available_workloads[0]
+    else:
+        selected = workload
+    if selected not in catalog["sample_limits"]:
+        available = ", ".join(sorted(catalog["sample_limits"]))
+        raise ValidationError(f"unknown workload {selected}; available: {available}")
     return Binding(
         model=model,
         workload=selected,
-        reference_cache_identity=str(
-            spec.get("reference_cache_identity", "") or ""
-        ),
+        reference_cache_identity=str(spec.get("reference_cache_identity", "") or ""),
     )
+
+
+def resolve_bindings(
+    catalog: Mapping[str, Any],
+    models: Iterable[str],
+    *,
+    workloads: Iterable[str] = (),
+) -> list[Binding]:
+    """Resolve model selection into independent model/workload bindings."""
+
+    selected_models = model_selection.normalize_models(models)
+    selected_workloads = model_selection.normalize_models(workloads)
+
+    bindings: list[Binding] = []
+    for model in selected_models:
+        spec = catalog["models"].get(model)
+        if not isinstance(spec, Mapping):
+            raise ValidationError(f"unknown or unsupported model: {model}")
+        not_compared_reason = str(spec.get("not_compared_reason", "") or "")
+        if not_compared_reason:
+            if selected_workloads:
+                raise ValidationError(
+                    f"model {model} has no reference-consistency workloads: {not_compared_reason}"
+                )
+            bindings.append(resolve_binding(catalog, model))
+            continue
+
+        model_workloads = (
+            selected_workloads
+            if selected_workloads
+            else model_selection.normalize_models(spec["workloads"])
+        )
+        bindings.extend(resolve_binding(catalog, model, workload) for workload in model_workloads)
+    return bindings
+
+
+def model_profiles_for_families(
+    task_models: Mapping[str, Mapping[str, Any]],
+    ready_models: Iterable[str],
+    families: Iterable[str],
+) -> tuple[str, ...]:
+    """Expand model_ci owner/family IDs into ready Accuracy model profiles."""
+
+    selected_families = model_selection.normalize_models(families)
+    ready = set(ready_models)
+    profiles: list[str] = []
+    missing: list[str] = []
+    for family in selected_families:
+        matched = sorted(
+            model
+            for model, record in task_models.items()
+            if model in ready and str(record.get("family", "")) == family
+        )
+        if not matched:
+            missing.append(family)
+        profiles.extend(matched)
+    if missing:
+        raise ValidationError("model owners have no ready Accuracy profiles: " + ", ".join(missing))
+    return tuple(profiles)
 
 
 def resolve_sample_limit(
@@ -414,20 +519,20 @@ def resolve_sample_limit(
     binding: Binding,
     explicit_limit: int | None,
 ) -> int:
-    if explicit_limit is not None and explicit_limit < 0:
-        raise ValidationError("--limit must be zero or greater")
+    if explicit_limit is not None and explicit_limit < -1:
+        raise ValidationError("--limit must be -1 or greater")
     if not binding.runnable:
         return 0
     if explicit_limit is not None:
-        return explicit_limit
+        return 0 if explicit_limit == -1 else explicit_limit
     assert binding.workload is not None
-    return int(catalog["sample_limits"][binding.workload])
+    configured = int(catalog["sample_limits"][binding.workload])
+    return 0 if configured == -1 else configured
 
 
 def _validation_models(models_root: Path) -> dict[str, dict[str, Any]]:
     return {
-        str(model["name"]): model
-        for model in validation_catalog.load_manifest_records(models_root)
+        str(model["name"]): model for model in validation_catalog.load_manifest_records(models_root)
     }
 
 
@@ -457,9 +562,7 @@ def _binding_profiles(
     suites: Mapping[str, dict[str, Any]] | None = None,
 ) -> tuple[str, ...]:
     if not binding.runnable:
-        raise ValidationError(
-            f"model {binding.model} has no reference-consistency workload"
-        )
+        raise ValidationError(f"model {binding.model} has no reference-consistency workload")
     model = task_models[binding.model]
     profile = _declared_profile(
         family=str(model.get("family", "") or ""),
@@ -473,9 +576,7 @@ def _binding_profiles(
     suite = (suites or {}).get(binding.workload, {})
     scoring = suite.get("scoring", {}) if isinstance(suite, Mapping) else {}
     scoring_profile = (
-        str(scoring.get("python_profile", "") or "")
-        if isinstance(scoring, Mapping)
-        else ""
+        str(scoring.get("python_profile", "") or "") if isinstance(scoring, Mapping) else ""
     )
     if scoring_profile and scoring_profile not in profiles:
         profiles.append(scoring_profile)
@@ -553,8 +654,7 @@ def _ensure_reference_source(source: ReferenceSource, cache_root: Path) -> Path:
             )
             if not (staged / source.entrypoint).exists():
                 raise ValidationError(
-                    f"Pinned {source.name} checkout is missing "
-                    f"{source.entrypoint}"
+                    f"Pinned {source.name} checkout is missing {source.entrypoint}"
                 )
             staged.rename(checkout)
     except subprocess.CalledProcessError as exc:
@@ -570,18 +670,18 @@ def ensure_reference_sources(
     family: str,
     cache_root: Path,
     model_reference_cache: Mapping[str, Any] | None = None,
+    *,
+    source_cache_root: Path | None = None,
 ) -> ReferenceSourceSelection:
     environment = {"TRTMC_STORAGE_ROOT": str(cache_root)}
+    checkout_root = source_cache_root or cache_root
     declared_source = None
     if model_reference_cache:
         required = ("repository", "revision", "relative_path", "entrypoint")
-        missing = [
-            field for field in required if not model_reference_cache.get(field)
-        ]
+        missing = [field for field in required if not model_reference_cache.get(field)]
         if missing:
             raise ValidationError(
-                f"{family} model reference source is missing: "
-                + ", ".join(missing)
+                f"{family} model reference source is missing: " + ", ".join(missing)
             )
         declared_source = ReferenceSource(
             name=family,
@@ -590,7 +690,7 @@ def ensure_reference_sources(
             relative_checkout=Path(str(model_reference_cache["relative_path"])),
             entrypoint=Path(str(model_reference_cache["entrypoint"])),
         )
-        checkout = _ensure_reference_source(declared_source, cache_root)
+        checkout = _ensure_reference_source(declared_source, checkout_root)
         environment_variable = str(
             model_reference_cache.get("environment_variable", "") or ""
         ).strip()
@@ -603,7 +703,7 @@ def ensure_reference_sources(
             environment[environment_variable] = str(checkout)
 
     if family == "elf_flow":
-        checkout = _ensure_reference_source(ELF_SOURCE, cache_root)
+        checkout = _ensure_reference_source(ELF_SOURCE, checkout_root)
         return ReferenceSourceSelection(
             environment=environment,
             elf_reference_repo=checkout,
@@ -611,10 +711,8 @@ def ensure_reference_sources(
     if family == "sana_wm":
         if declared_source is None:
             declared_source = SANA_WM_SOURCE
-            checkout = _ensure_reference_source(declared_source, cache_root)
-        environment["SANA_WM_SCRIPT"] = str(
-            checkout / declared_source.entrypoint
-        )
+            checkout = _ensure_reference_source(declared_source, checkout_root)
+        environment["SANA_WM_SCRIPT"] = str(checkout / declared_source.entrypoint)
     return ReferenceSourceSelection(environment=environment)
 
 
@@ -623,6 +721,8 @@ def _dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
     if not raw:
         raise ValidationError(f"workload {suite.get('id')} has no default dataset path")
     path = Path(raw)
+    if not path.is_absolute():
+        return REPO_ROOT / path
     if dataset_root is None:
         return path
     try:
@@ -646,6 +746,61 @@ def _run_subprocess(command: Sequence[str], log_path: Path, env: Mapping[str, st
             env=dict(env),
         )
     return completed.returncode
+
+
+class WorkerTimeoutError(RuntimeError):
+    """A supervised model worker exceeded its configured wall-clock limit."""
+
+
+def _run_supervised_subprocess(
+    command: Sequence[str],
+    log_path: Path,
+    env: Mapping[str, str],
+    timeout_seconds: float,
+) -> int:
+    if timeout_seconds <= 0:
+        return _run_subprocess(command, log_path, env)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as output:
+        output.write(f"$ {shlex.join(command)}\n")
+        output.flush()
+        process = subprocess.Popen(
+            list(command),
+            text=True,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            env=dict(env),
+            start_new_session=os.name == "posix",
+        )
+        try:
+            return process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            output.write(
+                "\n[trtmc-validate] model worker timed out after "
+                f"{timeout_seconds:g} seconds; terminating process group\n"
+            )
+            output.flush()
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                if os.name == "posix":
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    process.kill()
+                process.wait()
+            raise WorkerTimeoutError(
+                f"model worker exceeded {timeout_seconds:g} seconds"
+            ) from exc
 
 
 def _source_environment() -> dict[str, str]:
@@ -933,15 +1088,12 @@ def _collect_command_logs(
     counts = {"hf": 0, "trtmc": 0}
     logs: dict[str, list[str]] = {"hf": [], "trtmc": []}
     has_native_reference = any(
-        path.name in {"hf_native_run.log", "hf_native_commands.jsonl"}
-        for path in log_paths
+        path.name in {"hf_native_run.log", "hf_native_commands.jsonl"} for path in log_paths
     )
     has_native_reference_commands = any(
         path.name == "hf_native_commands.jsonl" for path in log_paths
     )
-    has_native_trtmc = any(
-        path.name == "bundle_native_commands.jsonl" for path in log_paths
-    )
+    has_native_trtmc = any(path.name == "bundle_native_commands.jsonl" for path in log_paths)
     for path in log_paths:
         kind = _command_log_kind(
             path,
@@ -977,10 +1129,7 @@ def _commands_from_logs(root: Path) -> dict[str, Any]:
         path
         for path in root.rglob("*")
         if path.is_file()
-        and (
-            path.name in _REPRO_COMMAND_LOG_NAMES
-            or path.name.endswith("_native_commands.jsonl")
-        )
+        and (path.name in _REPRO_COMMAND_LOG_NAMES or path.name.endswith("_native_commands.jsonl"))
     )
     commands, counts, logs = _collect_command_logs(
         root,
@@ -1108,9 +1257,7 @@ def _execution_details(
 
 def _comparison_metrics(raw_result: Mapping[str, Any]) -> dict[str, Any]:
     metrics = {
-        name: raw_result[name]
-        for name in _COMPARISON_METRICS
-        if raw_result.get(name) is not None
+        name: raw_result[name] for name in _COMPARISON_METRICS if raw_result.get(name) is not None
     }
     nested = raw_result.get("metrics", {})
     if isinstance(nested, Mapping):
@@ -1206,13 +1353,9 @@ def _normalized_command_logs(reproduce: Mapping[str, Any], kind: str) -> list[st
 
 def _normalize_reproduction(value: Any) -> dict[str, Any]:
     reproduce = value if isinstance(value, dict) else {}
-    all_commands = {
-        kind: _string_list(reproduce.get(kind, []))
-        for kind in ("hf", "trtmc")
-    }
+    all_commands = {kind: _string_list(reproduce.get(kind, [])) for kind in ("hf", "trtmc")}
     commands = {
-        kind: values[:MAX_REPRO_COMMANDS_PER_BACKEND]
-        for kind, values in all_commands.items()
+        kind: values[:MAX_REPRO_COMMANDS_PER_BACKEND] for kind, values in all_commands.items()
     }
     dataset = reproduce.get("dataset", {})
     if not isinstance(dataset, dict):
@@ -1228,9 +1371,7 @@ def _normalize_reproduction(value: Any) -> dict[str, Any]:
             for kind in commands
         },
         "commands_shown": {kind: len(values) for kind, values in commands.items()},
-        "command_logs": {
-            kind: _normalized_command_logs(reproduce, kind) for kind in commands
-        },
+        "command_logs": {kind: _normalized_command_logs(reproduce, kind) for kind in commands},
         "representative": representative,
     }
 
@@ -1388,32 +1529,35 @@ def _comparison_result(
         work_dir=work_dir,
         case_dir=case_dir,
     )
-    return _normalize_result({
-        "schema_version": "trtmc.validation-result/v2",
-        "model": binding.model,
-        "workload": binding.workload,
-        "family": family,
-        "operation": operation,
-        "task_strategy": task_strategy,
-        "task_type": task_type,
-        "user_contract": user_contract,
-        "executor": "trtmc_compare",
-        "status": status,
-        "returncode": returncode,
-        "reference_environment": [
-            {"name": name, "python": path} for name, path in reference_environment.names_and_paths
-        ],
-        "reproduce": _add_dataset_reproduction(
-            _commands_from_logs(work_dir),
-            dataset_command,
-            sample_limit,
-        ),
-        "raw_result": raw_result,
-        "raw_result_path": str(summary_path),
-        "disagreements": disagreements,
-        "execution_log": str(case_dir / "execution.log"),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    return _normalize_result(
+        {
+            "schema_version": "trtmc.validation-result/v2",
+            "model": binding.model,
+            "workload": binding.workload,
+            "family": family,
+            "operation": operation,
+            "task_strategy": task_strategy,
+            "task_type": task_type,
+            "user_contract": user_contract,
+            "executor": "trtmc_compare",
+            "status": status,
+            "returncode": returncode,
+            "reference_environment": [
+                {"name": name, "python": path}
+                for name, path in reference_environment.names_and_paths
+            ],
+            "reproduce": _add_dataset_reproduction(
+                _commands_from_logs(work_dir),
+                dataset_command,
+                sample_limit,
+            ),
+            "raw_result": raw_result,
+            "raw_result_path": str(summary_path),
+            "disagreements": disagreements,
+            "execution_log": str(case_dir / "execution.log"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
 
 
 def _should_revalidate_reused_bundle(
@@ -1629,6 +1773,11 @@ def run_binding(
         str(task_models[binding.model].get("family", "") or ""),
         Path(arguments.reference_cache_dir),
         task_models[binding.model].get("model_reference_cache"),
+        source_cache_root=(
+            Path(arguments.reference_source_cache_dir)
+            if arguments.reference_source_cache_dir is not None
+            else None
+        ),
     )
     process_env = _source_environment()
     process_env.update(environment.overrides)
@@ -1870,9 +2019,7 @@ def _campaign_started_at(output: Path, fallback: str) -> str:
     if not path.is_file() or next(output.glob("*/*/comparison.json"), None) is None:
         return fallback
     try:
-        started_at = json.loads(path.read_text(encoding="utf-8")).get(
-            "started_at"
-        )
+        started_at = json.loads(path.read_text(encoding="utf-8")).get("started_at")
         if not isinstance(started_at, str) or not started_at:
             return fallback
         datetime.fromisoformat(started_at)
@@ -1908,9 +2055,7 @@ def _query_nvidia_smi_gpus() -> list[dict[str, Any]]:
         try:
             index = int(values[0])
         except ValueError as exc:
-            raise ValidationError(
-                "nvidia-smi returned a non-numeric GPU index"
-            ) from exc
+            raise ValidationError("nvidia-smi returned a non-numeric GPU index") from exc
         uuid, name, pci_bus_id = values[1:]
         if not uuid or not name or not pci_bus_id:
             raise ValidationError("nvidia-smi returned incomplete GPU identity data")
@@ -1944,16 +2089,13 @@ def _resolve_cuda_devices(
     for logical_index, selector in enumerate(selectors):
         if selector.isdigit():
             matches = [
-                device
-                for device in inventory
-                if int(device["nvidia_smi_index"]) == int(selector)
+                device for device in inventory if int(device["nvidia_smi_index"]) == int(selector)
             ]
         else:
             matches = [
                 device
                 for device in inventory
-                if str(device["uuid"]) == selector
-                or str(device["uuid"]).startswith(selector)
+                if str(device["uuid"]) == selector or str(device["uuid"]).startswith(selector)
             ]
         if len(matches) != 1:
             raise ValidationError(
@@ -2026,9 +2168,7 @@ def _report_provenance(run: Mapping[str, Any]) -> str:
         ("host", run.get("hostname")),
     ]
     gpu_devices = run.get("gpu_devices", [])
-    if isinstance(gpu_devices, Sequence) and not isinstance(
-        gpu_devices, (str, bytes)
-    ):
+    if isinstance(gpu_devices, Sequence) and not isinstance(gpu_devices, (str, bytes)):
         for device in gpu_devices:
             if not isinstance(device, Mapping):
                 continue
@@ -2159,7 +2299,9 @@ def _reproduction_count(result: Mapping[str, Any], kind: str) -> int:
     counts = reproduce.get("command_count", {}) if isinstance(reproduce, dict) else {}
     commands = _result_commands(result, kind)
     try:
-        return max(int(counts.get(kind)), len(commands)) if isinstance(counts, dict) else len(commands)
+        return (
+            max(int(counts.get(kind)), len(commands)) if isinstance(counts, dict) else len(commands)
+        )
     except (TypeError, ValueError):
         return len(commands)
 
@@ -2185,11 +2327,20 @@ def _dataset_reproduction(result: Mapping[str, Any]) -> tuple[str, int, int]:
     return command, sample_limit, prepared
 
 
+def _selected_sample_count(result: Mapping[str, Any]) -> int | None:
+    reproduce = result.get("reproduce", {})
+    dataset = reproduce.get("dataset", {}) if isinstance(reproduce, dict) else {}
+    if not isinstance(dataset, dict):
+        return None
+    _command, sample_limit, prepared = _dataset_reproduction(result)
+    if "prepared_input_count" in dataset:
+        return min(sample_limit, prepared) if sample_limit > 0 else prepared
+    return sample_limit if sample_limit > 0 else None
+
+
 def _representative_note(result: Mapping[str, Any]) -> str:
     reproduce = result.get("reproduce", {})
-    representative = (
-        reproduce.get("representative", {}) if isinstance(reproduce, dict) else {}
-    )
+    representative = reproduce.get("representative", {}) if isinstance(reproduce, dict) else {}
     if not isinstance(representative, dict):
         return ""
     sample_id = str(representative.get("sample_id", "") or "")
@@ -2242,9 +2393,7 @@ def _render_failure_media(
         body = _failure_media_tag(str(item.get("kind", "")), href, label)
         if not body:
             continue
-        rendered.append(
-            f'<figure><figcaption>{label}</figcaption>{body}</figure>'
-        )
+        rendered.append(f"<figure><figcaption>{label}</figcaption>{body}</figure>")
     if not rendered:
         return ""
     return '<h5>Failure media</h5><div class="failure-media">' + "".join(rendered) + "</div>"
@@ -2312,15 +2461,11 @@ def _render_disagreements(
         limit=limit,
     )
     comparison = result.get("comparison", {})
-    failed = (
-        isinstance(comparison, dict)
-        and comparison.get("status") == "disagreement"
-    )
+    failed = isinstance(comparison, dict) and comparison.get("status") == "disagreement"
     noun = "failed samples" if failed else "sample differences"
     asset_base = Path(artifact_href).parent
     records = "".join(
-        _render_disagreement_record(record, asset_base=asset_base)
-        for record in preview
+        _render_disagreement_record(record, asset_base=asset_base) for record in preview
     )
     more = ""
     if count > len(preview):
@@ -2343,19 +2488,16 @@ def _render_reproduction(
 ) -> str:
     not_compared_reason = str(result.get("not_compared_reason", "") or "")
     if not_compared_reason:
-        return (
-            '<span class="unavailable">'
-            f"{html.escape(not_compared_reason)}"
-            "</span>"
-        )
+        return f'<span class="unavailable">{html.escape(not_compared_reason)}</span>'
     reference_commands = _result_commands(result, "hf")
     trtmc_commands = _result_commands(result, "trtmc")
-    dataset_command, sample_limit, _ = _dataset_reproduction(result)
+    dataset_command, _sample_limit, _prepared = _dataset_reproduction(result)
     reference_total = _reproduction_count(result, "hf")
     trtmc_total = _reproduction_count(result, "trtmc")
-    if sample_limit:
-        sample_label = "sample" if sample_limit == 1 else "samples"
-        dataset_label = f"Dataset slice ({sample_limit} {sample_label})"
+    selected_samples = _selected_sample_count(result)
+    if selected_samples is not None:
+        sample_label = "sample" if selected_samples == 1 else "samples"
+        dataset_label = f"Dataset slice ({selected_samples} {sample_label})"
     else:
         dataset_label = "Full dataset"
     summary = (
@@ -2378,11 +2520,7 @@ def _reference_result_status(result: Mapping[str, Any]) -> str:
     raw_result = result.get("raw_result", {})
     if not isinstance(raw_result, dict):
         return ""
-    return str(
-        raw_result.get("hf_cache_status")
-        or raw_result.get("hf_reference_status")
-        or ""
-    )
+    return str(raw_result.get("hf_cache_status") or raw_result.get("hf_reference_status") or "")
 
 
 def _signal(status: str, labels: Mapping[str, str]) -> str:
@@ -2453,16 +2591,10 @@ def _render_comparison(result: Mapping[str, Any]) -> str:
     contract = result.get("precision_contract", {})
     if isinstance(contract, Mapping) and contract:
         base = str(contract.get("trtmc_base_precision", "") or "").upper()
-        quantization = str(
-            contract.get("trtmc_quantization", "") or ""
-        ).upper()
-        reference = str(
-            contract.get("reference_precision", "") or ""
-        ).upper()
+        quantization = str(contract.get("trtmc_quantization", "") or "").upper()
+        reference = str(contract.get("reference_precision", "") or "").upper()
         candidate = (
-            f"{quantization} ({base} base)"
-            if quantization and quantization != "NONE"
-            else base
+            f"{quantization} ({base} base)" if quantization and quantization != "NONE" else base
         )
         if candidate and reference:
             details.append(f"TRTMC {candidate} vs HF {reference}")
@@ -2474,8 +2606,7 @@ def _render_comparison(result: Mapping[str, Any]) -> str:
         elif comparison_kind == "reference_defined":
             details.append("Reference-defined precision")
     return signal + "".join(
-        f'<div class="detail">{html.escape(detail)}</div>'
-        for detail in details
+        f'<div class="detail">{html.escape(detail)}</div>' for detail in details
     )
 
 
@@ -2527,11 +2658,7 @@ def _render_metrics(result: Mapping[str, Any]) -> str:
 
 def _render_validation(result: Mapping[str, Any]) -> str:
     validation = result.get("validation", {})
-    status = (
-        str(validation.get("status", "failed"))
-        if isinstance(validation, dict)
-        else "failed"
-    )
+    status = str(validation.get("status", "failed")) if isinstance(validation, dict) else "failed"
     return _signal(
         status,
         {
@@ -2546,10 +2673,8 @@ def _render_validation(result: Mapping[str, Any]) -> str:
 def _render_samples(result: Mapping[str, Any]) -> str:
     if result.get("not_compared_reason"):
         return "—"
-    _command, sample_limit, _ = _dataset_reproduction(result)
-    if sample_limit:
-        return str(sample_limit)
-    return "Full"
+    selected_samples = _selected_sample_count(result)
+    return str(selected_samples) if selected_samples is not None else "Full"
 
 
 def _normalize_result_files(
@@ -2599,9 +2724,7 @@ def _report_counts(
         name: sum(result["comparison"]["status"] == name for result in results)
         for name in ("agreement", "disagreement", "not_run")
     }
-    execution_errors = sum(
-        result["execution"]["status"] == "error" for result in results
-    )
+    execution_errors = sum(result["execution"]["status"] == "error" for result in results)
     return validation_counts, comparison_counts, execution_errors
 
 
@@ -2683,11 +2806,7 @@ def _render_task_type(result: Mapping[str, Any]) -> str:
     task_type, user_contract = _result_task_metadata(result)
     if not task_type:
         return "—"
-    contract = (
-        f'<div class="detail">{html.escape(user_contract)}</div>'
-        if user_contract
-        else ""
-    )
+    contract = f'<div class="detail">{html.escape(user_contract)}</div>' if user_contract else ""
     return f"<strong>{html.escape(task_type)}</strong>{contract}"
 
 
@@ -2724,9 +2843,7 @@ def _report_document(
             ReportFilter(
                 "task-type",
                 "Task type",
-                sorted_filter_values(
-                    _result_task_metadata(result)[0] for result in results
-                ),
+                sorted_filter_values(_result_task_metadata(result)[0] for result in results),
             ),
             ReportFilter(
                 "status",
@@ -2739,9 +2856,7 @@ def _report_document(
                         ("red", "Red"),
                         ("white", "White"),
                     )
-                    if any(
-                        _traffic_light_status(result) == status for result in results
-                    )
+                    if any(_traffic_light_status(result) == status for result in results)
                 ),
             ),
         ),
@@ -2822,7 +2937,9 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     result_paths, results = _deduplicate_results(result_paths, results)
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
     traffic_light_counts = _traffic_light_counts(results)
-    sample_limits = [_dataset_reproduction(result)[1] for result in results]
+    sample_counts = [
+        count for result in results if (count := _selected_sample_count(result)) is not None
+    ]
     generated_at = _utc_now()
     report = {
         "schema_version": "trtmc.validation-report/v2",
@@ -2837,8 +2954,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
         "summary": {
             "cases": len(results),
             "execution_completed": sum(
-                result["execution"]["status"] == "completed"
-                for result in results
+                result["execution"]["status"] == "completed" for result in results
             ),
             "execution_errors": execution_errors,
             "agreements": comparison_counts["agreement"],
@@ -2847,7 +2963,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
             "validation_passed": validation_counts["passed"],
             "validation_failed": validation_counts["failed"],
             "validation_skipped": validation_counts["skipped"],
-            "selected_samples": sum(sample_limits),
+            "selected_samples": sum(sample_counts),
         },
         "results": results,
     }
@@ -2879,12 +2995,47 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     return json_path, html_path, report
 
 
-def _print_result(result: Mapping[str, Any], comparison: Path, report: Path) -> None:
+def _print_result(
+    result: Mapping[str, Any],
+    comparison: Path,
+    report: Path,
+    verbose: bool = False,
+) -> None:
     not_compared_reason = str(result.get("not_compared_reason", "") or "")
     if not_compared_reason:
         print()
+        print("Status: NOT COMPARED")
+        print(f"Reason: {not_compared_reason}")
         print(f"Compare result: {comparison}")
         print(f"Report:         {report}")
+        return
+    execution = result.get("execution", {})
+    validation = result.get("validation", {})
+    raw_result = result.get("raw_result", {})
+    validation_status = (
+        str(validation.get("status", "")) if isinstance(validation, Mapping) else ""
+    )
+    status = {
+        "passed": "PASSED",
+        "failed": "FAILED",
+        "skipped": "SKIPPED",
+    }.get(validation_status, validation_status.upper() or "UNKNOWN")
+    print()
+    print(f"Status: {status}")
+    if isinstance(execution, Mapping) and execution.get("status") == "error":
+        error = (
+            str(raw_result.get("error", ""))
+            if isinstance(raw_result, Mapping)
+            else ""
+        )
+        if error:
+            print(f"Error: {error}")
+        worker_log = str(result.get("worker_log", "") or "")
+        if worker_log:
+            print(f"Worker log: {worker_log}")
+    if not verbose:
+        print(f"Compare result: {comparison}")
+        print(f"Report: {report}")
         return
     reproduce = result.get("reproduce", {})
     hf_commands = reproduce.get("hf", []) if isinstance(reproduce, dict) else []
@@ -2941,6 +3092,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("workload", nargs="?")
     parser.add_argument("--all", action="store_true", help="run every ready model")
     parser.add_argument(
+        "--model",
+        dest="selected_models",
+        action="append",
+        default=[],
+        help="canonical model name; repeatable",
+    )
+    parser.add_argument(
+        "--model-selection",
+        type=Path,
+        help=(
+            "JSON owner/family selection emitted by tools/model_ci.py; "
+            "selects matching model profiles"
+        ),
+    )
+    parser.add_argument(
+        "--binding",
+        dest="selected_bindings",
+        action="append",
+        default=[],
+        metavar="MODEL=WORKLOAD",
+        help="exact Accuracy binding; repeatable",
+    )
+    parser.add_argument(
+        "--workload",
+        dest="selected_workloads",
+        action="append",
+        default=[],
+        help="Accuracy workload to run for every selected model; repeatable",
+    )
+    parser.add_argument(
         "--on-model-failure",
         choices=("continue", "stop"),
         default="continue",
@@ -2957,6 +3138,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=_nonnegative_float,
         default=5.0,
         help="delay before retrying a model worker after an execution error",
+    )
+    parser.add_argument(
+        "--model-timeout-seconds",
+        type=_nonnegative_float,
+        default=0.0,
+        help=(
+            "wall-clock limit for each model-worker attempt; terminate its process "
+            "group and record an execution error on timeout (0 disables the limit)"
+        ),
     )
     parser.add_argument(
         "--reused-bundle-revalidation-limit",
@@ -2978,6 +3168,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--resume-existing",
+        action="store_true",
+        help=(
+            "keep terminal results for exact bindings in an existing output "
+            "from the same source revision"
+        ),
+    )
     parser.add_argument("--list", action="store_true", help="list model-first workloads")
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--suites", type=Path, default=DEFAULT_SUITES)
@@ -2990,6 +3188,59 @@ def build_parser() -> argparse.ArgumentParser:
         "--reference-cache-dir",
         type=Path,
         default=DEFAULT_REFERENCE_CACHE,
+    )
+    parser.add_argument(
+        "--reference-source-cache-dir",
+        type=Path,
+        help=(
+            "shared cache for pinned model-owned source repositories; defaults "
+            "to --reference-cache-dir"
+        ),
+    )
+    parser.add_argument(
+        "--storage-root",
+        type=Path,
+        help="require mutable validation paths to stay below this root",
+    )
+    parser.add_argument(
+        "--model-work-dir",
+        type=Path,
+        help=(
+            "isolate engines per model/workload binding and optionally isolate "
+            "the Hugging Face cache per model"
+        ),
+    )
+    parser.add_argument(
+        "--engine-retention",
+        choices=RETENTION_POLICIES,
+        default="retain",
+        help="retain binding engines, delete them on pass, or always delete them",
+    )
+    parser.add_argument(
+        "--hf-cache-mode",
+        choices=("shared", "per_model"),
+        default="shared",
+        help="use the inherited Hugging Face cache or isolate it per model",
+    )
+    parser.add_argument(
+        "--hf-cache-retention",
+        choices=RETENTION_POLICIES,
+        default="retain",
+        help="retention for a per-model Hugging Face cache",
+    )
+    parser.add_argument(
+        "--hf-cache-seed-dir",
+        type=Path,
+        help=(
+            "existing HF_HOME tree to hard-link into each empty per-model cache; "
+            "the seed is never deleted"
+        ),
+    )
+    parser.add_argument(
+        "--minimum-free-space-gib",
+        type=_nonnegative_float,
+        default=0.0,
+        help="refuse to start the next Accuracy binding below this free space",
     )
     parser.add_argument("--trtmc-binary", type=Path, default=REPO_ROOT / "build" / "trtmc")
     parser.add_argument(
@@ -3006,7 +3257,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "override the workload sample limit; use 0 for the complete dataset"
+            "override the workload sample limit; use -1 for the complete dataset; "
+            "0 remains accepted for compatibility"
         ),
     )
     parser.add_argument("--force-hf", action="store_true")
@@ -3014,6 +3266,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print full reproduction commands and detailed worker progress",
+    )
     return parser
 
 
@@ -3043,14 +3300,74 @@ def _select_bindings(
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
     ready_models: Iterable[str],
+    task_models: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[Binding]:
+    selection_modes = sum(
+        bool(value)
+        for value in (
+            arguments.all,
+            arguments.model,
+            arguments.selected_models,
+            arguments.model_selection,
+            arguments.selected_bindings,
+        )
+    )
+    if selection_modes > 1:
+        raise ValidationError(
+            "choose exactly one model selection: MODEL, --model, "
+            "--model-selection, --binding, or --all"
+        )
+    if not selection_modes:
+        raise ValidationError(
+            "provide MODEL [WORKLOAD], --model, --model-selection, --binding, --all, or --list"
+        )
+    if arguments.selected_bindings and (arguments.workload or arguments.selected_workloads):
+        raise ValidationError(
+            "--binding cannot be combined with positional WORKLOAD, or --workload"
+        )
+    if arguments.workload and arguments.selected_workloads:
+        raise ValidationError("positional WORKLOAD cannot be combined with --workload")
+
+    if arguments.selected_bindings:
+        bindings: list[Binding] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_binding in arguments.selected_bindings:
+            model, separator, workload = raw_binding.partition("=")
+            model = model.strip()
+            workload = workload.strip()
+            if not separator or not model or not workload:
+                raise ValidationError(f"invalid --binding {raw_binding!r}; expected MODEL=WORKLOAD")
+            identity = (model, workload)
+            if identity not in seen:
+                bindings.append(resolve_binding(catalog, model, workload))
+                seen.add(identity)
+        if arguments.dataset and len(bindings) != 1:
+            raise ValidationError("--dataset requires exactly one model/workload binding")
+        return bindings
     if arguments.all:
-        if arguments.model or arguments.workload or arguments.dataset:
-            raise ValidationError("--all cannot be combined with MODEL, WORKLOAD, or --dataset")
-        return [resolve_binding(catalog, model) for model in ready_models]
-    if not arguments.model:
-        raise ValidationError("provide MODEL [WORKLOAD], --all, or --list")
-    return [resolve_binding(catalog, arguments.model, arguments.workload)]
+        models = tuple(ready_models)
+    elif arguments.model:
+        models = (arguments.model,)
+    elif arguments.model_selection:
+        if task_models is None:
+            raise ValidationError("task model metadata is required for --model-selection")
+        models = model_profiles_for_families(
+            task_models,
+            ready_models,
+            model_selection.load_model_selection(arguments.model_selection),
+        )
+    else:
+        models = model_selection.normalize_models(arguments.selected_models)
+
+    workloads = (arguments.workload,) if arguments.workload else tuple(arguments.selected_workloads)
+    bindings = resolve_bindings(
+        catalog,
+        models,
+        workloads=workloads,
+    )
+    if arguments.dataset and len(bindings) != 1:
+        raise ValidationError("--dataset requires exactly one model/workload binding")
+    return bindings
 
 
 def _print_bindings(
@@ -3089,9 +3406,217 @@ def _print_bindings(
 
 
 def _prepare_run_directories(arguments: argparse.Namespace) -> None:
+    if arguments.engine_retention != "retain" and arguments.model_work_dir is None:
+        raise ValidationError("non-retained engines require --model-work-dir isolation")
+    if arguments.hf_cache_mode == "per_model" and arguments.model_work_dir is None:
+        raise ValidationError("--hf-cache-mode per_model requires --model-work-dir")
+    if arguments.hf_cache_mode == "shared" and arguments.hf_cache_retention != "retain":
+        raise ValidationError(
+            "a shared Hugging Face cache only supports --hf-cache-retention retain"
+        )
+    if arguments.hf_cache_seed_dir is not None and arguments.hf_cache_mode != "per_model":
+        raise ValidationError("--hf-cache-seed-dir requires --hf-cache-mode per_model")
+    if arguments.storage_root is not None:
+        storage_root = arguments.storage_root.expanduser().resolve()
+        if not storage_root.is_dir():
+            raise ValidationError(f"storage root does not exist: {storage_root}")
+        arguments.storage_root = storage_root
+        for label, path in (
+            ("output", arguments.output),
+            ("engine directory", arguments.engine_dir),
+            ("reference cache directory", arguments.reference_cache_dir),
+            ("reference source cache directory", arguments.reference_source_cache_dir),
+            ("model work directory", arguments.model_work_dir),
+            ("Hugging Face cache seed directory", arguments.hf_cache_seed_dir),
+        ):
+            if path is None:
+                continue
+            resolved = path.expanduser().resolve()
+            try:
+                resolved.relative_to(storage_root)
+            except ValueError as exc:
+                raise ValidationError(
+                    f"{label} must stay below storage root {storage_root}: {resolved}"
+                ) from exc
+    if arguments.hf_cache_seed_dir is not None:
+        seed = arguments.hf_cache_seed_dir.expanduser().resolve()
+        if not seed.is_dir():
+            raise ValidationError(f"Hugging Face cache seed directory does not exist: {seed}")
+        arguments.hf_cache_seed_dir = seed
+    if arguments.model_work_dir is not None:
+        output = arguments.output.expanduser().resolve()
+        model_work = arguments.model_work_dir.expanduser().resolve()
+        if (
+            output == model_work
+            or output.is_relative_to(model_work)
+            or model_work.is_relative_to(output)
+        ):
+            raise ValidationError("output and model work directory must be disjoint")
+        arguments.output = output
+        arguments.model_work_dir = model_work
+        if arguments.hf_cache_seed_dir is not None and (
+            arguments.hf_cache_seed_dir == model_work
+            or arguments.hf_cache_seed_dir.is_relative_to(model_work)
+            or model_work.is_relative_to(arguments.hf_cache_seed_dir)
+        ):
+            raise ValidationError(
+                "Hugging Face cache seed and model work directory must be disjoint"
+            )
     arguments.output.mkdir(parents=True, exist_ok=True)
-    arguments.engine_dir.mkdir(parents=True, exist_ok=True)
+    if arguments.model_work_dir is None:
+        arguments.engine_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        arguments.model_work_dir.mkdir(parents=True, exist_ok=True)
     arguments.reference_cache_dir.mkdir(parents=True, exist_ok=True)
+    if arguments.reference_source_cache_dir is not None:
+        arguments.reference_source_cache_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _binding_resource_arguments(
+    arguments: argparse.Namespace,
+    binding: Binding,
+) -> tuple[argparse.Namespace, Path | None, Path | None]:
+    selected = copy.copy(arguments)
+    if arguments.model_work_dir is None:
+        return selected, None, None
+    if Path(binding.model).name != binding.model:
+        raise ValidationError(f"unsafe model name for model work: {binding.model!r}")
+    workload = _required_workload(binding)
+    if Path(workload).name != workload:
+        raise ValidationError(f"unsafe workload name for binding work: {workload!r}")
+    model_work = arguments.model_work_dir / binding.model
+    # Dataset preparation can change the resolved build shape/profile. Keep the
+    # engine below the exact Accuracy binding; only the HF cache is model-scoped.
+    binding_work = model_work / "bindings" / workload
+    selected.engine_dir = binding_work / "engines"
+    selected.engine_dir.mkdir(parents=True, exist_ok=True)
+    selected.hf_cache_dir = None
+    if arguments.hf_cache_mode == "per_model":
+        selected.hf_cache_dir = model_work / "hf-cache"
+        selected.hf_cache_dir.mkdir(parents=True, exist_ok=True)
+        if arguments.hf_cache_seed_dir is not None and not any(
+            selected.hf_cache_dir.iterdir()
+        ):
+            if (
+                arguments.hf_cache_seed_dir.stat().st_dev
+                != selected.hf_cache_dir.stat().st_dev
+            ):
+                raise ValidationError(
+                    "Hugging Face cache seed and per-model cache must use the same filesystem"
+                )
+            try:
+                shutil.copytree(
+                    arguments.hf_cache_seed_dir,
+                    selected.hf_cache_dir,
+                    dirs_exist_ok=True,
+                    symlinks=True,
+                    copy_function=os.link,
+                )
+            except OSError as exc:
+                shutil.rmtree(selected.hf_cache_dir, ignore_errors=True)
+                raise ValidationError(
+                    f"could not hard-link Hugging Face cache seed "
+                    f"{arguments.hf_cache_seed_dir}: {exc}"
+                ) from exc
+    return selected, binding_work, model_work
+
+
+def _delete_for_retention(policy: str, *, passed: bool) -> bool:
+    return policy == "delete_always" or (policy == "delete_on_pass" and passed)
+
+
+def _cleanup_resource(path: Path, policy: str, *, passed: bool) -> dict[str, str]:
+    evidence = {"path": str(path), "policy": policy, "status": "retained"}
+    if not _delete_for_retention(policy, passed=passed):
+        return evidence
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        evidence["status"] = "already_absent"
+    except OSError as exc:
+        evidence.update({"status": "failed", "error": str(exc)})
+    else:
+        evidence["status"] = "deleted"
+    return evidence
+
+
+def _cleanup_binding_engine(
+    arguments: argparse.Namespace,
+    binding_work: Path | None,
+    *,
+    passed: bool,
+) -> dict[str, str]:
+    if binding_work is None:
+        return {"policy": "retain", "status": "shared_retained"}
+    engine = _cleanup_resource(
+        binding_work / "engines",
+        arguments.engine_retention,
+        passed=passed,
+    )
+    try:
+        binding_work.rmdir()
+    except OSError:
+        pass
+    return engine
+
+
+def _cleanup_model_hf_cache(
+    arguments: argparse.Namespace,
+    model_work: Path | None,
+    *,
+    passed: bool,
+    model_complete: bool,
+) -> dict[str, str]:
+    if model_work is None:
+        return {"policy": "retain", "status": "shared_retained"}
+    if arguments.hf_cache_mode == "shared":
+        if model_complete:
+            for directory in (model_work / "bindings", model_work):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+        return {"policy": "retain", "status": "shared_retained"}
+    if not model_complete:
+        return {
+            "path": str(model_work / "hf-cache"),
+            "policy": arguments.hf_cache_retention,
+            "status": "retained_until_model_complete",
+        }
+    hf_cache = _cleanup_resource(
+        model_work / "hf-cache",
+        arguments.hf_cache_retention,
+        passed=passed,
+    )
+    for directory in (model_work / "bindings", model_work):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return hf_cache
+
+
+def _worker_environment(arguments: argparse.Namespace) -> dict[str, str]:
+    environment = _source_environment()
+    hf_cache_dir = getattr(arguments, "hf_cache_dir", None)
+    if hf_cache_dir is None:
+        return environment
+    environment["HF_HOME"] = str(Path(hf_cache_dir).resolve())
+    for name in HF_CACHE_ENVIRONMENT_NAMES[1:]:
+        environment.pop(name, None)
+    return environment
+
+
+def _check_free_space(arguments: argparse.Namespace, binding: Binding) -> float:
+    root = arguments.storage_root or arguments.model_work_dir or arguments.output
+    free_gib = shutil.disk_usage(root).free / 1024**3
+    if free_gib < arguments.minimum_free_space_gib:
+        raise ValidationError(
+            f"refusing to start {binding.model}/{binding.workload}: "
+            f"only {free_gib:.1f} GiB free; "
+            f"minimum is {arguments.minimum_free_space_gib:.1f} GiB"
+        )
+    return free_gib
 
 
 def _worker_command(
@@ -3129,6 +3654,7 @@ def _worker_command(
     ):
         command.extend([option, str(value)])
     for option, value in (
+        ("--reference-source-cache-dir", arguments.reference_source_cache_dir),
         ("--dataset-root", arguments.dataset_root),
         ("--backend-dir", arguments.backend_dir),
         ("--model-plugin-dir", arguments.model_plugin_dir),
@@ -3157,6 +3683,7 @@ def _worker_error_result(
     worker_log: Path,
     sample_limit: int,
     error: str,
+    error_type: str = "WorkerProcessError",
 ) -> dict[str, Any]:
     return _normalize_result(
         {
@@ -3178,7 +3705,7 @@ def _worker_error_result(
             },
             "raw_result": {
                 "status": "failed",
-                "error_type": "WorkerProcessError",
+                "error_type": error_type,
                 "error": error,
             },
             "raw_result_path": "",
@@ -3196,6 +3723,23 @@ def _worker_error_result(
     )
 
 
+_WORKER_EXCEPTION_LINE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)|[^:]+: error):\s+.+$"
+)
+
+
+def _worker_log_error(worker_log: Path) -> str:
+    try:
+        lines = worker_log.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines[-200:]):
+        rendered = line.strip()
+        if _WORKER_EXCEPTION_LINE.fullmatch(rendered):
+            return rendered
+    return ""
+
+
 def _run_supervised_binding(
     binding: Binding,
     *,
@@ -3207,13 +3751,21 @@ def _run_supervised_binding(
     case_dir.mkdir(parents=True, exist_ok=True)
     comparison_path = case_dir / "comparison.json"
     comparison_path.unlink(missing_ok=True)
-    worker_log = case_dir / (
-        "worker.log" if attempt == 1 else f"worker.attempt-{attempt}.log"
-    )
+    worker_log = case_dir / ("worker.log" if attempt == 1 else f"worker.attempt-{attempt}.log")
     command = _worker_command(binding, arguments)
     launch_error = ""
+    error_type = "WorkerProcessError"
     try:
-        returncode = _run_subprocess(command, worker_log, _source_environment())
+        returncode = _run_supervised_subprocess(
+            command,
+            worker_log,
+            _worker_environment(arguments),
+            arguments.model_timeout_seconds,
+        )
+    except WorkerTimeoutError as exc:
+        returncode = 124
+        launch_error = str(exc)
+        error_type = "WorkerTimeoutError"
     except OSError as exc:
         returncode = 127
         launch_error = f"could not start model worker: {exc}"
@@ -3229,13 +3781,15 @@ def _run_supervised_binding(
         if result.get("model") != binding.model or result.get("workload") != binding.workload:
             raise ValidationError("worker wrote comparison.json for a different binding")
     except (OSError, ValueError, ValidationError) as exc:
+        worker_error = _worker_log_error(worker_log)
         result = _worker_error_result(
             binding,
             command=command,
             returncode=returncode,
             worker_log=worker_log,
             sample_limit=resolve_sample_limit(catalog, binding, arguments.limit),
-            error=str(exc),
+            error=worker_error or str(exc),
+            error_type=error_type,
         )
         (case_dir / "disagreements.jsonl").write_text("", encoding="utf-8")
     else:
@@ -3287,15 +3841,9 @@ def _attempt_record(
         "execution_log": execution_log,
         "comparison_result": archived.get("comparison.json", ""),
         "error_type": (
-            str(raw_result.get("error_type", ""))
-            if isinstance(raw_result, Mapping)
-            else ""
+            str(raw_result.get("error_type", "")) if isinstance(raw_result, Mapping) else ""
         ),
-        "error": (
-            str(raw_result.get("error", ""))
-            if isinstance(raw_result, Mapping)
-            else ""
-        ),
+        "error": (str(raw_result.get("error", "")) if isinstance(raw_result, Mapping) else ""),
     }
 
 
@@ -3322,26 +3870,30 @@ def _run_supervised_binding_with_retries(
         )
         revalidation_budget.record_worker_result(result)
         execution = result.get("execution", {})
-        execution_error = (
-            isinstance(execution, Mapping)
-            and execution.get("status") == "error"
-        )
+        execution_error = isinstance(execution, Mapping) and execution.get("status") == "error"
         archived = (
             _archive_failed_attempt(case_dir, attempt)
             if execution_error and attempt < arguments.model_attempts
             else {}
         )
-        attempts.append(
-            _attempt_record(
-                result,
-                attempt=attempt,
-                archived=archived,
-            )
+        attempt_result = _attempt_record(
+            result,
+            attempt=attempt,
+            archived=archived,
         )
+        attempts.append(attempt_result)
         if not execution_error or attempt == arguments.model_attempts:
             break
         print(
-            f"Retrying worker after execution error: {binding.model} "
+            f"  Attempt {attempt}/{arguments.model_attempts}: FAILED",
+            flush=True,
+        )
+        if attempt_result["error"]:
+            print(f"  Error: {attempt_result['error']}", flush=True)
+        if attempt_result["worker_log"]:
+            print(f"  Worker log: {attempt_result['worker_log']}", flush=True)
+        print(
+            f"  Retrying {binding.model} "
             f"(attempt {attempt + 1}/{arguments.model_attempts})",
             flush=True,
         )
@@ -3365,25 +3917,91 @@ def _run_supervised_binding_with_retries(
     return result
 
 
+def _resumable_binding_result(
+    output: Path,
+    binding: Binding,
+) -> dict[str, Any] | None:
+    comparison = _case_directory(output, binding) / "comparison.json"
+    try:
+        loaded = json.loads(comparison.read_text(encoding="utf-8"))
+        result = _normalize_result(loaded)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if result.get("model") != binding.model or result.get("workload") != binding.workload:
+        return None
+    execution = result.get("execution")
+    validation = result.get("validation")
+    if not isinstance(execution, Mapping) or execution.get("status") not in {
+        "completed",
+        "error",
+    }:
+        return None
+    if not isinstance(validation, Mapping) or validation.get("status") not in {
+        "passed",
+        "failed",
+        "skipped",
+    }:
+        return None
+    return result
+
+
+def _resume_command(command: str) -> list[str]:
+    try:
+        arguments = shlex.split(command)
+    except ValueError as exc:
+        raise ValidationError(f"cannot parse recorded Accuracy command: {exc}") from exc
+    presentation_only = {"--resume-existing", "--verbose"}
+    return [argument for argument in arguments if argument not in presentation_only]
+
+
+def _validate_resume_request(output: Path) -> None:
+    run_path = output / "run.json"
+    try:
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValidationError(f"cannot resume without run metadata: {run_path}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"cannot read resume metadata {run_path}: {exc}") from exc
+    if not isinstance(run, Mapping):
+        raise ValidationError(f"resume metadata must contain a JSON object: {run_path}")
+    previous = str(run.get("source_revision", "") or "")
+    current = _source_revision()
+    if not previous or previous != current:
+        raise ValidationError(
+            "cannot resume Accuracy results from a different source revision: "
+            f"recorded={previous or '<missing>'}, current={current or '<missing>'}"
+        )
+    recorded_command = str(run.get("command", "") or "")
+    current_command = shlex.join(sys.argv)
+    if not recorded_command or _resume_command(recorded_command) != _resume_command(
+        current_command
+    ):
+        raise ValidationError("cannot resume Accuracy results with a different resolved command")
+
+
 def _run_all_bindings(
     bindings: Iterable[Binding],
     *,
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
 ) -> int:
+    bindings = tuple(bindings)
     _prepare_run_directories(arguments)
     _reused_bundle_revalidation_budget(arguments)
+    if arguments.resume_existing:
+        _validate_resume_request(arguments.output)
     write_run_metadata(
         arguments.output,
         cuda_visible_devices=arguments.cuda_visible_devices,
     )
     failed = False
     not_compared = False
+    remaining = Counter(binding.model for binding in bindings if binding.runnable)
+    model_passed = {model: True for model in remaining}
     for binding in bindings:
         if not binding.runnable:
             print(
-                f"\nNot compared: {binding.model} / "
-                f"{binding.not_compared_reason}",
+                f"\nNot compared: {binding.model} / {binding.not_compared_reason}",
                 flush=True,
             )
             result, comparison = _write_not_compared_case(
@@ -3392,29 +4010,73 @@ def _run_all_bindings(
             )
             not_compared = True
             _, report_path, _ = write_report(arguments.output)
-            _print_result(result, comparison, report_path)
+            _print_result(result, comparison, report_path, arguments.verbose)
             continue
         sample_limit = resolve_sample_limit(catalog, binding, arguments.limit)
-        sample_note = (
-            "full dataset"
-            if sample_limit == 0
-            else f"{sample_limit} samples"
-        )
-        print(
-            f"\nStarting worker: {binding.model} / {binding.workload} / {sample_note}",
-            flush=True,
-        )
-        result = _run_supervised_binding_with_retries(
+        sample_note = "full dataset" if sample_limit == 0 else f"{sample_limit} samples"
+        binding_arguments, binding_work, model_work = _binding_resource_arguments(
+            arguments,
             binding,
-            arguments=arguments,
-            catalog=catalog,
+        )
+        result = (
+            _resumable_binding_result(arguments.output, binding)
+            if arguments.resume_existing
+            else None
+        )
+        if result is None:
+            free_gib = _check_free_space(arguments, binding)
+            print(
+                f"\nStarting worker: {binding.model} / {binding.workload} / "
+                f"{sample_note} / {free_gib:.1f} GiB free",
+                flush=True,
+            )
+            result = _run_supervised_binding_with_retries(
+                binding,
+                arguments=binding_arguments,
+                catalog=catalog,
+            )
+        else:
+            print(
+                f"\nResume: keeping terminal result for {binding.model} / {binding.workload}",
+                flush=True,
+            )
+        model_failed = result["validation"]["status"] == "failed"
+        model_passed[binding.model] = model_passed[binding.model] and not model_failed
+        remaining[binding.model] -= 1
+        stop_model = model_failed and arguments.on_model_failure == "stop"
+        model_complete = remaining[binding.model] == 0 or stop_model
+        cleanup = {
+            "scope": "binding",
+            "passed": not model_failed,
+            "engine": _cleanup_binding_engine(
+                arguments,
+                binding_work,
+                passed=not model_failed,
+            ),
+            "hf_cache": _cleanup_model_hf_cache(
+                arguments,
+                model_work,
+                passed=(model_passed[binding.model] and remaining[binding.model] == 0),
+                model_complete=model_complete,
+            ),
+        }
+        result["resource_cleanup"] = cleanup
+        cleanup_failed = any(
+            resource.get("status") == "failed"
+            for resource in (cleanup["engine"], cleanup["hf_cache"])
+        )
+        failed = failed or cleanup_failed
+        comparison = _case_directory(arguments.output, binding) / "comparison.json"
+        comparison.parent.mkdir(parents=True, exist_ok=True)
+        comparison.write_text(
+            json.dumps(result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
         )
         _, report_path, _ = write_report(arguments.output)
         comparison = _case_directory(arguments.output, binding) / "comparison.json"
-        _print_result(result, comparison, report_path)
-        model_failed = result["validation"]["status"] == "failed"
+        _print_result(result, comparison, report_path, arguments.verbose)
         failed = failed or model_failed
-        if model_failed and arguments.on_model_failure == "stop":
+        if stop_model:
             print(
                 f"Stopping after failed model: {binding.model}",
                 flush=True,
@@ -3447,8 +4109,7 @@ def _run_bindings(
     for binding in bindings:
         if not binding.runnable:
             print(
-                f"\nNot compared: {binding.model} / "
-                f"{binding.not_compared_reason}",
+                f"\nNot compared: {binding.model} / {binding.not_compared_reason}",
                 flush=True,
             )
             result, comparison = _write_not_compared_case(
@@ -3458,7 +4119,7 @@ def _run_bindings(
             not_compared = True
             if not arguments.model_worker:
                 _, report_path, _ = write_report(arguments.output)
-                _print_result(result, comparison, report_path)
+                _print_result(result, comparison, report_path, arguments.verbose)
             continue
         binding_arguments = copy.copy(arguments)
         binding_arguments._reused_bundle_revalidation_budget = (
@@ -3470,9 +4131,7 @@ def _run_bindings(
             arguments.limit,
         )
         sample_note = (
-            "full dataset"
-            if binding_arguments.limit == 0
-            else f"{binding_arguments.limit} samples"
+            "full dataset" if binding_arguments.limit == 0 else f"{binding_arguments.limit} samples"
         )
         print(
             f"\n{binding.model} / {binding.workload} / {sample_note}",
@@ -3487,7 +4146,7 @@ def _run_bindings(
         if not arguments.model_worker:
             _, report_path, _ = write_report(arguments.output)
             comparison = _case_directory(arguments.output, binding) / "comparison.json"
-            _print_result(result, comparison, report_path)
+            _print_result(result, comparison, report_path, arguments.verbose)
         failed = failed or result["validation"]["status"] == "failed"
     if failed:
         return 1
@@ -3505,10 +4164,16 @@ def _main(arguments: argparse.Namespace) -> int:
             workloads = []
             for workload in spec["workloads"]:
                 limit = catalog["sample_limits"][workload]
-                workloads.append(f"{workload} ({limit} samples)")
+                limit_label = "all samples" if limit == -1 else f"{limit} samples"
+                workloads.append(f"{workload} ({limit_label})")
             print(f"{name}: {', '.join(workloads)}")
         return 0
-    bindings = _select_bindings(arguments, catalog, ready)
+    bindings = _select_bindings(arguments, catalog, ready, task_models)
+    audit_binding_compatibility(
+        bindings,
+        suites=suites,
+        task_models=task_models,
+    )
     if arguments.dry_run:
         _print_bindings(
             bindings,

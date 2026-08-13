@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import shlex
+import sys
 
 import pytest
 
@@ -20,18 +22,14 @@ from tools import trtmc_validate
 
 def test_validation_entrypoints_use_narrow_engine_boundaries():
     for entrypoint in ("trtmc_validate.py", "trtmc_reference.py"):
-        source = (trtmc_validate.REPO_ROOT / "tools" / entrypoint).read_text(
-            encoding="utf-8"
-        )
+        source = (trtmc_validate.REPO_ROOT / "tools" / entrypoint).read_text(encoding="utf-8")
         assert "validation import engine" not in source
 
 
 def test_model_workload_catalog_covers_every_ready_model():
     catalog = trtmc_validate.load_catalog()
     suites = validation_catalog.load_suites()
-    task_models = trtmc_validate._validation_models(
-        trtmc_validate.DEFAULT_MODELS
-    )
+    task_models = trtmc_validate._validation_models(trtmc_validate.DEFAULT_MODELS)
     ready_models = trtmc_validate.ready_model_names()
 
     trtmc_validate.audit_catalog(
@@ -46,22 +44,14 @@ def test_model_workload_catalog_covers_every_ready_model():
     )
 
     assert len(catalog["models"]) == len(ready_models) == 106
-    assert sum(
-        "not_compared_reason" in spec for spec in catalog["models"].values()
-    ) == 0
-    assert all(
-        "e2e" not in spec.get("workloads", [])
-        for spec in catalog["models"].values()
-    )
+    assert sum("not_compared_reason" in spec for spec in catalog["models"].values()) == 0
+    assert all("e2e" not in spec.get("workloads", []) for spec in catalog["models"].values())
     assert "reference_cache_identity" not in catalog["models"]["personaplex-7b"]
     assert (
         catalog["models"]["flux-2-dev"]["reference_cache_identity"]
         == catalog["models"]["flux-2-dev-fp8"]["reference_cache_identity"]
     )
-    assert (
-        catalog["models"]["flux-2-dev"]["reference_cache_identity"]
-        == "flux-2-dev-dpg-v2"
-    )
+    assert catalog["models"]["flux-2-dev"]["reference_cache_identity"] == "flux-2-dev-dpg-v2"
     qwen_identities = {
         catalog["models"][name]["reference_cache_identity"]
         for name in (
@@ -71,26 +61,35 @@ def test_model_workload_catalog_covers_every_ready_model():
         )
     }
     assert len(qwen_identities) == 1
+    bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
+    assert len(bindings) == 106
+    assert [
+        binding.workload for binding in bindings if binding.model == "personaplex-7b"
+    ] == ["full_duplex_bench_behavior_parity"]
+    assert trtmc_validate.resolve_binding(
+        catalog,
+        "personaplex-7b",
+        "full_duplex_bench_speech_parity",
+    ) == trtmc_validate.Binding(
+        "personaplex-7b",
+        "full_duplex_bench_speech_parity",
+    )
+    assert [
+        binding.workload for binding in bindings if binding.model == "qwen25vl-3b"
+    ] == ["vlm_mmmu_pro_vision_fixed_mcq"]
 
 
 def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     catalog = trtmc_validate.load_catalog()
     suites = validation_catalog.load_suites()
-    suite = next(
-        value
-        for value in suites
-        if value["id"] == "minimax_h3_official_profile_parity"
-    )
+    suite = next(value for value in suites if value["id"] == "minimax_h3_official_profile_parity")
     model = next(
         value
-        for value in validation_catalog.load_manifest_records(
-            trtmc_validate.DEFAULT_MODELS
-        )
+        for value in validation_catalog.load_manifest_records(trtmc_validate.DEFAULT_MODELS)
         if value["name"] == "minimax-h3-768p"
     )
 
     assert catalog["models"]["minimax-h3-768p"] == {
-        "default": "minimax_h3_official_profile_parity",
         "workloads": ["minimax_h3_official_profile_parity"],
     }
     assert validation_catalog.suite_match_reason(suite, model) == (
@@ -99,9 +98,7 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     )
     assert suite["dataset"] == {
         "kind": "model_plugin_json",
-        "default_path": (
-            "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
-        ),
+        "default_path": ("tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"),
     }
     assert suite["scoring"] == {"scorer": "model_plugin_parity"}
     assert suite["gates"] == {"min_sample_pass_rate": 1.0}
@@ -126,20 +123,39 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     }
 
 
-def test_validation_ready_models_exclude_l0_only_profiles():
-    records = validation_catalog.load_manifest_records(
-        trtmc_validate.DEFAULT_MODELS
+def test_dataset_path_keeps_repository_owned_default_with_dataset_root(tmp_path: Path) -> None:
+    suite = {
+        "id": "repo-owned",
+        "dataset": {
+            "default_path": "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
+        },
+    }
+
+    assert trtmc_validate._dataset_path(suite, tmp_path / "datasets") == (
+        trtmc_validate.REPO_ROOT
+        / "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
     )
+
+
+def test_dataset_path_rebases_mounted_defaults_under_dataset_root(tmp_path: Path) -> None:
+    suite = {
+        "id": "mounted",
+        "dataset": {"default_path": "/mnt/data/example/dataset.json"},
+    }
+
+    assert trtmc_validate._dataset_path(suite, tmp_path / "datasets") == (
+        tmp_path / "datasets/example/dataset.json"
+    )
+
+
+def test_validation_ready_models_exclude_l0_only_profiles():
+    records = validation_catalog.load_manifest_records(trtmc_validate.DEFAULT_MODELS)
     eligible = {
         str(record["name"])
         for record in records
         if not record["requires_multi_device"] and not record.get("skip")
     }
-    l0_only = {
-        str(record["name"])
-        for record in records
-        if record.get("ci_tier") == "l0_only"
-    }
+    l0_only = {str(record["name"]) for record in records if record.get("ci_tier") == "l0_only"}
     selected = set(trtmc_validate.ready_model_names())
 
     assert l0_only
@@ -152,16 +168,16 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     declared = {
         workload
         for spec in catalog["models"].values()
-        for workload in spec.get("workloads", [])
+        for workload in trtmc_validate.declared_workloads(spec)
     }
 
-    assert configured == declared
+    assert declared <= configured
+    assert configured - declared == {
+        "full_duplex_bench_speech_parity",
+        "vlm_mmmu_pro_vision_mcq",
+    }
     assert min(catalog["sample_limits"].values()) >= 1
-    assert {
-        workload
-        for workload, limit in catalog["sample_limits"].items()
-        if limit == 1
-    } == {
+    assert {workload for workload, limit in catalog["sample_limits"].items() if limit == 1} == {
         "minimax_h3_official_profile_parity",
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
@@ -185,9 +201,7 @@ def test_standard_validation_suites_have_report_task_types():
 
 def test_every_dataset_backed_validation_binding_has_native_reference_runner():
     catalog = trtmc_validate.load_catalog()
-    suites = {
-        suite["id"]: suite for suite in validation_catalog.load_suites()
-    }
+    suites = {suite["id"]: suite for suite in validation_catalog.load_suites()}
     bindings = [
         (model_name, workload)
         for model_name, spec in catalog["models"].items()
@@ -196,33 +210,30 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
     missing = []
     for model_name, workload in bindings:
         dataset_kind = str(suites[workload]["dataset"]["kind"])
-        if trtmc_reference.native_reference_runner_for_dataset_kind(
-            dataset_kind
-        ) is None:
+        if trtmc_reference.native_reference_runner_for_dataset_kind(dataset_kind) is None:
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
     assert len({model for model, _workload in bindings}) == 106
 
 
-def test_resolve_binding_defaults_and_rejects_undeclared_workload():
+def test_resolve_binding_requires_an_explicit_choice_for_multi_workload_model():
     catalog = {
+        "sample_limits": {
+            "workload-a": 5,
+            "workload-b": 5,
+            "workload-c": 5,
+        },
         "models": {
             "model-a": {
-                "default": "workload-a",
                 "workloads": ["workload-a", "workload-b"],
                 "reference_cache_identity": "org/model/reference-contract-v1",
             }
-        }
+        },
     }
 
-    assert trtmc_validate.resolve_binding(catalog, "model-a") == (
-        trtmc_validate.Binding(
-            "model-a",
-            "workload-a",
-            reference_cache_identity="org/model/reference-contract-v1",
-        )
-    )
+    with pytest.raises(trtmc_validate.ValidationError, match="selects 2 workloads"):
+        trtmc_validate.resolve_binding(catalog, "model-a")
     assert trtmc_validate.resolve_binding(catalog, "model-a", "workload-b") == (
         trtmc_validate.Binding(
             "model-a",
@@ -230,8 +241,636 @@ def test_resolve_binding_defaults_and_rejects_undeclared_workload():
             reference_cache_identity="org/model/reference-contract-v1",
         )
     )
-    with pytest.raises(trtmc_validate.ValidationError, match="does not declare"):
-        trtmc_validate.resolve_binding(catalog, "model-a", "workload-c")
+    assert trtmc_validate.resolve_binding(catalog, "model-a", "workload-c") == (
+        trtmc_validate.Binding(
+            "model-a",
+            "workload-c",
+            reference_cache_identity="org/model/reference-contract-v1",
+        )
+    )
+    with pytest.raises(trtmc_validate.ValidationError, match="unknown workload"):
+        trtmc_validate.resolve_binding(catalog, "model-a", "missing-workload")
+
+
+def test_resolve_bindings_expands_every_model_workload():
+    catalog = {
+        "sample_limits": {
+            "workload-a": 5,
+            "workload-b": 5,
+            "workload-c": 5,
+        },
+        "models": {
+            "model-a": {
+                "workloads": ["workload-a", "workload-b"],
+            },
+            "model-b": {
+                "workloads": ["workload-c"],
+            },
+        },
+    }
+
+    assert trtmc_validate.resolve_bindings(
+        catalog,
+        ["model-a", "model-b"],
+    ) == [
+        trtmc_validate.Binding("model-a", "workload-a"),
+        trtmc_validate.Binding("model-a", "workload-b"),
+        trtmc_validate.Binding("model-b", "workload-c"),
+    ]
+
+
+def test_resolve_binding_allows_globally_configured_unmapped_workload():
+    catalog = {
+        "sample_limits": {"workload-a": 5, "workload-b": 9},
+        "models": {
+            "model-a": {
+                "workloads": ["workload-a"],
+            }
+        },
+    }
+
+    assert trtmc_validate.resolve_binding(catalog, "model-a", "workload-b") == (
+        trtmc_validate.Binding("model-a", "workload-b")
+    )
+
+
+def test_explicit_binding_still_has_to_match_suite_selectors():
+    binding = trtmc_validate.Binding("model-a", "workload-b")
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="model-a/workload-b: model=model-a not selected",
+    ):
+        trtmc_validate.audit_binding_compatibility(
+            [binding],
+            suites={"workload-b": {"selectors": {"model_names": ["model-b"]}}},
+            task_models={"model-a": {"name": "model-a"}},
+        )
+
+
+def test_list_shows_mapped_workloads_and_sample_limits(capsys, monkeypatch):
+    catalog = {
+        "sample_limits": {"workload-a": 5, "workload-b": 9},
+        "models": {
+            "model-a": {
+                "workloads": ["workload-a"],
+            }
+        },
+    }
+    arguments = trtmc_validate.build_parser().parse_args(["--list"])
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_load_validation_inputs",
+        lambda _arguments: (catalog, {}, (), {}),
+    )
+
+    assert trtmc_validate._main(arguments) == 0
+    assert capsys.readouterr().out.strip() == "model-a: workload-a (5 samples)"
+
+
+def test_resolve_bindings_selects_multiple_explicit_workloads():
+    catalog = {
+        "sample_limits": {"workload-a": 5, "workload-b": 5},
+        "models": {
+            "model-a": {
+                "workloads": ["workload-a", "workload-b"],
+            }
+        },
+    }
+
+    assert trtmc_validate.resolve_bindings(
+        catalog,
+        ["model-a"],
+        workloads=["workload-b", "workload-a", "workload-b"],
+    ) == [
+        trtmc_validate.Binding("model-a", "workload-b"),
+        trtmc_validate.Binding("model-a", "workload-a"),
+    ]
+
+
+def test_select_bindings_reads_model_ci_selection_and_expands_workloads(tmp_path):
+    selection = tmp_path / "selection.json"
+    selection.write_text(
+        json.dumps({"matrix": {"include": [{"model": "model-a"}]}}),
+        encoding="utf-8",
+    )
+    arguments = trtmc_validate.build_parser().parse_args(
+        ["--model-selection", str(selection), "--dry-run"]
+    )
+    catalog = {
+        "sample_limits": {"workload-a": 5, "workload-b": 5},
+        "models": {
+            "model-a": {
+                "workloads": ["workload-a", "workload-b"],
+            }
+        },
+    }
+
+    assert trtmc_validate._select_bindings(
+        arguments,
+        catalog,
+        ("model-a",),
+        {"model-a": {"family": "model-a"}},
+    ) == [
+        trtmc_validate.Binding("model-a", "workload-a"),
+        trtmc_validate.Binding("model-a", "workload-b"),
+    ]
+
+
+def test_model_ci_family_selection_expands_ready_accuracy_profiles():
+    assert trtmc_validate.model_profiles_for_families(
+        {
+            "model-a-small": {"family": "family-a"},
+            "model-a-large": {"family": "family-a"},
+            "model-b": {"family": "family-b"},
+        },
+        ("model-a-small", "model-a-large", "model-b"),
+        ("family-a",),
+    ) == ("model-a-large", "model-a-small")
+
+
+def test_select_bindings_rejects_ambiguous_selection_modes():
+    arguments = trtmc_validate.build_parser().parse_args(
+        ["model-a", "--model", "model-b", "--dry-run"]
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="choose exactly one"):
+        trtmc_validate._select_bindings(
+            arguments,
+            {"models": {}},
+            (),
+        )
+
+
+def test_select_bindings_requires_one_binding_for_explicit_dataset(tmp_path):
+    dataset = tmp_path / "dataset.json"
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--model",
+            "model-a",
+            "--dataset",
+            str(dataset),
+            "--dry-run",
+        ]
+    )
+    catalog = {
+        "sample_limits": {"workload-a": 5, "workload-b": 5},
+        "models": {
+            "model-a": {
+                "workloads": ["workload-a", "workload-b"],
+            }
+        },
+    }
+
+    with pytest.raises(trtmc_validate.ValidationError, match="exactly one"):
+        trtmc_validate._select_bindings(arguments, catalog, ("model-a",))
+
+
+def test_select_bindings_accepts_multiple_exact_model_workload_pairs():
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--binding",
+            "model-a=workload-b",
+            "--binding",
+            "model-b=workload-c",
+            "--binding",
+            "model-a=workload-b",
+            "--dry-run",
+        ]
+    )
+    catalog = {
+        "sample_limits": {
+            "workload-a": 5,
+            "workload-b": 5,
+            "workload-c": 5,
+        },
+        "models": {
+            "model-a": {
+                "workloads": ["workload-a", "workload-b"],
+            },
+            "model-b": {
+                "workloads": ["workload-c"],
+            },
+        },
+    }
+
+    assert trtmc_validate._select_bindings(
+        arguments,
+        catalog,
+        ("model-a", "model-b"),
+    ) == [
+        trtmc_validate.Binding("model-a", "workload-b"),
+        trtmc_validate.Binding("model-b", "workload-c"),
+    ]
+
+
+def test_select_bindings_rejects_malformed_exact_binding():
+    arguments = trtmc_validate.build_parser().parse_args(["--binding", "model-a", "--dry-run"])
+
+    with pytest.raises(trtmc_validate.ValidationError, match="MODEL=WORKLOAD"):
+        trtmc_validate._select_bindings(
+            arguments,
+            {"models": {}},
+            (),
+        )
+
+
+def test_binding_scoped_engines_are_isolated_across_suites_and_deleted_on_pass(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-retention",
+            "delete_on_pass",
+            "--hf-cache-mode",
+            "per_model",
+            "--hf-cache-retention",
+            "delete_on_pass",
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    bindings = [
+        trtmc_validate.Binding("model-a", "suite-a"),
+        trtmc_validate.Binding("model-a", "suite-b"),
+    ]
+    engine_directories = []
+
+    def run_worker(binding, *, arguments, catalog):
+        engine_directories.append(arguments.engine_dir)
+        artifact = arguments.engine_dir / "model-a.bundle"
+        assert not artifact.exists()
+        artifact.write_text("engine", encoding="utf-8")
+        cache_blob = arguments.hf_cache_dir / "blob"
+        if binding.workload == "suite-b":
+            assert cache_blob.is_file()
+        cache_blob.write_text("cache", encoding="utf-8")
+        case_dir = trtmc_validate._case_directory(arguments.output, binding)
+        case_dir.mkdir(parents=True, exist_ok=True)
+        result = {
+            "model": binding.model,
+            "workload": binding.workload,
+            "execution": {"status": "completed"},
+            "validation": {"status": "passed"},
+        }
+        (case_dir / "comparison.json").write_text(
+            json.dumps(result),
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_supervised_binding_with_retries",
+        run_worker,
+    )
+    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trtmc_validate, "finalize_run_metadata", lambda *args: None)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "write_report",
+        lambda output: (output / "report.json", output / "report.html", {}),
+    )
+    monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
+
+    returncode = trtmc_validate._run_all_bindings(
+        bindings,
+        arguments=arguments,
+        catalog={"sample_limits": {"suite-a": 1, "suite-b": 1}},
+    )
+
+    assert returncode == 0
+    assert engine_directories == [
+        tmp_path / "work" / "model-a" / "bindings" / "suite-a" / "engines",
+        tmp_path / "work" / "model-a" / "bindings" / "suite-b" / "engines",
+    ]
+    for suite in ("suite-a", "suite-b"):
+        assert not (tmp_path / "work" / "model-a" / "bindings" / suite / "engines").exists()
+        result = json.loads(
+            (tmp_path / f"results/model-a/{suite}/comparison.json").read_text(encoding="utf-8")
+        )
+        assert result["resource_cleanup"]["engine"]["status"] == "deleted"
+    first_result = json.loads(
+        (tmp_path / "results/model-a/suite-a/comparison.json").read_text(encoding="utf-8")
+    )
+    assert first_result["resource_cleanup"]["hf_cache"]["status"] == "retained_until_model_complete"
+    final_result = json.loads(
+        (tmp_path / "results/model-a/suite-b/comparison.json").read_text(encoding="utf-8")
+    )
+    assert final_result["resource_cleanup"]["hf_cache"]["status"] == "deleted"
+    assert not (tmp_path / "work" / "model-a").exists()
+
+
+def test_binding_failure_retains_engine_and_per_model_hf_cache(tmp_path):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-retention",
+            "delete_on_pass",
+            "--hf-cache-mode",
+            "per_model",
+            "--hf-cache-retention",
+            "delete_on_pass",
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "suite-a")
+    selected, binding_work, model_work = trtmc_validate._binding_resource_arguments(
+        arguments,
+        binding,
+    )
+    assert binding_work is not None
+    assert model_work is not None
+    (selected.engine_dir / "model.bundle").write_text("engine", encoding="utf-8")
+    (selected.hf_cache_dir / "blob").write_text("cache", encoding="utf-8")
+
+    engine_cleanup = trtmc_validate._cleanup_binding_engine(
+        arguments,
+        binding_work,
+        passed=False,
+    )
+    hf_cleanup = trtmc_validate._cleanup_model_hf_cache(
+        arguments,
+        model_work,
+        passed=False,
+        model_complete=True,
+    )
+
+    assert engine_cleanup["status"] == "retained"
+    assert hf_cleanup["status"] == "retained"
+    assert (binding_work / "engines/model.bundle").is_file()
+    assert (model_work / "hf-cache/blob").is_file()
+
+
+def test_per_model_hf_cache_hardlinks_seed_and_deletes_only_working_copy(tmp_path):
+    seed = tmp_path / "seed"
+    blob = seed / "hub/models--org--model/blobs/content"
+    blob.parent.mkdir(parents=True)
+    blob.write_text("weights", encoding="utf-8")
+    snapshot = seed / "hub/models--org--model/snapshots/revision"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.bin").symlink_to("../../blobs/content")
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--storage-root",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "results"),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--engine-retention",
+            "delete_always",
+            "--hf-cache-mode",
+            "per_model",
+            "--hf-cache-retention",
+            "delete_always",
+            "--hf-cache-seed-dir",
+            str(seed),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    trtmc_validate._prepare_run_directories(arguments)
+
+    selected, _, model_work = trtmc_validate._binding_resource_arguments(
+        arguments,
+        trtmc_validate.Binding("model-a", "suite-a"),
+    )
+
+    linked_blob = selected.hf_cache_dir / "hub/models--org--model/blobs/content"
+    linked_snapshot = (
+        selected.hf_cache_dir / "hub/models--org--model/snapshots/revision/model.bin"
+    )
+    assert linked_blob.stat().st_ino == blob.stat().st_ino
+    assert linked_snapshot.is_symlink()
+    assert linked_snapshot.resolve() == linked_blob
+    cleanup = trtmc_validate._cleanup_model_hf_cache(
+        arguments,
+        model_work,
+        passed=False,
+        model_complete=True,
+    )
+    assert cleanup["status"] == "deleted"
+    assert blob.read_text(encoding="utf-8") == "weights"
+
+
+def test_hf_cache_seed_requires_per_model_mode(tmp_path):
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    arguments = trtmc_validate.build_parser().parse_args(
+        ["--all", "--hf-cache-seed-dir", str(seed)]
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="requires.*per_model"):
+        trtmc_validate._prepare_run_directories(arguments)
+
+
+def test_hf_cache_seed_must_be_disjoint_from_model_work(tmp_path):
+    work = tmp_path / "work"
+    seed = work / "seed"
+    seed.mkdir(parents=True)
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--model-work-dir",
+            str(work),
+            "--hf-cache-mode",
+            "per_model",
+            "--hf-cache-seed-dir",
+            str(seed),
+        ]
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="must be disjoint"):
+        trtmc_validate._prepare_run_directories(arguments)
+
+
+def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "results"
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--binding",
+            "model-a=suite-a",
+            "--output",
+            str(output),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-retention",
+            "delete_on_pass",
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            "--resume-existing",
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "suite-a")
+    case_dir = trtmc_validate._case_directory(output, binding)
+    case_dir.mkdir(parents=True)
+    (output / "run.json").write_text(
+        json.dumps(
+            {
+                "source_revision": "same-revision",
+                "command": "tools/trtmc_validate.py --binding model-a=suite-a "
+                f"--output {output} --model-work-dir {tmp_path / 'work'} "
+                "--engine-retention delete_on_pass "
+                f"--reference-cache-dir {tmp_path / 'references'}",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "suite-a",
+                "execution": {"status": "completed"},
+                "validation": {"status": "passed"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "same-revision")
+    monkeypatch.setattr(
+        trtmc_validate.sys,
+        "argv",
+        [
+            "tools/trtmc_validate.py",
+            "--binding",
+            "model-a=suite-a",
+            "--output",
+            str(output),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-retention",
+            "delete_on_pass",
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            "--resume-existing",
+        ],
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_supervised_binding_with_retries",
+        lambda *args, **kwargs: pytest.fail("terminal binding was rerun"),
+    )
+    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trtmc_validate, "finalize_run_metadata", lambda *args: None)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "write_report",
+        lambda output: (output / "report.json", output / "report.html", {}),
+    )
+    monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
+
+    returncode = trtmc_validate._run_all_bindings(
+        [binding],
+        arguments=arguments,
+        catalog={"sample_limits": {"suite-a": 1}},
+    )
+
+    assert returncode == 0
+    result = json.loads((case_dir / "comparison.json").read_text(encoding="utf-8"))
+    assert result["resource_cleanup"]["engine"]["status"] == "deleted"
+
+
+def test_resume_existing_rejects_different_source_revision(tmp_path, monkeypatch):
+    output = tmp_path / "results"
+    output.mkdir()
+    (output / "run.json").write_text(
+        json.dumps({"source_revision": "old-revision"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "new-revision")
+
+    with pytest.raises(trtmc_validate.ValidationError, match="different source revision"):
+        trtmc_validate._validate_resume_request(output)
+
+
+def test_resume_existing_rejects_different_command(tmp_path, monkeypatch):
+    output = tmp_path / "results"
+    output.mkdir()
+    (output / "run.json").write_text(
+        json.dumps(
+            {
+                "source_revision": "same-revision",
+                "command": "tools/trtmc_validate.py --model model-a --limit 5",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "same-revision")
+    monkeypatch.setattr(
+        trtmc_validate.sys,
+        "argv",
+        [
+            "tools/trtmc_validate.py",
+            "--model",
+            "model-a",
+            "--limit",
+            "10",
+            "--resume-existing",
+        ],
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="different resolved command"):
+        trtmc_validate._validate_resume_request(output)
+
+
+def test_shared_hf_cache_cannot_be_deleted_by_accuracy_runner(tmp_path):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            "--hf-cache-retention",
+            "delete_always",
+        ]
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="shared Hugging Face"):
+        trtmc_validate._prepare_run_directories(arguments)
+
+
+def test_storage_root_rejects_reference_source_cache_outside_root(tmp_path):
+    storage = tmp_path / "nvme"
+    storage.mkdir()
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--storage-root",
+            str(storage),
+            "--output",
+            str(storage / "results"),
+            "--engine-dir",
+            str(storage / "engines"),
+            "--reference-cache-dir",
+            str(storage / "references"),
+            "--reference-source-cache-dir",
+            str(tmp_path / "outside-references"),
+        ]
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="reference source cache directory must stay below storage root",
+    ):
+        trtmc_validate._prepare_run_directories(arguments)
 
 
 def test_resolve_binding_keeps_unimplemented_model_visible_but_not_runnable():
@@ -267,7 +906,6 @@ sample_limits:
   workload-a: 1
 models:
   model-a:
-    default: e2e
     workloads: [e2e]
 """,
         encoding="utf-8",
@@ -280,18 +918,61 @@ models:
         trtmc_validate.load_catalog(catalog_path)
 
 
+@pytest.mark.parametrize("invalid_limit", [0, -2])
+def test_catalog_sample_limit_is_full_or_positive(tmp_path, invalid_limit):
+    catalog_path = tmp_path / "model_workloads.yaml"
+    catalog_path.write_text(
+        f"""
+version: 1
+sample_limits:
+  workload-a: {invalid_limit}
+models:
+  model-a:
+    workloads: [workload-a]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="must be -1 or a positive integer",
+    ):
+        trtmc_validate.load_catalog(catalog_path)
+
+
+@pytest.mark.parametrize(
+    "obsolete_field",
+    ["default", "additional_workloads", "diagnostic_workloads"],
+)
+def test_catalog_rejects_obsolete_workload_categories(tmp_path, obsolete_field):
+    catalog_path = tmp_path / "model_workloads.yaml"
+    catalog_path.write_text(
+        f"""
+version: 1
+sample_limits:
+  workload-a: 5
+models:
+  model-a:
+    workloads: [workload-a]
+    {obsolete_field}: workload-a
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="uses obsolete fields"):
+        trtmc_validate.load_catalog(catalog_path)
+
+
 def test_catalog_rejects_cache_identity_across_different_reference_contracts(
     monkeypatch,
 ) -> None:
     catalog = {
         "models": {
             "model-a": {
-                "default": "workload-a",
                 "workloads": ["workload-a"],
                 "reference_cache_identity": "shared-reference",
             },
             "model-b": {
-                "default": "workload-a",
                 "workloads": ["workload-a"],
                 "reference_cache_identity": "shared-reference",
             },
@@ -330,10 +1011,9 @@ def test_catalog_rejects_cache_identity_across_different_reference_contracts(
 
 def test_resolve_sample_limit_uses_workload_policy_and_cli_override():
     catalog = {
-        "sample_limits": {"workload-a": 50},
+        "sample_limits": {"workload-a": 50, "workload-all": -1},
         "models": {
             "model-a": {
-                "default": "workload-a",
                 "workloads": ["workload-a"],
             },
             "model-not-compared": {
@@ -366,6 +1046,28 @@ def test_resolve_sample_limit_uses_workload_policy_and_cli_override():
         )
         == 0
     )
+    assert (
+        trtmc_validate.resolve_sample_limit(
+            catalog,
+            trtmc_validate.Binding("model-a", "workload-all"),
+            None,
+        )
+        == 0
+    )
+    assert (
+        trtmc_validate.resolve_sample_limit(
+            catalog,
+            trtmc_validate.Binding("model-a", "workload-a"),
+            -1,
+        )
+        == 0
+    )
+    with pytest.raises(trtmc_validate.ValidationError, match="-1 or greater"):
+        trtmc_validate.resolve_sample_limit(
+            catalog,
+            trtmc_validate.Binding("model-a", "workload-a"),
+            -2,
+        )
     assert (
         trtmc_validate.resolve_sample_limit(
             catalog,
@@ -402,6 +1104,8 @@ def test_all_defaults_to_continue_and_accepts_stop_policy():
     assert stop.on_model_failure == "stop"
     assert default.model_attempts == 2
     assert default.model_retry_delay_seconds == 5.0
+    assert default.model_timeout_seconds == 0.0
+    assert default.reference_source_cache_dir is None
     assert default.reused_bundle_revalidation_limit == 1
     assert default.reused_bundle_revalidation_attempts_used == 0
 
@@ -502,6 +1206,7 @@ def test_all_supervisor_applies_model_failure_policy(
 def test_supervisor_retries_execution_error_but_not_disagreement(
     tmp_path,
     monkeypatch,
+    capsys,
 ):
     arguments = trtmc_validate.build_parser().parse_args(
         [
@@ -531,6 +1236,7 @@ def test_supervisor_retries_execution_error_but_not_disagreement(
             "raw_result": {
                 "status": validation_status,
                 "error_type": "WorkerProcessError" if attempt == 1 else "",
+                "error": "RuntimeError: stale Python profile" if attempt == 1 else "",
             },
             "worker_log": str(tmp_path / f"worker-{attempt}.log"),
         }
@@ -554,6 +1260,10 @@ def test_supervisor_retries_execution_error_but_not_disagreement(
     assert result["execution"]["status"] == "completed"
     assert result["execution"]["attempt_count"] == 2
     assert result["execution"]["retry_count"] == 1
+    output = capsys.readouterr().out
+    assert "Attempt 1/2: FAILED" in output
+    assert "Error: RuntimeError: stale Python profile" in output
+    assert f"Worker log: {tmp_path / 'worker-1.log'}" in output
 
     attempts.clear()
 
@@ -763,10 +1473,7 @@ def test_all_supervisor_records_not_compared_without_launching_worker(
     )
 
     comparison = (
-        arguments.output
-        / "model-a"
-        / trtmc_validate.NOT_COMPARED_DIRECTORY
-        / "comparison.json"
+        arguments.output / "model-a" / trtmc_validate.NOT_COMPARED_DIRECTORY / "comparison.json"
     )
     result = json.loads(comparison.read_text(encoding="utf-8"))
     assert returncode == 0
@@ -806,7 +1513,12 @@ def test_supervised_binding_replaces_stale_result_with_worker_crash(tmp_path, mo
     )
 
     def crash(command, log_path, env):
-        log_path.write_text("worker crashed before comparison\n", encoding="utf-8")
+        log_path.write_text(
+            "Traceback (most recent call last):\n"
+            "  worker setup failed\n"
+            "RuntimeError: required Python profile is not prebuilt\n",
+            encoding="utf-8",
+        )
         return 2
 
     monkeypatch.setattr(trtmc_validate, "_run_subprocess", crash)
@@ -821,10 +1533,67 @@ def test_supervised_binding_replaces_stale_result_with_worker_crash(tmp_path, mo
     assert result["comparison"]["status"] == "not_run"
     assert result["validation"]["status"] == "failed"
     assert result["raw_result"]["error_type"] == "WorkerProcessError"
+    assert result["raw_result"]["error"] == (
+        "RuntimeError: required Python profile is not prebuilt"
+    )
     assert result["reproduce"]["dataset"]["sample_limit"] == 5
     assert "--model-worker" in result["reproduce"]["dataset"]["command"]
     assert "--local-files-only" in result["reproduce"]["dataset"]["command"]
     assert json.loads(comparison.read_text(encoding="utf-8")) == result
+
+
+def test_supervised_binding_records_worker_timeout(tmp_path, monkeypatch):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--model-timeout-seconds",
+            "42",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+
+    def timeout(command, log_path, env, timeout_seconds):
+        assert timeout_seconds == 42
+        log_path.write_text("worker timed out\n", encoding="utf-8")
+        raise trtmc_validate.WorkerTimeoutError(
+            "model worker exceeded 42 seconds"
+        )
+
+    monkeypatch.setattr(trtmc_validate, "_run_supervised_subprocess", timeout)
+
+    result = trtmc_validate._run_supervised_binding(
+        binding,
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 5}},
+    )
+
+    assert result["execution"] == {"status": "error", "exit_code": 124}
+    assert result["raw_result"]["error_type"] == "WorkerTimeoutError"
+    assert result["raw_result"]["error"] == "model worker exceeded 42 seconds"
+    assert result["validation"]["status"] == "failed"
+
+
+def test_supervised_subprocess_terminates_on_timeout(tmp_path):
+    log_path = tmp_path / "worker.log"
+
+    with pytest.raises(
+        trtmc_validate.WorkerTimeoutError,
+        match="exceeded 0.05 seconds",
+    ):
+        trtmc_validate._run_supervised_subprocess(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            log_path,
+            os.environ,
+            0.05,
+        )
+
+    assert "terminating process group" in log_path.read_text(encoding="utf-8")
 
 
 def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):
@@ -841,9 +1610,7 @@ def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):
     )
     binding = trtmc_validate.Binding("model-a", "workload-a")
     catalog = {"sample_limits": {"workload-a": 5}}
-    comparison = (
-        arguments.output / binding.model / binding.workload / "comparison.json"
-    )
+    comparison = arguments.output / binding.model / binding.workload / "comparison.json"
 
     def pass_worker(command, log_path, env):
         comparison.write_text(
@@ -902,7 +1669,7 @@ def test_all_dry_run_emits_machine_readable_ci_cases(monkeypatch, capsys):
             catalog,
             {"workload-a": {}},
             ("model-a", "model-not-compared"),
-            {},
+            {"model-a": {"name": "model-a"}},
         ),
     )
 
@@ -1073,11 +1840,7 @@ def test_suite_specific_scorer_environment_is_materialized_on_demand() -> None:
             }
         },
         suites={
-            "full-duplex": {
-                "scoring": {
-                    "python_profile": "personaplex_full_duplex_evaluator"
-                }
-            }
+            "full-duplex": {"scoring": {"python_profile": "personaplex_full_duplex_evaluator"}}
         },
     )
 
@@ -1159,12 +1922,8 @@ def test_reference_sources_create_once_then_reuse(
 
 
 def test_elf_reference_source_is_pinned_to_upstream_pytorch_implementation() -> None:
-    assert trtmc_validate.ELF_SOURCE.revision == (
-        "b29d8833609e9ab7f67cd9da39435ac5cea04837"
-    )
-    assert trtmc_validate.ELF_SOURCE.relative_checkout == Path(
-        "elf/reference/ELF-b29d8833609e"
-    )
+    assert trtmc_validate.ELF_SOURCE.revision == ("b29d8833609e9ab7f67cd9da39435ac5cea04837")
+    assert trtmc_validate.ELF_SOURCE.relative_checkout == Path("elf/reference/ELF-b29d8833609e")
 
 
 def test_reference_sources_select_model_specific_inputs(
@@ -1190,9 +1949,7 @@ def test_reference_sources_select_model_specific_inputs(
         {
             "repository": trtmc_validate.SANA_WM_SOURCE.repository,
             "revision": trtmc_validate.SANA_WM_SOURCE.revision,
-            "relative_path": str(
-                trtmc_validate.SANA_WM_SOURCE.relative_checkout
-            ),
+            "relative_path": str(trtmc_validate.SANA_WM_SOURCE.relative_checkout),
             "entrypoint": str(trtmc_validate.SANA_WM_SOURCE.entrypoint),
         },
     )
@@ -1220,10 +1977,7 @@ def test_reference_sources_select_model_specific_inputs(
     common = trtmc_validate.ensure_reference_sources("bert", tmp_path)
 
     assert prepared == ["ELF", "sana_wm", "wan2_2_ti2v", "lance"]
-    assert (
-        elf.elf_reference_repo
-        == tmp_path / trtmc_validate.ELF_SOURCE.relative_checkout
-    )
+    assert elf.elf_reference_repo == tmp_path / trtmc_validate.ELF_SOURCE.relative_checkout
     assert elf.environment["TRTMC_STORAGE_ROOT"] == str(tmp_path)
     assert sana.environment["SANA_WM_SCRIPT"] == str(
         tmp_path
@@ -1235,10 +1989,35 @@ def test_reference_sources_select_model_specific_inputs(
     assert wan22.environment == {"TRTMC_STORAGE_ROOT": str(tmp_path)}
     assert lance.environment == {
         "TRTMC_STORAGE_ROOT": str(tmp_path),
-        "TRTMC_LANCE_REFERENCE_REPO": str(
-            tmp_path / "lance/reference/Lance-4baeee086648"
-        ),
+        "TRTMC_LANCE_REFERENCE_REPO": str(tmp_path / "lance/reference/Lance-4baeee086648"),
     }
+
+
+def test_reference_sources_keep_outputs_separate_from_pinned_checkouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_cache = tmp_path / "model-work" / "references"
+    source_cache = tmp_path / "reference-sources"
+
+    def prepare(source, cache_root):
+        checkout = cache_root / source.relative_checkout
+        entrypoint = checkout / source.entrypoint
+        entrypoint.parent.mkdir(parents=True)
+        entrypoint.write_text("# reference\n", encoding="utf-8")
+        return checkout
+
+    monkeypatch.setattr(trtmc_validate, "_ensure_reference_source", prepare)
+
+    selection = trtmc_validate.ensure_reference_sources(
+        "elf_flow",
+        output_cache,
+        source_cache_root=source_cache,
+    )
+
+    assert selection.environment["TRTMC_STORAGE_ROOT"] == str(output_cache)
+    assert selection.elf_reference_repo == (
+        source_cache / trtmc_validate.ELF_SOURCE.relative_checkout
+    )
 
 
 def test_reference_sources_reject_incomplete_model_contract(
@@ -1259,11 +2038,12 @@ def test_reference_sources_reject_incomplete_model_contract(
         )
 
 
-def test_print_result_only_exposes_raw_commands_and_result_locations(tmp_path, capsys):
+def test_print_result_verbose_exposes_raw_commands_and_result_locations(tmp_path, capsys):
     comparison = tmp_path / "comparison.json"
     report = tmp_path / "report.html"
     trtmc_validate._print_result(
         {
+            "validation": {"status": "passed"},
             "reproduce": {
                 "dataset": {
                     "command": "python tools/trtmc_validate.py model-a --limit 1000",
@@ -1276,10 +2056,13 @@ def test_print_result_only_exposes_raw_commands_and_result_locations(tmp_path, c
         },
         comparison,
         report,
+        verbose=True,
     )
 
     output = capsys.readouterr().out
     assert output == (
+        "\n"
+        "Status: PASSED\n"
         "\n"
         "Reproduce dataset run:\n"
         "  python tools/trtmc_validate.py model-a --limit 1000\n"
@@ -1311,11 +2094,46 @@ def test_print_result_does_not_mislabel_validation_wrapper_as_raw_command(tmp_pa
         },
         comparison,
         report,
+        verbose=True,
     )
 
     output = capsys.readouterr().out
     assert output.count("unavailable; see comparison result") == 3
     assert "python tools/trtmc_validate.py model-a" not in output
+
+
+def test_print_result_default_is_concise_and_shows_execution_error(tmp_path, capsys):
+    comparison = tmp_path / "comparison.json"
+    report = tmp_path / "report.html"
+    worker_log = tmp_path / "worker.log"
+
+    trtmc_validate._print_result(
+        {
+            "execution": {"status": "error", "exit_code": 1},
+            "validation": {"status": "failed"},
+            "raw_result": {
+                "error_type": "WorkerProcessError",
+                "error": "RuntimeError: required Python profile is not prebuilt",
+            },
+            "worker_log": str(worker_log),
+            "reproduce": {
+                "dataset": {"command": "python very-long-worker-command"},
+                "hf": [],
+                "trtmc": [],
+            },
+        },
+        comparison,
+        report,
+    )
+
+    output = capsys.readouterr().out
+    assert "Status: FAILED" in output
+    assert "Error: RuntimeError: required Python profile is not prebuilt" in output
+    assert f"Worker log: {worker_log}" in output
+    assert f"Compare result: {comparison}" in output
+    assert f"Report: {report}" in output
+    assert "Reproduce" not in output
+    assert "very-long-worker-command" not in output
 
 
 def test_write_report_links_each_comparison(tmp_path):
@@ -1342,7 +2160,7 @@ def test_write_report_links_each_comparison(tmp_path):
                     "dataset": {
                         "command": "python tools/trtmc_validate.py model-a",
                         "sample_limit": 500,
-                        "prepared_input_count": 1000,
+                        "prepared_input_count": 100,
                     },
                 },
             }
@@ -1362,7 +2180,7 @@ def test_write_report_links_each_comparison(tmp_path):
         "validation_passed": 1,
         "validation_failed": 0,
         "validation_skipped": 0,
-        "selected_samples": 500,
+        "selected_samples": 100,
     }
     assert report["validation_status"] == "passed"
     assert report["results"][0]["execution"]["status"] == "completed"
@@ -1386,10 +2204,10 @@ def test_write_report_links_each_comparison(tmp_path):
     assert "Text → Audio" in document
     assert "tts_audio" in document
     assert "Dataset · Reference 1/1 · TRTMC 1/1" in document
-    assert "Dataset slice (500 samples)" in document
+    assert "Dataset slice (100 samples)" in document
     assert "<th>Samples</th>" in document
-    assert "<td>500</td>" in document
-    assert report["summary"]["selected_samples"] == 500
+    assert "<td>100</td>" in document
+    assert report["summary"]["selected_samples"] == 100
     assert "prepared inputs" not in document
     assert "$ python tools/trtmc_validate.py model-a" in document
     assert "$ python hf.py" in document
@@ -1403,6 +2221,27 @@ def test_write_report_links_each_comparison(tmp_path):
     assert 'data-filter-operation="generate_audio"' in document
     assert 'data-filter-task-type="Text → Audio"' in document
     assert 'data-filter-status="green"' in document
+
+
+@pytest.mark.parametrize(
+    ("limit", "prepared", "expected"),
+    [
+        (500, 100, 100),
+        (0, 83, 83),
+        (5, 0, 0),
+    ],
+)
+def test_selected_sample_count_uses_actual_prepared_count(limit, prepared, expected):
+    result = {
+        "reproduce": {
+            "dataset": {
+                "sample_limit": limit,
+                "prepared_input_count": prepared,
+            }
+        }
+    }
+
+    assert trtmc_validate._selected_sample_count(result) == expected
 
 
 def test_write_report_surfaces_quantized_reference_precision_contract(
@@ -1535,9 +2374,7 @@ def test_diffusion_report_flattens_nested_reference_metrics():
     }
     assert comparison["metrics"]["trt_hf_image_clip_cosine"] == 0.91
     assert comparison["metrics"]["psnr"] == 12.5
-    assert "No metrics" not in trtmc_validate._render_metrics(
-        {"comparison": comparison}
-    )
+    assert "No metrics" not in trtmc_validate._render_metrics({"comparison": comparison})
 
 
 def test_model_plugin_report_uses_sample_pass_rate_and_nested_metrics():
@@ -1676,10 +2513,7 @@ def test_not_compared_result_replaces_legacy_e2e_row_without_deleting_evidence(
     assert legacy_comparison.is_file()
     assert report["summary"]["cases"] == 1
     assert report["summary"]["not_compared"] == 1
-    assert (
-        report["results"][0]["not_compared_reason"]
-        == "Reference comparator is missing."
-    )
+    assert report["results"][0]["not_compared_reason"] == "Reference comparator is missing."
 
 
 def test_write_report_records_total_duration(tmp_path, monkeypatch):
@@ -1795,9 +2629,7 @@ def test_write_report_recovers_json_logged_runner_command(tmp_path):
         "trtmc build",
         "trtmc solve model.bundle --field-input 1,2",
     ]
-    assert "$ trtmc solve model.bundle --field-input 1,2" in html_path.read_text(
-        encoding="utf-8"
-    )
+    assert "$ trtmc solve model.bundle --field-input 1,2" in html_path.read_text(encoding="utf-8")
 
 
 def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
@@ -1807,16 +2639,14 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
     sample_count = 10_000
     (work_dir / "prompts.jsonl").write_text(
         "".join(
-            json.dumps({"sample_id": f"sample-{index}", "prompt": f"prompt-{index}"})
-            + "\n"
+            json.dumps({"sample_id": f"sample-{index}", "prompt": f"prompt-{index}"}) + "\n"
             for index in range(sample_count)
         ),
         encoding="utf-8",
     )
     (work_dir / "bundle_run.log").write_text(
         "".join(
-            f"$ trtmc run model.bundle --prompt prompt-{index}\n"
-            for index in range(sample_count)
+            f"$ trtmc run model.bundle --prompt prompt-{index}\n" for index in range(sample_count)
         ),
         encoding="utf-8",
     )
@@ -1836,9 +2666,7 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
                 },
                 "reproduce": {
                     "dataset": {
-                        "command": (
-                            "python tools/trtmc_validate.py model-a --limit 10000"
-                        ),
+                        "command": ("python tools/trtmc_validate.py model-a --limit 10000"),
                         "prepared_input_count": sample_count,
                     },
                     "hf": [],
@@ -1854,9 +2682,7 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
     reproduction = report["results"][0]["reproduce"]
     assert reproduction["command_count"]["trtmc"] == sample_count
     assert reproduction["commands_shown"]["trtmc"] == 1
-    assert reproduction["trtmc"] == [
-        "trtmc run model.bundle --prompt prompt-9999"
-    ]
+    assert reproduction["trtmc"] == ["trtmc run model.bundle --prompt prompt-9999"]
     assert reproduction["representative"] == {
         "sample_id": "sample-9999",
         "reason": "first_disagreement",
@@ -1978,16 +2804,12 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
     metadata = report["results"][0]["disagreements"]
     assert metadata["count"] == 1
     artifact = case_dir / metadata["path"]
-    records = [
-        json.loads(line)
-        for line in artifact.read_text(encoding="utf-8").splitlines()
-    ]
+    records = [json.loads(line) for line in artifact.read_text(encoding="utf-8").splitlines()]
     assert records[0]["input"] == prompt
     assert records[0]["reference_result"]["output_text"] == "reference answer"
     assert records[0]["trtmc_result"]["output_text"] == "TRTMC answer"
     assert records[0]["reproduce"]["reference"].startswith(
-        "/profiles/reference/bin/python "
-        "/workspace/trtmc/tools/reference/transformers_text.py"
+        "/profiles/reference/bin/python /workspace/trtmc/tools/reference/transformers_text.py"
     )
     assert records[0]["reproduce"]["trtmc"].startswith(
         "/workspace/build/trtmc_dataset_benchmark model.bundle"
@@ -2043,10 +2865,7 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     (work_dir / "prompts.jsonl").write_text(
-        "\n".join(
-            json.dumps({"sample_id": sample_id})
-            for sample_id in ("sample-1", "sample-2")
-        )
+        "\n".join(json.dumps({"sample_id": sample_id}) for sample_id in ("sample-1", "sample-2"))
         + "\n",
         encoding="utf-8",
     )
@@ -2075,13 +2894,9 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
 
     reproduction = trtmc_validate._commands_from_logs(work_dir)
 
-    assert reproduction["trtmc"] == [
-        "trtmc segment-prompted model.bundle --prompt cat"
-    ]
+    assert reproduction["trtmc"] == ["trtmc segment-prompted model.bundle --prompt cat"]
     assert reproduction["command_count"]["trtmc"] == 2
-    assert reproduction["command_logs"]["trtmc"] == [
-        "bundle_native_commands.jsonl"
-    ]
+    assert reproduction["command_logs"]["trtmc"] == ["bundle_native_commands.jsonl"]
     assert "full_duplex_bench_score.py" not in json.dumps(reproduction)
 
 
@@ -2115,9 +2930,7 @@ def test_commands_from_logs_prefer_native_reference_jsonl(tmp_path: Path) -> Non
 
     assert reproduction["hf"] == ["python model_reference.py --prompt cat"]
     assert reproduction["command_count"]["hf"] == 1
-    assert reproduction["command_logs"]["hf"] == [
-        "hf_native_commands.jsonl"
-    ]
+    assert reproduction["command_logs"]["hf"] == ["hf_native_commands.jsonl"]
 
 
 def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
@@ -2210,10 +3023,7 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
         str(input_image),
     ]
     (work_dir / "hf_native_commands.jsonl").write_text(
-        json.dumps(
-            {"sample_id": "sample-9", "command": reference_command}
-        )
-        + "\n",
+        json.dumps({"sample_id": "sample-9", "command": reference_command}) + "\n",
         encoding="utf-8",
     )
 
@@ -2222,12 +3032,9 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
         case_dir=case_dir,
     )
 
-    record = json.loads(
-        (case_dir / metadata["path"]).read_text(encoding="utf-8")
-    )
+    record = json.loads((case_dir / metadata["path"]).read_text(encoding="utf-8"))
     assert record["reproduce"]["trtmc"] == (
-        "/workspace/build/trtmc run /runs/engines/model.bundle "
-        "--prompt Describe"
+        "/workspace/build/trtmc run /runs/engines/model.bundle --prompt Describe"
     )
     assert record["reproduce"]["reference"].startswith(
         "/profiles/reference/bin/python /workspace/model/reference.py"
@@ -2326,8 +3133,7 @@ def test_report_bounds_inline_failed_samples_but_keeps_full_artifact(tmp_path):
         json.dumps(
             {
                 "disagreements": [
-                    {"sample_id": row["sample_id"], "reason": "token_mismatch"}
-                    for row in prompts
+                    {"sample_id": row["sample_id"], "reason": "token_mismatch"} for row in prompts
                 ]
             }
         ),
@@ -2395,9 +3201,7 @@ def test_report_does_not_treat_shared_task_failure_as_disagreement(tmp_path):
             {
                 "disagreements": [],
                 "hf": {"samples": [{"sample_id": "sample-0", "passed": False}]},
-                "bundle": {
-                    "samples": [{"sample_id": "sample-0", "passed": False}]
-                },
+                "bundle": {"samples": [{"sample_id": "sample-0", "passed": False}]},
             }
         ),
         encoding="utf-8",
@@ -2852,21 +3656,16 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
         str(trtmc_validate.REPO_ROOT / "tools" / "trtmc_compare.py"),
     ]
     assert "validation/engine.py" not in " ".join(command)
-    assert command[command.index("--work-root") + 1] == str(
-        tmp_path / "case" / "validation"
-    )
+    assert command[command.index("--work-root") + 1] == str(tmp_path / "case" / "validation")
     assert command[command.index("--model") + 1] == "model-a"
     assert command[command.index("--suite") + 1] == "workload-a"
-    assert command[command.index("--models-dir") + 1] == str(
-        tmp_path / "models"
-    )
+    assert command[command.index("--models-dir") + 1] == str(tmp_path / "models")
     assert command[command.index("--hf-python") + 1] == "/profiles/python"
-    assert command[command.index("--reference-cache-dir") + 1] == str(
-        tmp_path / "references"
+    assert command[command.index("--reference-cache-dir") + 1] == str(tmp_path / "references")
+    assert (
+        command[command.index("--reference-cache-identity") + 1]
+        == "org/model/reference-contract-v1"
     )
-    assert command[
-        command.index("--reference-cache-identity") + 1
-    ] == "org/model/reference-contract-v1"
     assert "--replace-bundle-on-build" in command
     assert "--force-hf" in command
     assert "--require-prebuilt-bundles" in command
@@ -2936,7 +3735,7 @@ def test_run_binding_wires_reference_source_command_and_environment(
     monkeypatch.setattr(
         trtmc_validate,
         "ensure_reference_sources",
-        lambda _family, _cache, _contract=None: selection,
+        lambda _family, _cache, _contract=None, **_kwargs: selection,
     )
 
     def run(command, _log_path, environment):
@@ -2969,9 +3768,7 @@ def test_run_binding_wires_reference_source_command_and_environment(
     )
 
     command = captured["command"]
-    assert command[command.index("--elf-reference-repo") + 1] == str(
-        selection.elf_reference_repo
-    )
+    assert command[command.index("--elf-reference-repo") + 1] == str(selection.elf_reference_repo)
     assert captured["environment"]["EXTERNAL_REFERENCE_SENTINEL"] == "present"
 
 
@@ -3010,7 +3807,7 @@ def _run_binding_with_comparison_results(
     monkeypatch.setattr(
         trtmc_validate,
         "ensure_reference_sources",
-        lambda _family, _cache, _contract=None: trtmc_validate.ReferenceSourceSelection(
+        lambda _family, _cache, _contract=None, **_kwargs: trtmc_validate.ReferenceSourceSelection(
             environment={},
         ),
     )
@@ -3099,7 +3896,7 @@ def _run_multiple_bindings_with_comparison_results(
     monkeypatch.setattr(
         trtmc_validate,
         "ensure_reference_sources",
-        lambda _family, _cache, _contract=None: trtmc_validate.ReferenceSourceSelection(
+        lambda _family, _cache, _contract=None, **_kwargs: trtmc_validate.ReferenceSourceSelection(
             environment={},
         ),
     )
@@ -3488,10 +4285,7 @@ def test_compare_entrypoint_forwards_to_validation_backend(monkeypatch):
                     }
                 ],
                 "error_type": "BenchmarkGateError",
-                "error": (
-                    "min_prediction_agreement_rate "
-                    "actual=0.5 required=0.98"
-                ),
+                "error": ("min_prediction_agreement_rate actual=0.5 required=0.98"),
             },
             "completed",
             "disagreement",

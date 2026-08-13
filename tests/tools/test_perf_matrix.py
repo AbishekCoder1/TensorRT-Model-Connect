@@ -23,6 +23,12 @@ from tools import perf_matrix
 REPOSITORY = Path(__file__).resolve().parents[2]
 SUITE = REPOSITORY / "benchmarks/performance/release.yaml"
 GB300_ENVIRONMENT = REPOSITORY / "benchmarks/performance/environments/gb300.yaml"
+L4T_THOR_ENVIRONMENT = (
+    REPOSITORY / "benchmarks/performance/environments/l4t-thor.yaml"
+)
+AUTO_THOR_ENVIRONMENT = (
+    REPOSITORY / "benchmarks/performance/environments/auto-thor.yaml"
+)
 MINIMAX_H3_EXCLUSION_REASON = (
     "The pinned Diffusers reference for MiniMax-H3 has not yet been integrated "
     "into the release performance runner."
@@ -397,8 +403,193 @@ def test_checked_in_gb300_environment_is_ci_runnable() -> None:
     assert raw["storage"]["bundle_cache"] == "${TRTMC_PERF_BUNDLE_CACHE}"
     assert raw["storage"]["bundle_roots"] == "${TRTMC_PERF_BUNDLE_ROOTS}"
     assert raw["storage"]["runtime_dirs"] == "${TRTMC_PERF_RUNTIME_DIRS}"
+    assert raw["storage"]["bundle_retention"] == "delete_always"
+    assert "minimum_free_space_gib" not in raw["storage"]
+    assert raw["execution"]["hf_cache_mode"] == "shared"
+    assert raw["execution"]["hf_cache_retention"] == "retain"
     assert raw["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert raw["execution"]["timeout_seconds"] == 7200
+
+
+def test_checked_in_l4t_environment_bounds_storage_and_cleanup() -> None:
+    raw = yaml.safe_load(L4T_THOR_ENVIRONMENT.read_text(encoding="utf-8"))
+
+    assert raw["storage"]["storage_root"] == "${TRTMC_CHECK_STORAGE_ROOT}"
+    assert raw["storage"]["bundle_retention"] == "delete_always"
+    assert "minimum_free_space_gib" not in raw["storage"]
+    assert raw["execution"]["hf_cache_mode"] == "per_entry"
+    assert raw["execution"]["hf_cache_retention"] == "delete_always"
+
+
+def test_checked_in_auto_thor_environment_deletes_managed_bundles() -> None:
+    raw = yaml.safe_load(AUTO_THOR_ENVIRONMENT.read_text(encoding="utf-8"))
+
+    assert raw["storage"]["bundle_retention"] == "delete_always"
+    assert "minimum_free_space_gib" not in raw["storage"]
+    assert raw["execution"]["hf_cache_mode"] == "shared"
+    assert raw["execution"]["hf_cache_retention"] == "retain"
+
+
+def test_environment_rejects_deleting_a_shared_hf_cache(tmp_path: Path) -> None:
+    environment_path = tmp_path / "environment.yaml"
+    _write_environment(
+        environment_path,
+        results_root=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench=tmp_path / "trtmc-bench",
+        trtmc_worker=tmp_path / "worker",
+        hf_transformers_runner=tmp_path / "hf.py",
+    )
+    raw = yaml.safe_load(environment_path.read_text(encoding="utf-8"))
+    raw["execution"]["hf_cache_mode"] = "shared"
+    raw["execution"]["hf_cache_retention"] = "delete_always"
+    environment_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(perf_matrix.PerfMatrixError, match="shared Hugging Face"):
+        perf_matrix._read_environment(environment_path)
+
+
+@pytest.mark.parametrize(
+    ("policy", "passed"),
+    (("delete_on_pass", True), ("delete_always", False)),
+)
+def test_perf_bundle_cleanup_deletes_only_engine_and_retains_build_artifacts(
+    tmp_path: Path,
+    policy: str,
+    passed: bool,
+) -> None:
+    cache = tmp_path / "bundles"
+    bundle = cache / "model-a" / "fingerprint" / "model-a.bundle"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text("engine", encoding="utf-8")
+    stdout_log = bundle.parent / "build.stdout.log"
+    stderr_log = bundle.parent / "build.stderr.log"
+    timing = bundle.parent / "build-timing.json"
+    stdout_log.write_text("stdout evidence", encoding="utf-8")
+    stderr_log.write_text("stderr evidence", encoding="utf-8")
+    timing.write_text('{"build_seconds": 1}', encoding="utf-8")
+    options = perf_matrix.RunOptions(
+        output=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        hf_transformers_runner=tmp_path / "hf.py",
+        task_reference_runner=tmp_path / "task.py",
+        bundle_cache=cache,
+        bundle_roots=(),
+        runtime_dirs=(),
+        local_files_only=False,
+        minimum_free_space_gib=0,
+        minimum_gpu_free_fraction=0.0,
+        timeout_seconds=1,
+        bundle_retention=policy,
+    )
+
+    deleted = perf_matrix._cleanup_managed_bundle(
+        {"bundle_path": str(bundle)},
+        options,
+        passed=passed,
+    )
+    assert deleted["status"] == "deleted"
+    assert deleted["scope"] == "bundle_only"
+    assert not bundle.exists()
+    assert bundle.parent.is_dir()
+    assert stdout_log.read_text(encoding="utf-8") == "stdout evidence"
+    assert stderr_log.read_text(encoding="utf-8") == "stderr evidence"
+    assert timing.read_text(encoding="utf-8") == '{"build_seconds": 1}'
+
+
+def test_perf_bundle_delete_on_pass_retains_failure(tmp_path: Path) -> None:
+    cache = tmp_path / "bundles"
+    bundle = cache / "model-a" / "fingerprint" / "model-a.bundle"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text("engine", encoding="utf-8")
+    options = perf_matrix.RunOptions(
+        output=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        hf_transformers_runner=tmp_path / "hf.py",
+        task_reference_runner=tmp_path / "task.py",
+        bundle_cache=cache,
+        bundle_roots=(),
+        runtime_dirs=(),
+        local_files_only=False,
+        minimum_free_space_gib=0,
+        minimum_gpu_free_fraction=0.0,
+        timeout_seconds=1,
+        bundle_retention="delete_on_pass",
+    )
+
+    retained = perf_matrix._cleanup_managed_bundle(
+        {"bundle_path": str(bundle)},
+        options,
+        passed=False,
+    )
+    assert retained["status"] == "retained"
+    assert bundle.is_file()
+
+
+def test_perf_per_entry_hf_cache_can_retain_failure_and_delete_success(
+    tmp_path: Path,
+) -> None:
+    options = perf_matrix.RunOptions(
+        output=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        hf_transformers_runner=tmp_path / "hf.py",
+        task_reference_runner=tmp_path / "task.py",
+        bundle_cache=None,
+        bundle_roots=(),
+        runtime_dirs=(),
+        local_files_only=False,
+        minimum_free_space_gib=0,
+        minimum_gpu_free_fraction=0.0,
+        timeout_seconds=1,
+        hf_cache_mode="per_entry",
+        hf_cache_retention="delete_on_pass",
+    )
+    case_work = tmp_path / "scratch/case"
+    (case_work / "hf-cache").mkdir(parents=True)
+
+    retained = perf_matrix._cleanup_entry_work(case_work, options, passed=False)
+    assert retained["status"] == "retained"
+    assert case_work.is_dir()
+
+    deleted = perf_matrix._cleanup_entry_work(case_work, options, passed=True)
+    assert deleted["status"] == "deleted"
+    assert not case_work.exists()
+
+
+def test_perf_shared_hf_cache_retains_failed_entry_work(tmp_path: Path) -> None:
+    options = perf_matrix.RunOptions(
+        output=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        hf_transformers_runner=tmp_path / "hf.py",
+        task_reference_runner=tmp_path / "task.py",
+        bundle_cache=None,
+        bundle_roots=(),
+        runtime_dirs=(),
+        local_files_only=False,
+        minimum_free_space_gib=0,
+        minimum_gpu_free_fraction=0.0,
+        timeout_seconds=1,
+        hf_cache_mode="shared",
+        hf_cache_retention="retain",
+    )
+    case_work = tmp_path / "scratch/case"
+    case_work.mkdir(parents=True)
+
+    retained = perf_matrix._cleanup_entry_work(case_work, options, passed=False)
+    assert retained["status"] == "retained"
+    assert case_work.is_dir()
+
+    deleted = perf_matrix._cleanup_entry_work(case_work, options, passed=True)
+    assert deleted["status"] == "deleted"
+    assert not case_work.exists()
 
 
 
@@ -557,6 +748,7 @@ def test_gpu_memory_headroom_waits_for_reclaimable_capacity(monkeypatch) -> None
 def test_backend_waits_for_gpu_headroom_before_each_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys,
 ) -> None:
     events = []
     monkeypatch.setattr(perf_matrix, "_command_environment", lambda: {})
@@ -604,7 +796,7 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
     perf_matrix._run_supported_case(
         {"id": "example"},
         {"model": {"precision": "fp16"}, "request": {}},
-        Namespace(timeout_seconds=30, minimum_gpu_free_fraction=0.25),
+        Namespace(timeout_seconds=30, minimum_gpu_free_fraction=0.25, verbose=False),
         tmp_path,
         row,
     )
@@ -616,6 +808,21 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
         ("run", "baseline"),
     ]
     assert row["status"] == "green"
+    assert "TRTMC:" not in capsys.readouterr().out
+
+    events.clear()
+    row = {"resolved_settings": {}}
+    perf_matrix._run_supported_case(
+        {"id": "example"},
+        {"model": {"precision": "fp16"}, "request": {}},
+        Namespace(timeout_seconds=30, minimum_gpu_free_fraction=0.25, verbose=True),
+        tmp_path,
+        row,
+    )
+
+    output = capsys.readouterr().out
+    assert "[example] TRTMC: candidate" in output
+    assert "[example] baseline: baseline --precision fp16" in output
 
 
 @pytest.mark.parametrize(
@@ -1735,6 +1942,93 @@ def test_entry_is_the_only_run_selection() -> None:
     assert [case["id"] for case in selected] == ["flux.generate_image"]
 
 
+def test_model_selection_expands_every_matching_perf_entry_in_model_order() -> None:
+    cases = [
+        {"id": "model-a.long", "family": "family-a", "model": "model-a"},
+        {"id": "model-b.default", "family": "family-b", "model": "model-b"},
+        {"id": "model-a.short", "family": "family-a", "model": "model-a"},
+    ]
+
+    selected = perf_matrix._selected_cases(
+        cases,
+        requested=[],
+        requested_models=["model-b", "model-a"],
+    )
+
+    assert [case["id"] for case in selected] == [
+        "model-b.default",
+        "model-a.long",
+        "model-a.short",
+    ]
+
+
+def test_model_ci_family_selection_expands_owned_perf_profiles():
+    cases = [
+        {"id": "a.one", "family": "family-a", "model": "model-a1"},
+        {"id": "b.one", "family": "family-b", "model": "model-b1"},
+        {"id": "a.two", "family": "family-a", "model": "model-a2"},
+    ]
+
+    selected = perf_matrix._selected_cases(
+        cases,
+        requested=[],
+        requested_families=["family-a"],
+    )
+
+    assert [case["id"] for case in selected] == ["a.one", "a.two"]
+
+
+def test_model_selection_rejects_models_without_perf_entries() -> None:
+    cases = [
+        {"id": "model-a.default", "family": "family-a", "model": "model-a"}
+    ]
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="models have no performance entries: model-b",
+    ):
+        perf_matrix._selected_cases(
+            cases,
+            requested=[],
+            requested_models=["model-b"],
+        )
+
+
+def test_model_selection_reports_explicit_perf_exclusion() -> None:
+    cases = [
+        {"id": "model-a.default", "family": "family-a", "model": "model-a"}
+    ]
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="excluded performance models: model-b: baseline unavailable",
+    ):
+        perf_matrix._selected_cases(
+            cases,
+            requested=[],
+            requested_models=["model-b"],
+            excluded_profiles={"model-b": "baseline unavailable"},
+        )
+
+
+def test_perf_selection_modes_are_mutually_exclusive() -> None:
+    arguments = perf_matrix.build_parser().parse_args(
+        [
+            "check",
+            str(SUITE),
+            "--environment",
+            str(GB300_ENVIRONMENT),
+            "--entry",
+            "flux.generate_image",
+            "--model",
+            "flux-schnell",
+        ]
+    )
+
+    with pytest.raises(perf_matrix.PerfMatrixError, match="choose exactly one"):
+        perf_matrix._load_suite_request(arguments)
+
+
 def test_candidate_preflight_resolves_the_build_python_profile(monkeypatch) -> None:
     calls = []
 
@@ -2658,6 +2952,7 @@ def test_personaplex_loader_adds_vendored_moshi_package_root() -> None:
     source = (REPOSITORY / "benchmarks/performance/baselines/task_reference.py").read_text()
 
     assert 'str(Path(official_repo) / "moshi")' in source
+    assert "personaplex_audio_compat" in source
 
 
 @pytest.mark.parametrize(

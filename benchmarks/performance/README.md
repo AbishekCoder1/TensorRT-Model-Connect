@@ -52,6 +52,21 @@ python3 tools/perf_matrix.py run \
   --entry gpt2.generate
 ```
 
+Run every release entry bound to one or more canonical model names:
+
+```bash
+python3 tools/perf_matrix.py run \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml \
+  --model distilgpt2 \
+  --model qwen3-0.6b-fp8
+```
+
+`--model-selection FILE` accepts the owner/family JSON emitted by
+`tools/model_ci.py` and expands every selected owner to its task-owned model
+profiles and release entries. `--entry`, `--model`, and `--model-selection`
+are mutually exclusive.
+
 An additional profile under the same family-operation contract has a
 profile-qualified entry ID:
 
@@ -159,6 +174,21 @@ The environment file owns machine-specific execution settings:
 - command timeout and local-files-only mode;
 - minimum free disk space.
 
+`storage.bundle_retention` accepts `retain`, `delete_on_pass`, or
+`delete_always`. Deletion is limited to the resolved bundle/engine file below
+the configured managed `bundle_cache`; sibling build evidence such as
+`build.stdout.log`, `build.stderr.log`, and `build-timing.json` is retained for
+diagnosis. Bundles found in external roots are preserved.
+`execution.hf_cache_mode` is `shared` or `per_entry`, and
+`execution.hf_cache_retention` uses the same retention values. A shared HF
+cache can only be retained. With `per_entry`, failed entry work is preserved by
+`delete_on_pass` for diagnosis. Shared-cache runs also preserve failed entry
+scratch while removing successful entry scratch. Optional
+`storage.storage_root` rejects results, scratch, and managed bundle paths
+outside that filesystem before execution. The checked-in platform environments
+use `delete_always` for managed bundles and omit the optional fixed free-space
+reserve; a host-specific environment may opt into either policy differently.
+
 An individual baseline can set `local_files_only: true` when that reference must
 use an already-provisioned model snapshot even if the rest of the matrix may
 access its configured model source.
@@ -198,6 +228,24 @@ PERSONAPLEX_OFFICIAL_REPO
 CI should prebuild the selected Python profiles and set
 `TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1`. Dependency installation is outside the
 measured campaign.
+
+### L4T Thor native build
+
+Build the shared Accuracy/Perf binaries from the selected source revision and
+TensorRT 11 installation. L4T does not always put `nvcc` on `PATH`, so pass its
+absolute path; otherwise CMake omits model-owned CUDA sources and can produce an
+incomplete runtime plugin.
+
+```bash
+cmake -S . -B "$TRTMC_CHECK_BUILD_DIR" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+  -DTRTMC_BUILD_BACKEND_TRT=ON \
+  -DTRTMC_BUILD_BENCHMARKS=ON \
+  -DTRTMC_TRT_INCLUDE_DIR="$TRT_ROOT/include" \
+  -DTRTMC_TRT_LIBRARY="$TRT_ROOT/lib/libnvinfer.so"
+cmake --build "$TRTMC_CHECK_BUILD_DIR" --parallel
+```
 
 ## Preflight and timing contract
 

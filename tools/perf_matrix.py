@@ -61,6 +61,7 @@ from tools.reporting_html import (  # noqa: E402
     sorted_filter_values,
     task_type_label,
 )
+from tools import model_selection  # noqa: E402
 
 
 RESULT_SCHEMA = "trtmc.perf-matrix/v1"
@@ -100,6 +101,16 @@ REPRODUCTION_ENVIRONMENT_NAMES = (
     "TRTMC_SANA_WM_REFERENCE_REPO",
     "PERSONAPLEX_OFFICIAL_REPO",
 )
+HF_CACHE_ENVIRONMENT_NAMES = (
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "HUGGINGFACE_HUB_CACHE",
+    "HF_DATASETS_CACHE",
+    "TRANSFORMERS_CACHE",
+    "HF_ASSETS_CACHE",
+    "HF_XET_CACHE",
+)
+RETENTION_POLICIES = {"retain", "delete_on_pass", "delete_always"}
 
 
 class PerfMatrixError(RuntimeError):
@@ -121,6 +132,11 @@ class RunOptions:
     minimum_free_space_gib: int
     minimum_gpu_free_fraction: float
     timeout_seconds: int
+    storage_root: Path | None = None
+    bundle_retention: str = "retain"
+    hf_cache_mode: str = "shared"
+    hf_cache_retention: str = "retain"
+    verbose: bool = False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -144,8 +160,32 @@ def build_parser() -> argparse.ArgumentParser:
             default=[],
             help="exact matrix entry id; repeatable",
         )
+        command.add_argument(
+            "--model",
+            action="append",
+            default=[],
+            help="canonical model name; selects every matching entry; repeatable",
+        )
+        command.add_argument(
+            "--model-selection",
+            type=Path,
+            help=(
+                "JSON owner/family selection emitted by tools/model_ci.py; "
+                "selects matching model profiles"
+            ),
+        )
+        command.add_argument(
+            "--verbose",
+            action="store_true",
+            help="print full TRTMC and reference commands",
+        )
     resume = commands.add_parser("resume", help="continue an incomplete run")
     resume.add_argument("run_directory", type=Path)
+    resume.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print full TRTMC and reference commands",
+    )
     report = commands.add_parser(
         "report",
         help="render an existing run with optional test-task preparation evidence",
@@ -272,6 +312,21 @@ def _read_environment(path: Path) -> dict[str, Any]:
     bundle_cache = storage.get("bundle_cache")
     if bundle_cache is not None and not isinstance(bundle_cache, str):
         raise PerfMatrixError("environment storage.bundle_cache must be a path or null")
+    storage_root = storage.get("storage_root")
+    if storage_root is not None and (
+        not isinstance(storage_root, str) or not storage_root.strip()
+    ):
+        raise PerfMatrixError("environment storage.storage_root must be a path or null")
+    bundle_retention = storage.get("bundle_retention", "retain")
+    if bundle_retention not in RETENTION_POLICIES:
+        raise PerfMatrixError(
+            "environment storage.bundle_retention must be retain, "
+            "delete_on_pass, or delete_always"
+        )
+    if bundle_retention != "retain" and bundle_cache is None:
+        raise PerfMatrixError(
+            "non-retained bundles require environment storage.bundle_cache"
+        )
     timeout_seconds = execution.get("timeout_seconds")
     minimum_gpu_free_fraction = execution.get("minimum_gpu_free_fraction", 0.45)
     minimum_free_space_gib = storage.get("minimum_free_space_gib", 0)
@@ -300,6 +355,21 @@ def _read_environment(path: Path) -> dict[str, Any]:
     local_files_only = execution.get("local_files_only", False)
     if not isinstance(local_files_only, bool):
         raise PerfMatrixError("environment execution.local_files_only must be boolean")
+    hf_cache_mode = execution.get("hf_cache_mode", "shared")
+    if hf_cache_mode not in {"shared", "per_entry"}:
+        raise PerfMatrixError(
+            "environment execution.hf_cache_mode must be shared or per_entry"
+        )
+    hf_cache_retention = execution.get("hf_cache_retention", "retain")
+    if hf_cache_retention not in RETENTION_POLICIES:
+        raise PerfMatrixError(
+            "environment execution.hf_cache_retention must be retain, "
+            "delete_on_pass, or delete_always"
+        )
+    if hf_cache_mode == "shared" and hf_cache_retention != "retain":
+        raise PerfMatrixError(
+            "a shared Hugging Face cache only supports hf_cache_retention=retain"
+        )
     return {
         "schema_version": ENVIRONMENT_SCHEMA,
         "name": name.strip(),
@@ -326,6 +396,11 @@ def _read_environment(path: Path) -> dict[str, Any]:
             ),
         },
         "storage": {
+            "storage_root": (
+                str(_resolved_path(storage_root, "storage.storage_root"))
+                if storage_root is not None
+                else None
+            ),
             "results_root": str(
                 _resolved_path(str(storage["results_root"]), "storage.results_root")
             ),
@@ -350,16 +425,24 @@ def _read_environment(path: Path) -> dict[str, Any]:
                 )
             ],
             "minimum_free_space_gib": minimum_free_space_gib,
+            "bundle_retention": bundle_retention,
         },
         "execution": {
             "local_files_only": local_files_only,
+            "hf_cache_mode": hf_cache_mode,
+            "hf_cache_retention": hf_cache_retention,
             "minimum_gpu_free_fraction": float(minimum_gpu_free_fraction),
             "timeout_seconds": timeout_seconds,
         },
     }
 
 
-def _run_options(environment: Mapping[str, Any], output: Path) -> RunOptions:
+def _run_options(
+    environment: Mapping[str, Any],
+    output: Path,
+    *,
+    verbose: bool = False,
+) -> RunOptions:
     tools = environment["tools"]
     storage = environment["storage"]
     execution = environment["execution"]
@@ -379,6 +462,15 @@ def _run_options(environment: Mapping[str, Any], output: Path) -> RunOptions:
         minimum_free_space_gib=int(storage["minimum_free_space_gib"]),
         minimum_gpu_free_fraction=float(execution["minimum_gpu_free_fraction"]),
         timeout_seconds=int(execution["timeout_seconds"]),
+        storage_root=(
+            Path(str(storage["storage_root"]))
+            if storage.get("storage_root")
+            else None
+        ),
+        bundle_retention=str(storage["bundle_retention"]),
+        hf_cache_mode=str(execution["hf_cache_mode"]),
+        hf_cache_retention=str(execution["hf_cache_retention"]),
+        verbose=verbose,
     )
 
 
@@ -794,10 +886,51 @@ def _coverage_details(
 def _selected_cases(
     cases: Sequence[dict[str, Any]],
     requested: Sequence[str],
+    *,
+    requested_models: Sequence[str] = (),
+    requested_families: Sequence[str] = (),
+    excluded_profiles: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     requested = [value for value in requested if value]
+    requested_models = list(model_selection.normalize_models(requested_models))
+    requested_families = list(model_selection.normalize_models(requested_families))
+    if sum(bool(value) for value in (requested, requested_models, requested_families)) > 1:
+        raise PerfMatrixError("entry, model, and family selections are mutually exclusive")
     _validate_requested_cases(cases, requested)
-    selected = [case for case in cases if not requested or case["id"] in requested]
+    _validate_requested_models(
+        cases,
+        requested_models,
+        excluded_profiles=excluded_profiles or {},
+    )
+    _validate_requested_families(cases, requested_families)
+    if requested:
+        selected = [case for case in cases if case["id"] in requested]
+        selected.sort(key=lambda case: str(case["id"]))
+        return selected
+    if requested_models:
+        model_order = {model: index for index, model in enumerate(requested_models)}
+        selected = [case for case in cases if str(case["model"]) in model_order]
+        selected.sort(
+            key=lambda case: (
+                model_order[str(case["model"])],
+                str(case["id"]),
+            )
+        )
+        return selected
+    if requested_families:
+        family_order = {
+            family: index for index, family in enumerate(requested_families)
+        }
+        selected = [case for case in cases if str(case["family"]) in family_order]
+        selected.sort(
+            key=lambda case: (
+                family_order[str(case["family"])],
+                str(case["model"]),
+                str(case["id"]),
+            )
+        )
+        return selected
+    selected = list(cases)
     selected.sort(key=lambda case: str(case["id"]))
     return selected
 
@@ -807,6 +940,37 @@ def _validate_requested_cases(cases: Sequence[Mapping[str, Any]], requested: Seq
     unknown = sorted(set(requested) - known)
     if unknown:
         raise PerfMatrixError(f"unknown entry ids: {', '.join(unknown)}")
+
+
+def _validate_requested_models(
+    cases: Sequence[Mapping[str, Any]],
+    requested: Sequence[str],
+    *,
+    excluded_profiles: Mapping[str, str],
+) -> None:
+    known = {str(case["model"]) for case in cases}
+    excluded = sorted(set(requested).intersection(excluded_profiles))
+    if excluded:
+        details = "; ".join(
+            f"{model}: {excluded_profiles[model]}" for model in excluded
+        )
+        raise PerfMatrixError(f"excluded performance models: {details}")
+    unknown = sorted(set(requested) - known)
+    if unknown:
+        raise PerfMatrixError(
+            "models have no performance entries: " + ", ".join(unknown)
+        )
+
+
+def _validate_requested_families(
+    cases: Sequence[Mapping[str, Any]], requested: Sequence[str]
+) -> None:
+    known = {str(case["family"]) for case in cases}
+    unknown = sorted(set(requested) - known)
+    if unknown:
+        raise PerfMatrixError(
+            "model owners have no performance entries: " + ", ".join(unknown)
+        )
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -1022,6 +1186,15 @@ def _command_environment() -> dict[str, str]:
     if existing:
         paths.append(existing)
     environment["PYTHONPATH"] = os.pathsep.join(paths)
+    return environment
+
+
+def _case_command_environment(options: RunOptions, case_work: Path) -> dict[str, str]:
+    environment = _command_environment()
+    if getattr(options, "hf_cache_mode", "shared") == "per_entry":
+        environment["HF_HOME"] = str((case_work / "hf-cache").resolve())
+        for name in HF_CACHE_ENVIRONMENT_NAMES[1:]:
+            environment.pop(name, None)
     return environment
 
 
@@ -2051,7 +2224,7 @@ def _run_supported_case(
     case_work: Path,
     row: MutableMapping[str, Any],
 ) -> None:
-    environment = _command_environment()
+    environment = _case_command_environment(options, case_work)
     digest = _workload_digest(resolved)
     candidate_dir = case_work / "trtmc"
     baseline_path = case_work / "baseline.json"
@@ -2065,8 +2238,9 @@ def _run_supported_case(
         "baseline": {"argv": baseline_argv, "rendered": shlex.join(baseline_argv)},
     }
     row["commands"] = commands
-    print(f"[{case['id']}] TRTMC: {commands['trtmc']['rendered']}", flush=True)
-    print(f"[{case['id']}] baseline: {commands['baseline']['rendered']}", flush=True)
+    if getattr(options, "verbose", False):
+        print(f"[{case['id']}] TRTMC: {commands['trtmc']['rendered']}", flush=True)
+        print(f"[{case['id']}] baseline: {commands['baseline']['rendered']}", flush=True)
     order = ("trtmc", "baseline") if _stable_even(str(case["id"])) else ("baseline", "trtmc")
     for side in order:
         argv = candidate_argv if side == "trtmc" else baseline_argv
@@ -2121,6 +2295,94 @@ def _run_one(
         row["reason"] = str(exc)
     row["finished_at"] = _now()
     return row
+
+
+def _delete_for_retention(policy: str, *, passed: bool) -> bool:
+    return policy == "delete_always" or (policy == "delete_on_pass" and passed)
+
+
+def _cleanup_managed_bundle(
+    resolved: Mapping[str, Any],
+    options: RunOptions,
+    *,
+    passed: bool,
+) -> dict[str, Any]:
+    policy = options.bundle_retention
+    evidence: dict[str, Any] = {"policy": policy, "status": "retained"}
+    if not _delete_for_retention(policy, passed=passed):
+        return evidence
+    if options.bundle_cache is None:
+        return {**evidence, "status": "failed", "error": "bundle cache is not managed"}
+    raw_bundle = resolved.get("bundle_path")
+    if not isinstance(raw_bundle, str) or not raw_bundle:
+        return {
+            **evidence,
+            "status": "failed",
+            "error": "resolved entry does not record bundle_path",
+        }
+    cache = options.bundle_cache.expanduser().resolve()
+    bundle = Path(raw_bundle).expanduser().resolve()
+    evidence["bundle"] = str(bundle)
+    try:
+        relative = bundle.relative_to(cache)
+    except ValueError:
+        return {
+            **evidence,
+            "status": "preserved_external",
+            "reason": "bundle is outside the managed cache",
+        }
+    if len(relative.parts) < 3 or bundle.parent == cache:
+        return {
+            **evidence,
+            "status": "failed",
+            "error": "managed bundle lacks the expected model/cache-key/bundle layout",
+        }
+    cache_entry = bundle.parent
+    evidence["cache_entry"] = str(cache_entry)
+    evidence["scope"] = "bundle_only"
+    try:
+        bundle.unlink()
+    except FileNotFoundError:
+        evidence["status"] = "already_absent"
+    except OSError as exc:
+        evidence.update({"status": "failed", "error": str(exc)})
+    else:
+        evidence["status"] = "deleted"
+    return evidence
+
+
+def _cleanup_entry_work(
+    case_work: Path,
+    options: RunOptions,
+    *,
+    passed: bool,
+) -> dict[str, Any]:
+    hf_policy = (
+        options.hf_cache_retention
+        if options.hf_cache_mode == "per_entry"
+        else "delete_on_pass"
+    )
+    evidence: dict[str, Any] = {
+        "path": str(case_work),
+        "hf_cache_mode": options.hf_cache_mode,
+        "hf_cache_retention": (
+            options.hf_cache_retention
+            if options.hf_cache_mode == "per_entry"
+            else "shared_retained"
+        ),
+        "status": "retained",
+    }
+    if not _delete_for_retention(hf_policy, passed=passed):
+        return evidence
+    try:
+        shutil.rmtree(case_work)
+    except FileNotFoundError:
+        evidence["status"] = "already_absent"
+    except OSError as exc:
+        evidence.update({"status": "failed", "error": str(exc)})
+    else:
+        evidence["status"] = "deleted"
+    return evidence
 
 
 def _resolution_failure_row(
@@ -2908,6 +3170,18 @@ def _environment_preflight(
     }
     if options.bundle_cache is not None:
         paths["bundle_cache"] = options.bundle_cache
+    if options.storage_root is not None:
+        storage_root = options.storage_root.expanduser().resolve()
+        if not storage_root.is_dir():
+            raise PerfMatrixError(f"storage root does not exist: {storage_root}")
+        for label, path in paths.items():
+            resolved = path.expanduser().resolve()
+            try:
+                resolved.relative_to(storage_root)
+            except ValueError as exc:
+                raise PerfMatrixError(
+                    f"{label} must stay below storage root {storage_root}: {resolved}"
+                ) from exc
     filesystems: dict[tuple[int, int, int], dict[str, Any]] = {}
     for label, path in paths.items():
         probe = _existing_ancestor(path)
@@ -3016,6 +3290,30 @@ def _execute_campaign(
             )
             continue
         row = _run_one(case, options, work_root, preflight[case_id])
+        passed = row.get("status") in {"green", "yellow", "red"}
+        bundle_cleanup = _cleanup_managed_bundle(
+            preflight[case_id][0],
+            options,
+            passed=passed,
+        )
+        work_cleanup = _cleanup_entry_work(
+            work_root / _slug(case_id),
+            options,
+            passed=passed,
+        )
+        row["resource_cleanup"] = {
+            "bundle": bundle_cleanup,
+            "entry_work": work_cleanup,
+        }
+        cleanup_failures = [
+            str(item.get("error", "unknown error"))
+            for item in (bundle_cleanup, work_cleanup)
+            if item["status"] == "failed"
+        ]
+        if cleanup_failures:
+            row["performance_status_before_cleanup_failure"] = row.get("status")
+            row["status"] = "failed"
+            row["reason"] = f"resource cleanup failed: {'; '.join(cleanup_failures)}"
         rows[case_id].clear()
         rows[case_id].update(row)
         _write_artifacts(options.output, results)
@@ -3023,7 +3321,10 @@ def _execute_campaign(
     results["finished_at"] = _now()
     results["status"] = _final_status(_selected_rows(results, selected_ids))
     _write_artifacts(options.output, results)
-    shutil.rmtree(work_root, ignore_errors=True)
+    try:
+        work_root.rmdir()
+    except OSError:
+        pass
     try:
         options.scratch_root.rmdir()
     except OSError:
@@ -3045,8 +3346,32 @@ def _load_suite_request(
     suite_path = arguments.suite.resolve()
     suite = _read_yaml(suite_path)
     cases = _cases(suite)
-    _validate_coverage(cases, _excluded_profiles(suite))
-    selected = _selected_cases(cases, arguments.entry)
+    exclusions = _excluded_profiles(suite)
+    _validate_coverage(cases, exclusions)
+    selection_modes = sum(
+        bool(value)
+        for value in (
+            arguments.entry,
+            arguments.model,
+            arguments.model_selection,
+        )
+    )
+    if selection_modes > 1:
+        raise PerfMatrixError(
+            "choose exactly one selection: --entry, --model, or --model-selection"
+        )
+    requested_families = (
+        model_selection.load_model_selection(arguments.model_selection)
+        if arguments.model_selection
+        else ()
+    )
+    selected = _selected_cases(
+        cases,
+        arguments.entry,
+        requested_models=tuple(arguments.model),
+        requested_families=requested_families,
+        excluded_profiles=exclusions,
+    )
     if not selected:
         raise PerfMatrixError("selection contains no entries")
     environment = _read_environment(arguments.environment)
@@ -3077,12 +3402,16 @@ def _check(arguments: argparse.Namespace) -> int:
 def _run_new(arguments: argparse.Namespace) -> int:
     suite_path, suite, cases, selected, environment = _load_suite_request(arguments)
     results_root = Path(str(environment["storage"]["results_root"]))
-    preliminary_options = _run_options(environment, results_root)
+    preliminary_options = _run_options(
+        environment,
+        results_root,
+        verbose=arguments.verbose,
+    )
     storage = _environment_preflight(environment, preliminary_options)
     worker = _preflight_worker(preliminary_options)
     preflight, references, failures = _preflight_selected(selected, preliminary_options)
     run_id, output = _new_run_directory(results_root, suite)
-    options = _run_options(environment, output)
+    options = _run_options(environment, output, verbose=arguments.verbose)
     results = _initial_results(suite_path, suite, cases, selected, environment)
     results["run_id"] = run_id
     return _execute_campaign(
@@ -3132,7 +3461,7 @@ def _resume(arguments: argparse.Namespace) -> int:
         raise PerfMatrixError(
             "cannot resume because the resolved environment values changed"
         )
-    options = _run_options(environment, output)
+    options = _run_options(environment, output, verbose=arguments.verbose)
     storage = _environment_preflight(environment, options)
     worker = _preflight_worker(options)
     preflight, references, failures = _preflight_selected(selected, options)
