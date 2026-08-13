@@ -27,7 +27,10 @@ from tools.ci.context import CiContext
 from tools.ci.gpu_lease import GpuLease
 from tools.ci.model_reference_cache import ModelReferenceCacheWarmer
 from tools.ci.model_proof import ModelProofRequest, ModelProofRunner, ModelReferenceCache
-from tools.ci.model_proof_inner import ModelProofInnerPipeline
+from tools.ci.model_proof_inner import (
+    ModelProofInnerPipeline,
+    _classify_e2e_proof_kinds,
+)
 from tools.ci.model_proof_selection import ModelProofSelector
 from tools.ci.process import CiError
 
@@ -568,14 +571,19 @@ def test_premerge_selects_one_nested_l0_replacement(
     assert selection["e2e_cases"][0]["model"] == expected_case
 
 
-def test_every_owned_e2e_family_has_one_premerge_case(tmp_path: Path) -> None:
+def test_every_owned_e2e_family_has_one_premerge_smoke_case(tmp_path: Path) -> None:
     model_root = REPO_ROOT / "tests" / "e2e" / "models"
     families = sorted(path.parent.name for path in model_root.glob("*/MODEL.toml"))
 
     assert families
     for family in families:
         selection = _run_test_selection(tmp_path, family, "premerge")
-        assert len(selection["e2e_cases"]) == 1, family
+        smoke_cases = [
+            case
+            for case in selection["e2e_cases"]
+            if case["test_category"] != "regression"
+        ]
+        assert len(smoke_cases) == 1, family
         assert selection["e2e_cases"][0]["ci_tier"] != "nightly_only", family
 
 
@@ -588,35 +596,47 @@ def test_wan22_premerge_selects_standalone_l0_manifest(tmp_path: Path) -> None:
     assert "model_reference_cache" not in selection
 
 
-def test_qwen_premerge_selects_native_defaults_l0(tmp_path: Path) -> None:
-    selection = _run_test_selection(tmp_path, "qwen", "premerge")
+@pytest.mark.parametrize(
+    ("family", "smoke_case", "regression_case"),
+    (
+        (
+            "qwen",
+            "qwen3-0.6b-native-l0",
+            "qwen3-0.6b-regression-native-kv-chunked-prefill",
+        ),
+        (
+            "llama",
+            "minitron-4b-width-l0",
+            "minitron-4b-width-regression-native-kv-chunked-prefill",
+        ),
+    ),
+)
+def test_premerge_selects_smoke_and_native_kv_regression(
+    tmp_path: Path,
+    family: str,
+    smoke_case: str,
+    regression_case: str,
+) -> None:
+    selection = _run_test_selection(tmp_path, family, "premerge")
 
     assert selection["suite"] == "premerge"
-    assert [
-        (
-            case["name"],
-            case["model"],
-            case["manifest"],
-            case["ci_tier"],
-        )
-        for case in selection["e2e_cases"]
-    ] == [
-        (
-            "qwen3-0.6b-native-l0",
-            "qwen3-0.6b-native-l0",
-            "qwen3-0.6b-native-l0.json",
-            "l0_only",
-        )
+    assert [case["name"] for case in selection["e2e_cases"]] == [
+        smoke_case,
+        regression_case,
     ]
+    assert selection["e2e_cases"][0]["test_category"] == "e2e"
+    assert selection["e2e_cases"][1]["test_category"] == "regression"
+    assert selection["e2e_cases"][1]["ci_tier"] == "default"
 
 
-def test_qwen_nightly_keeps_production_cases(tmp_path: Path) -> None:
+def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -> None:
     selection = _run_test_selection(tmp_path, "qwen", "nightly")
 
     assert selection["suite"] == "nightly"
     assert {case["name"] for case in selection["e2e_cases"]} == {
         "qwen3-0.6b-fp16",
         "qwen3-0.6b-fp8",
+        "qwen3-0.6b-regression-native-kv-chunked-prefill",
         "qwen3-0.6b-topp",
         "qwen3-4b-instruct-2507",
     }
@@ -936,6 +956,22 @@ def test_selector_rejects_testcase_level_gpu_capacity(
         )
 
 
+def test_selector_rejects_unknown_test_category(tmp_path: Path) -> None:
+    def configure(source: Path, _projection: dict[str, object]) -> None:
+        path = next((source / "tests/e2e/models/convbert/manifests").glob("*.json"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["testcases"][0]["test_category"] = "regresion"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CiError, match="test_category must be 'e2e' or 'regression'"):
+        _run_test_selection(
+            tmp_path,
+            "convbert",
+            "premerge",
+            projection_setup=configure,
+        )
+
+
 def test_inner_selection_records_the_leased_gpu_evidence(tmp_path: Path) -> None:
     selection = _run_test_selection(
         tmp_path,
@@ -1223,6 +1259,7 @@ def test_llama_nightly_model_proof_reserves_an_exclusive_gpu(tmp_path: Path) -> 
         "falcon3-1b": "exclusive_gpu",
         "minitron-4b-depth": "shared",
         "minitron-4b-width": "shared",
+        "minitron-4b-width-regression-native-kv-chunked-prefill": "shared",
         "nemotron-nano-4b": "shared",
         "tinyllama-1.1b": "shared",
     }
@@ -1612,14 +1649,43 @@ def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None
         assert contract in runner
 
     assert runner.index('"verify-builds"') < runner.index('"verify-results"')
-    assert runner.index('"verify-results"') < runner.index(
-        'result.get("proof_kind") for result in e2e_verification.get("results", [])'
+    verify_results_index = runner.index('"verify-results"')
+    assert verify_results_index < runner.index(
+        "e2e_proof_kind, e2e_proof_kinds = _classify_e2e_proof_kinds(",
+        verify_results_index,
     )
-    assert "if len(proof_kinds) != 1:" in runner
     assert 'self.status.fact("e2e_proof_kind", e2e_proof_kind)' in runner
+    assert 'self.status.fact("e2e_proof_kinds", e2e_proof_kinds)' in runner
     assert "self._python()" in runner
     assert '"pytest"' in runner
     assert 'self.source / str(payload["e2e_test"])' in runner
+
+
+@pytest.mark.parametrize(
+    ("proof_kinds", "expected_aggregate"),
+    (
+        (["reference"], "reference"),
+        (["functional_invariant"], "functional_invariant"),
+        (["reference", "functional_invariant"], "mixed"),
+    ),
+)
+def test_model_proof_classifies_single_and_mixed_e2e_oracles(
+    proof_kinds: list[str], expected_aggregate: str
+) -> None:
+    aggregate, ordered = _classify_e2e_proof_kinds(
+        {"results": [{"proof_kind": kind} for kind in proof_kinds]}
+    )
+
+    assert aggregate == expected_aggregate
+    assert ordered == sorted(proof_kinds)
+
+
+@pytest.mark.parametrize("results", ([], [{"proof_kind": "unknown"}]))
+def test_model_proof_rejects_missing_or_unknown_e2e_oracles(
+    results: list[dict[str, str]],
+) -> None:
+    with pytest.raises(CiError, match="invalid E2E proof kinds"):
+        _classify_e2e_proof_kinds({"results": results})
 
 
 def test_model_proof_report_assets_are_inside_the_positive_projection() -> None:
