@@ -800,11 +800,16 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
         Namespace(timeout_seconds=30, minimum_gpu_free_fraction=0.25, verbose=False),
         tmp_path,
         row,
+        progress=lambda stage, evidence: events.append(
+            ("progress", stage, tuple(evidence["commands"]))
+        ),
     )
 
     assert events == [
+        ("progress", "candidate", ("trtmc", "baseline")),
         ("wait", 0.25),
         ("run", "candidate"),
+        ("progress", "reference", ("trtmc", "baseline")),
         ("wait", 0.25),
         ("run", "baseline"),
     ]
@@ -832,6 +837,186 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
 )
 def test_resume_keeps_terminal_comparison_results(status: str) -> None:
     assert perf_matrix._should_skip({"status": status})
+
+
+def test_performance_projection_is_rebuilt_from_ordered_live_receipts(tmp_path) -> None:
+    base_rows = [
+        {
+            "id": "model-a.generate",
+            "family": "family-a",
+            "operation": "generate",
+            "model": "model-a",
+            "status": "pending",
+        },
+        {
+            "id": "model-b.generate",
+            "family": "family-b",
+            "operation": "generate",
+            "model": "model-b",
+            "status": "pending",
+        },
+    ]
+    ledger = perf_matrix.ExecutionLedger.open(
+        tmp_path,
+        campaign_id="run-1",
+        task_kind="performance",
+        fingerprint="revision-1",
+        cases=[
+            {"id": row["id"], "report": row}
+            for row in base_rows
+        ],
+    )
+    terminal = {
+        **base_rows[0],
+        "status": "contract-mismatch",
+        "reason": "outputs differ",
+    }
+    ledger.begin("model-a.generate", stage="candidate")
+    ledger.finish("model-a.generate", result="white", payload=terminal)
+    results = {
+        "selected_entry_ids": ["model-a.generate", "model-b.generate"],
+        "cases": [{**base_rows[0], "status": "green"}, {**base_rows[1], "status": "red"}],
+    }
+
+    perf_matrix._sync_perf_results_from_ledger(results, ledger)
+
+    assert results["cases"] == [
+        {**terminal, "progress": {"stage": "candidate", "attempt": 1}},
+        {
+            **base_rows[1],
+            "commands": {},
+            "logs": [],
+            "progress": {"stage": None, "attempt": 0},
+        },
+    ]
+
+
+def test_performance_projection_rejects_receipt_classification_drift(tmp_path) -> None:
+    row = {
+        "id": "model-a.generate",
+        "family": "family-a",
+        "operation": "generate",
+        "model": "model-a",
+        "status": "pending",
+    }
+    ledger = perf_matrix.ExecutionLedger.open(
+        tmp_path,
+        campaign_id="run-1",
+        task_kind="performance",
+        fingerprint="revision-1",
+        cases=[{"id": row["id"], "report": row}],
+    )
+    ledger.begin(row["id"], stage="candidate")
+    ledger.finish(row["id"], result="green", payload={**row, "status": "failed"})
+
+    with pytest.raises(perf_matrix.PerfMatrixError, match="ledger result mismatch"):
+        perf_matrix._sync_perf_results_from_ledger(
+            {"selected_entry_ids": [row["id"]], "cases": [row]},
+            ledger,
+        )
+
+
+def test_performance_adapter_resumes_an_interrupted_case_as_a_new_attempt(
+    tmp_path, monkeypatch
+) -> None:
+    case = next(
+        row
+        for row in perf_matrix._cases(perf_matrix._read_yaml(SUITE))
+        if row["id"] == "gpt2.generate"
+    )
+    results = {
+        "run_id": "run-1",
+        "git_commit": "revision-1",
+        "suite_sha256": "suite-1",
+        "environment_config": {"sha256": "environment-1"},
+        "selected_entry_ids": [case["id"]],
+        "cases": [perf_matrix._pending_perf_row(case)],
+    }
+    options = perf_matrix.RunOptions(
+        output=tmp_path / "output",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        hf_transformers_runner=tmp_path / "reference.py",
+        task_reference_runner=tmp_path / "task_reference.py",
+        bundle_cache=None,
+        bundle_roots=(),
+        runtime_dirs=(),
+        local_files_only=True,
+        minimum_free_space_gib=0,
+        minimum_gpu_free_fraction=0,
+        timeout_seconds=1,
+    )
+    contract = perf_matrix.timing_contract(
+        runner=case["baseline"]["runner"], family=case["family"]
+    )
+    preflight = {
+        case["id"]: (
+            {
+                "measurement": {"timing_scope": contract["candidate_timing_scope"]},
+                "_candidate_build_python_profile": "test-build",
+            },
+            [],
+            {},
+        )
+    }
+    arguments = {
+        "selected": [case],
+        "options": options,
+        "results": results,
+        "preflight": preflight,
+        "preflight_failures": {},
+        "reference_preflight": {},
+        "worker": {},
+        "storage_preflight": {},
+    }
+    def interrupt_with_leaf_commands(*_args, **kwargs):
+        kwargs["progress"](
+            "reference",
+            {
+                "commands": {
+                    "resolve": {},
+                    "trtmc": {"argv": ["trtmc-bench"], "cwd": str(REPOSITORY)},
+                    "baseline": {"argv": ["reference"], "cwd": str(REPOSITORY)},
+                }
+            },
+        )
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(perf_matrix, "_run_one", interrupt_with_leaf_commands)
+
+    with pytest.raises(KeyboardInterrupt):
+        perf_matrix._execute_campaign(**arguments)
+    ledger = perf_matrix.ExecutionLedger.load(options.output, task_kind="performance")
+    running = ledger.receipt(case["id"])
+    assert running["state"] == "running"
+    evidence = running["attempts"][0]["evidence"]
+    assert set(evidence["commands"]) == {"resolve", "trtmc", "baseline"}
+    assert evidence["commands"]["trtmc"]["argv"] == ["trtmc-bench"]
+    assert len(evidence["logs"]) == 4
+    assert all((options.output / log["href"]).is_file() for log in evidence["logs"])
+    live = json.loads((options.output / "report.json").read_text(encoding="utf-8"))
+    assert live["results"][0]["progress"] == {"stage": "reference", "attempt": 1}
+    assert len(live["results"][0]["debug"]["logs"]) == 4
+
+    monkeypatch.setattr(
+        perf_matrix,
+        "_run_one",
+        lambda *_args, **_kwargs: {
+            **perf_matrix._pending_perf_row(case),
+            "status": "failed",
+            "reason": "candidate failed",
+            "commands": {},
+        },
+    )
+
+    assert perf_matrix._execute_campaign(**arguments) == 1
+    receipt = ledger.receipt(case["id"])
+    assert receipt["state"] == "terminal"
+    assert [(attempt["attempt"], attempt["state"]) for attempt in receipt["attempts"]] == [
+        (1, "interrupted"),
+        (2, "failed"),
+    ]
 
 
 def test_timing_scope_details_state_measured_included_and_excluded_work() -> None:
@@ -1445,6 +1630,143 @@ def test_wall_time_rejects_incomplete_or_invalid_timestamps(
     assert perf_matrix._wall_time_html(record) == "—"
 
 
+def test_public_perf_result_with_unknown_precision_has_no_performance_light() -> None:
+    row = {
+        "id": "model.generate",
+        "status": "green",
+        "resolved_settings": {"model": {"precision": "fp16"}},
+        "candidate": {"precision": "fp16", "samples_ms": [10.0]},
+        "baseline": {"samples_ms": [20.0]},
+        "comparison": {},
+    }
+
+    public = perf_matrix._public_perf_result(row)
+
+    assert public["state"] == "terminal"
+    assert public["result"] == "white"
+    assert public["issue"]["code"] == "comparison_contract"
+    assert public["output_validation"]["status"] == "Pass"
+    assert public["latency"] == {"reference_ms": None, "candidate_ms": None}
+
+
+def test_public_perf_result_surfaces_quantized_candidate_precision() -> None:
+    row = {
+        "id": "qwen.generate@qwen3-0.6b-fp8",
+        "status": "green",
+        "resolved_settings": {
+            "baseline_precision": "fp16",
+            "model": {
+                "precision": "fp16",
+                "build": {"quantization": {"format": "fp8"}},
+            },
+            "output_contract": "exact-token-ids",
+        },
+        "candidate": {"precision": "fp16", "samples_ms": [5.0]},
+        "baseline": {"precision": "fp16", "samples_ms": [16.0]},
+        "comparison": {},
+    }
+
+    public = perf_matrix._public_perf_result(row)
+
+    assert public["precision"] == {
+        "reference": "fp16",
+        "candidate": "fp8 (fp16 base)",
+    }
+
+
+def test_command_diagnostic_materializes_nested_build_logs(tmp_path: Path) -> None:
+    build_stderr = tmp_path / "bundle-cache" / "build.stderr.log"
+    build_stderr.parent.mkdir()
+    build_stderr.write_text("builder crashed\n", encoding="utf-8")
+    diagnostic = {
+        "schema_version": "trtmc.command-diagnostic/v1",
+        "stage": "build",
+        "domain": "harness/unknown",
+        "code": "bundle_build_failed",
+        "artifacts": [
+            {"label": "Bundle build stderr", "path": str(build_stderr)}
+        ],
+    }
+    command = {
+        "stdout": "",
+        "stderr": (
+            "bundle build failed\n"
+            f"TRTMC_DIAGNOSTIC_JSON={json.dumps(diagnostic, separators=(',', ':'))}\n"
+        ),
+    }
+
+    parsed = perf_matrix._command_diagnostic(command["stderr"])
+    command["diagnostic"] = parsed
+    links = perf_matrix._materialize_command_logs(
+        tmp_path / "report",
+        "gpt2.generate",
+        "trtmc",
+        command,
+    )
+
+    nested = next(item for item in links if item["label"] == "Bundle build stderr")
+    published = tmp_path / "report" / nested["href"]
+    assert published.read_text(encoding="utf-8") == "builder crashed\n"
+    assert not published.is_symlink()
+    assert command["diagnostic"] == {
+        "schema_version": "trtmc.command-diagnostic/v1",
+        "stage": "build",
+        "domain": "harness/unknown",
+        "code": "bundle_build_failed",
+        "artifacts": [nested],
+    }
+
+
+def test_perf_issue_uses_structured_command_failure() -> None:
+    issue = perf_matrix._perf_issue(
+        {
+            "status": "failed",
+            "reason": "trtmc command failed with rc=2",
+            "failure_stage": "build",
+            "failure_domain": "harness/unknown",
+            "failure_code": "bundle_build_failed",
+        },
+        "white",
+    )
+
+    assert issue == {
+        "priority": "P1",
+        "stage": "build",
+        "domain": "harness/unknown",
+        "code": "bundle_build_failed",
+        "message": "trtmc command failed with rc=2",
+    }
+
+
+def test_cleanup_warning_does_not_replace_a_valid_performance_result() -> None:
+    row = {
+        "status": "green",
+        "resolved_settings": {
+            "baseline_precision": "fp16",
+            "model": {"precision": "fp16"},
+        },
+        "candidate": {"precision": "fp16"},
+        "warnings": [
+            {
+                "stage": "cleanup",
+                "code": "resource_cleanup_failed",
+                "message": "scratch directory retained",
+            }
+        ],
+    }
+
+    assert perf_matrix._final_status([row]) == "completed-with-warnings"
+    assert perf_matrix._perf_state_and_result(row) == ("terminal", "green")
+
+
+@pytest.mark.parametrize("status", ["pending", "running"])
+def test_public_perf_progress_has_no_traffic_light(status: str) -> None:
+    public = perf_matrix._public_perf_result({"id": "model.generate", "status": status})
+
+    assert public["state"] == status
+    assert public["result"] is None
+
+
 def test_run_consolidates_results_and_records_replayable_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1466,6 +1788,25 @@ def test_run_consolidates_results_and_records_replayable_commands(
         trtmc_worker=fake_worker,
         hf_transformers_runner=fake_baseline,
     )
+    original_preflight = perf_matrix._preflight_selected
+    preflight_calls = 0
+
+    def preflight_after_pending_report(cases, options):
+        nonlocal preflight_calls
+        preflight_calls += 1
+        live = json.loads((options.output / "report.json").read_text(encoding="utf-8"))
+        selected = [row for row in live["results"] if row["id"] == "gpt2.generate"]
+        if preflight_calls == 1:
+            assert [(row["state"], row["result"]) for row in selected] == [
+                ("pending", None)
+            ]
+        return original_preflight(cases, options)
+
+    monkeypatch.setattr(
+        perf_matrix,
+        "_preflight_selected",
+        preflight_after_pending_report,
+    )
 
     exit_code = perf_matrix.main(
         [
@@ -1483,7 +1824,11 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert len(run_directories) == 1
     output = run_directories[0]
     assert sorted(path.name for path in output.iterdir()) == [
+        "artifacts",
+        "assets",
+        "ledger",
         "report.html",
+        "report.json",
         "results.json",
     ]
     assert not scratch_root.exists()
@@ -1546,50 +1891,87 @@ def test_run_consolidates_results_and_records_replayable_commands(
     }
     assert rows["gpt2.generate"]["baseline"]["mode"] == "torch-compile"
     assert rows["mamba.generate"]["baseline_contract"]["mode"] == "hf-eager"
+    public_report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert public_report["schema_version"] == "trtmc.qualification-report/v1"
+    assert public_report["report_kind"] == "performance"
+    assert public_report["accounting"] == {
+        "selected": 1,
+        "comparable": 1,
+        "operational_coverage_percent": 100.0,
+        "progress": {"pending": 0, "running": 0, "terminal": 1},
+        "outcomes": {"green": 1, "yellow": 0, "red": 0, "white": 0},
+        "invariants": {
+            "selected": "pending + running + terminal",
+            "terminal": "green + yellow + red + white",
+            "comparable": "green + yellow + red",
+        },
+        "definitions": {
+            "green": {
+                "class": "valid-comparison",
+                "label": "Meets the target",
+                "denominator": "comparable",
+            },
+            "yellow": {
+                "class": "valid-comparison",
+                "label": "Valid comparison in the review band",
+                "denominator": "comparable",
+            },
+            "red": {
+                "class": "valid-comparison",
+                "label": "Valid comparison that misses the target",
+                "denominator": "comparable",
+            },
+            "white": {
+                "class": "coverage-gap",
+                "label": "No valid comparison",
+                "denominator": "selected",
+            },
+        },
+    }
+    assert len(public_report["results"]) == 1
+    public_row = public_report["results"][0]
+    assert public_row["id"] == "gpt2.generate"
+    assert public_row["state"] == "terminal"
+    assert public_row["result"] == "green"
+    assert public_row["precision"] == {
+        "reference": "fp32",
+        "candidate": "fp16",
+    }
+    assert public_row["output_validation"]["status"] == "Pass"
+    assert public_row["latency"] == {
+        "reference_ms": 20.45,
+        "candidate_ms": 10.45,
+    }
+    assert public_row["issue"] is None
+    assert all(
+        "stdout_tail" not in command and "stderr_tail" not in command
+        for command in public_row["commands"].values()
+    )
+    assert "minimax-h3-768p" not in json.dumps(public_report)
+    assert MINIMAX_H3_EXCLUSION_REASON not in json.dumps(public_report)
+    log_records = public_row["debug"]["logs"]
+    assert {record["label"] for record in log_records} == {
+        "TRTMC stdout",
+        "TRTMC stderr",
+        "Reference stdout",
+        "Reference stderr",
+    }
+    for record in log_records:
+        assert not Path(record["href"]).is_absolute()
+        assert (output / record["href"]).is_file()
+
     report = (output / "report.html").read_text(encoding="utf-8")
-    assert ">gpt2<" in report
-    assert "HF eager" in report
-    assert "77 model types" in report
-    assert "107 model comparisons" in report
-    assert "107 single-process profiles" in report
-    assert "1 explicitly excluded profile" in report
-    assert (
-        f"{expected_catalog_coverage['excluded_l0_profiles']} duplicate L0 profiles are excluded"
-    ) in report
-    assert (f"{expected_catalog_coverage['ready_profiles']} ready catalog profiles") in report
-    assert (f"{expected_catalog_coverage['distributed_profiles']} distributed profiles") in report
-    assert (
-        f"{expected_catalog_coverage['other_profiles']} other or unsupported profiles"
-    ) in report
-    assert "<th>Model</th>" in report
-    assert "<th>Task type</th>" in report
-    assert "Total campaign wall time:" in report
-    assert "<th>Model wall time</th>" in report
-    assert "not used for traffic-light classification" in report
-    assert "TRTMC infer p50 (ms)" in report
-    assert "Baseline infer p50 (ms)" in report
-    assert "TRTMC bundle preparation" in report
-    assert "Built · 1m 23.1s" in report
-    assert "83.125 s" in report
-    assert "1 built in this test task (1m 23.1s total)" in report
-    assert "excluded from the infer-time traffic-light comparison" in report
-    assert ">10.450<" in report
-    assert ">20.450<" in report
-    assert "<th>Status</th>" in report
-    assert "<td>green</td>" not in report
-    assert "Needs alignment" not in report
-    assert "Measured scope" in report
-    assert "Timing contracts were validated before execution for 1 comparisons" in report
-    assert "Measured: public pipeline call" in report
-    assert "Measured: public operation call" in report
-    assert "Includes: pipeline-internal preprocessing, model execution, returned output" in report
-    assert "Excludes: model load, compile setup, warmup" in report
-    assert "Show raw commands" in report
-    assert str(fake_trtmc) in report
-    assert str(fake_baseline) in report
-    assert "reproduce.py" not in report
-    assert str(REPOSITORY) in report
-    assert "PYTHONPATH" in report
+    assert 'data-report="report.json"' in report
+    assert "gpt2.generate" not in report
+    assert "minimax-h3-768p" not in report
+    frontend = (output / "assets/qualification-report.js").read_text(
+        encoding="utf-8"
+    )
+    assert "Comparable results" in frontend
+    assert "Operational coverage" in frontend
+    assert "Failures" in frontend
+    assert "Reference latency" in frontend
+    assert "TRTMC latency" in frontend
 
     baseline_argv = rows["gpt2.generate"]["commands"]["baseline"]["argv"]
     request = baseline_argv[baseline_argv.index("--request-json") + 1]
@@ -1606,13 +1988,28 @@ def test_run_consolidates_results_and_records_replayable_commands(
     (output / "results.json").write_text(
         json.dumps(results, indent=2) + "\n", encoding="utf-8"
     )
+    receipt_path = next((output / "ledger" / "cases").glob("*/receipt.json"))
+    receipt_mtime = receipt_path.stat().st_mtime_ns
+
+    assert perf_matrix.main(["report", str(output)]) == 0
+    rebuilt = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert rebuilt["results"][0]["result"] == "green"
+    rows["gpt2.generate"]["status"] = "failed"
+    (output / "results.json").write_text(
+        json.dumps(results, indent=2) + "\n", encoding="utf-8"
+    )
 
     assert perf_matrix.main(["resume", str(output)]) == 0
+    assert receipt_path.stat().st_mtime_ns == receipt_mtime
     resumed = json.loads((output / "results.json").read_text(encoding="utf-8"))
     resumed_rows = {row["id"]: row for row in resumed["cases"]}
     assert resumed_rows["gpt2.generate"]["status"] == "green"
     assert sorted(path.name for path in output.iterdir()) == [
+        "artifacts",
+        "assets",
+        "ledger",
         "report.html",
+        "report.json",
         "results.json",
     ]
     assert not scratch_root.exists()
@@ -1722,9 +2119,33 @@ def test_run_records_preflight_failure_and_finishes_campaign(
     assert row["reason"] == "profile unavailable"
     assert row["commands"]["resolve"]["rendered"].endswith("run --dry-run")
     assert sorted(path.name for path in output.iterdir()) == [
+        "artifacts",
+        "assets",
+        "ledger",
         "report.html",
+        "report.json",
         "results.json",
     ]
+    public_report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert public_report["accounting"]["selected"] == 1
+    assert public_report["accounting"]["comparable"] == 0
+    assert public_report["accounting"]["outcomes"]["white"] == 1
+    public_row = public_report["results"][0]
+    assert public_row["state"] == "terminal"
+    assert public_row["result"] == "white"
+    assert public_row["issue"]["stage"] == "reference-preflight"
+    assert public_row["issue"]["code"] == "execution_failure"
+    assert public_row["output_validation"]["status"] == "Not completed"
+    assert public_row["debug"]["logs"] == [
+        {
+            "label": "Reference Preflight diagnostic",
+            "href": "artifacts/gpt2.generate/logs/reference-preflight.log",
+        }
+    ]
+    diagnostic = output / public_row["debug"]["logs"][0]["href"]
+    assert diagnostic.is_file()
+    assert "profile unavailable" in diagnostic.read_text(encoding="utf-8")
+    assert "minimax-h3-768p" not in json.dumps(public_report)
     assert not scratch_root.exists()
 
 

@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 import uuid as uuidlib
 
 import yaml
@@ -60,7 +60,9 @@ from tools.reporting_html import (  # noqa: E402
 )
 from tools.validation import catalog as validation_catalog  # noqa: E402
 from tools import trtmc_disagreements  # noqa: E402
+from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError  # noqa: E402
 from tools import model_selection  # noqa: E402
+from tools import qualification_report  # noqa: E402
 
 
 DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
@@ -744,6 +746,7 @@ def _run_subprocess(command: Sequence[str], log_path: Path, env: Mapping[str, st
             list(command),
             check=False,
             text=True,
+            cwd=REPO_ROOT,
             stdout=output,
             stderr=subprocess.STDOUT,
             env=dict(env),
@@ -770,6 +773,7 @@ def _run_supervised_subprocess(
         process = subprocess.Popen(
             list(command),
             text=True,
+            cwd=REPO_ROOT,
             stdout=output,
             stderr=subprocess.STDOUT,
             env=dict(env),
@@ -1769,6 +1773,82 @@ def run_binding(
     workload = _required_workload(binding)
     case_dir = _case_directory(Path(arguments.output), binding)
     case_dir.mkdir(parents=True, exist_ok=True)
+    dataset_command = shlex.join([sys.executable, *sys.argv])
+    suite = suites[workload]
+    task_type, user_contract = _suite_task_metadata(suite)
+    model = task_models[binding.model]
+    task_strategy = str(model.get("task_strategy", "") or "")
+    dataset = (
+        Path(arguments.dataset)
+        if arguments.dataset
+        else _dataset_path(suite, arguments.dataset_root)
+    )
+    if arguments.dataset is None and not dataset.is_file():
+        message = f"dataset does not exist: {dataset}"
+        execution_log = case_dir / "execution.log"
+        execution_log.write_text(
+            f"Accuracy preflight failed\n{message}\n",
+            encoding="utf-8",
+        )
+        result = _normalize_result(
+            {
+                "model": binding.model,
+                "workload": workload,
+                "family": str(model.get("family", "") or ""),
+                "operation": _operation_for_task_strategy(task_strategy),
+                "task_strategy": task_strategy,
+                "task_type": task_type,
+                "user_contract": user_contract,
+                "executor": "dataset_preflight",
+                "execution": {
+                    "status": "error",
+                    "exit_code": 1,
+                    "retryable": False,
+                },
+                "comparison": {
+                    "status": "not_run",
+                    "mode": "",
+                    "primary_metric": None,
+                    "metrics": {},
+                    "failures": [],
+                },
+                "validation": {"status": "failed"},
+                "failure_stage": "preflight",
+                "failure_domain": "data-artifact",
+                "failure_code": "dataset_missing",
+                "reference_environment": [],
+                "reproduce": {
+                    "dataset": {
+                        "command": dataset_command,
+                        "sample_limit": int(arguments.limit or 0),
+                        "prepared_input_count": 0,
+                    },
+                    "hf": [],
+                    "trtmc": [],
+                },
+                "raw_result": {
+                    "status": "failed",
+                    "error_type": "DatasetNotFoundError",
+                    "error": message,
+                },
+                "raw_result_path": "",
+                "disagreements": {
+                    "count": 0,
+                    "path": "disagreements.jsonl",
+                    "inline_limit": trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT,
+                    "reference_vanilla_available": False,
+                    "trtmc_vanilla_available": False,
+                },
+                "execution_log": str(execution_log),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        (case_dir / "disagreements.jsonl").write_text("", encoding="utf-8")
+        (case_dir / "comparison.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return result
     profiles = _binding_profiles(
         binding,
         task_models=task_models,
@@ -1788,17 +1868,6 @@ def run_binding(
     process_env = _source_environment()
     process_env.update(environment.overrides)
     process_env.update(reference_sources.environment)
-    dataset_command = shlex.join([sys.executable, *sys.argv])
-
-    suite = suites[workload]
-    task_type, user_contract = _suite_task_metadata(suite)
-    model = task_models[binding.model]
-    task_strategy = str(model.get("task_strategy", "") or "")
-    dataset = (
-        Path(arguments.dataset)
-        if arguments.dataset
-        else _dataset_path(suite, arguments.dataset_root)
-    )
     command = _comparison_command(
         binding,
         case_dir=case_dir,
@@ -2851,29 +2920,336 @@ def _report_counts(
     return validation_counts, comparison_counts, execution_errors
 
 
-def _traffic_light_counts(
-    results: Sequence[Mapping[str, Any]],
-) -> dict[str, int]:
-    counts = {"green": 0, "yellow": 0, "red": 0, "white": 0}
-    for result in results:
-        counts[_traffic_light_status(result)] += 1
-    return counts
-
-
-def _platform_exclusion_count(results: Sequence[Mapping[str, Any]]) -> int:
-    return sum(isinstance(result.get("platform_exclusion"), Mapping) for result in results)
-
-
 def _traffic_light_status(result: Mapping[str, Any]) -> str:
+    execution_status = str(result["execution"]["status"])
     validation_status = str(result["validation"]["status"])
     comparison_status = str(result["comparison"]["status"])
-    if validation_status == "skipped":
-        return "yellow"
-    if comparison_status == "agreement":
+    precision = _accuracy_precision(result)
+    if execution_status != "completed":
+        return "white"
+    if "Not recorded" in precision.values():
+        return "white"
+    if comparison_status not in {"agreement", "disagreement"}:
+        return "white"
+    if validation_status not in {"passed", "failed"}:
+        return "white"
+    if comparison_status == "agreement" and validation_status == "passed":
         return "green"
-    if comparison_status == "disagreement":
+    if comparison_status == "disagreement" or validation_status == "failed":
         return "red"
     return "white"
+
+
+def _accuracy_precision(result: Mapping[str, Any]) -> dict[str, str]:
+    contract = result.get("precision_contract", {})
+    contract = contract if isinstance(contract, Mapping) else {}
+    raw_result = result.get("raw_result", {})
+    raw_result = raw_result if isinstance(raw_result, Mapping) else {}
+    reference = (
+        contract.get("reference_precision")
+        or contract.get("reference_dtype")
+        or raw_result.get("reference_precision")
+        or raw_result.get("reference_dtype")
+    )
+    base = contract.get("trtmc_base_precision") or raw_result.get("precision")
+    quantization = contract.get("trtmc_quantization")
+    if quantization and str(quantization).lower() not in {"none", "false"}:
+        candidate = (
+            f"{str(quantization).lower()} ({str(base).lower()} base)"
+            if base
+            else str(quantization).lower()
+        )
+    else:
+        candidate = str(base).lower() if base else ""
+    return {
+        "reference": str(reference).lower() if reference else "Not recorded",
+        "candidate": candidate or "Not recorded",
+    }
+
+
+def _accuracy_issue(result: Mapping[str, Any]) -> dict[str, str] | None:
+    if _traffic_light_status(result) != "white":
+        return None
+    execution = result.get("execution", {})
+    execution = execution if isinstance(execution, Mapping) else {}
+    if execution.get("status") == "error":
+        raw_result = result.get("raw_result", {})
+        raw_result = raw_result if isinstance(raw_result, Mapping) else {}
+        worker_failure = result.get("executor") == "model_worker"
+        return {
+            "priority": "P1",
+            "stage": _accuracy_failure_stage(result),
+            "domain": str(result.get("failure_domain") or "harness/unknown"),
+            "code": str(
+                result.get("failure_code")
+                or ("worker_no_result" if worker_failure else "execution_error")
+            ),
+            "message": str(
+                execution.get("last_error")
+                or raw_result.get("error")
+                or result.get("not_compared_reason")
+                or "candidate execution did not produce a comparison"
+            ),
+        }
+    precision = _accuracy_precision(result)
+    if "Not recorded" in precision.values():
+        return {
+            "priority": "P1",
+            "stage": "preflight",
+            "domain": "policy-config",
+            "code": "comparison_contract",
+            "message": "Reference and TRTMC compute precision were not both recorded",
+        }
+    comparison = result.get("comparison", {})
+    comparison = comparison if isinstance(comparison, Mapping) else {}
+    return {
+        "priority": "P1",
+        "stage": "compare",
+        "domain": "harness/unknown",
+        "code": "no_valid_comparison",
+        "message": str(
+            result.get("not_compared_reason")
+            or comparison.get("reason")
+            or "comparison evidence is incomplete"
+        ),
+    }
+
+
+def _accuracy_failure_stage(result: Mapping[str, Any]) -> str:
+    explicit = str(result.get("failure_stage", "") or "").strip()
+    if explicit:
+        return explicit
+    raw_result = result.get("raw_result", {})
+    raw_result = raw_result if isinstance(raw_result, Mapping) else {}
+    error_type = str(raw_result.get("error_type", "") or "")
+    error = str(raw_result.get("error", "") or "")
+    if error_type == "ReferenceExecutionError" or "HF reference subprocess failed" in error:
+        return "reference"
+    if result.get("executor") == "dataset_preflight":
+        return "preflight"
+    if result.get("executor") == "model_worker":
+        return "compare"
+    return "candidate"
+
+
+def _accuracy_result_stage(result: Mapping[str, Any]) -> str:
+    execution = result.get("execution", {})
+    if isinstance(execution, Mapping) and execution.get("status") == "error":
+        return _accuracy_failure_stage(result)
+    return "compare"
+
+
+def _materialize_accuracy_report_artifact(
+    output: Path,
+    case_dir: Path,
+    path: Path,
+    *,
+    category: str,
+) -> str:
+    relative_case = case_dir.relative_to(output)
+    relative_artifact = path.relative_to(case_dir)
+    destination = (
+        output
+        / "artifacts"
+        / "cases"
+        / relative_case
+        / category
+        / relative_artifact
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(path, destination)
+    return destination.relative_to(output).as_posix()
+
+
+def _report_log_links(output: Path, case_dir: Path) -> list[dict[str, str]]:
+    links = []
+    for path in sorted(case_dir.rglob("*.log")):
+        if not path.is_file():
+            continue
+        links.append(
+            {
+                "label": path.relative_to(case_dir).as_posix(),
+                "href": _materialize_accuracy_report_artifact(
+                    output,
+                    case_dir,
+                    path,
+                    category="logs",
+                ),
+            }
+        )
+    return links
+
+
+def _report_command_artifacts(
+    output: Path,
+    case_dir: Path,
+    result: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    reproduce = result.get("reproduce", {})
+    reproduce = reproduce if isinstance(reproduce, Mapping) else {}
+    command_logs = reproduce.get("command_logs", {})
+    command_logs = command_logs if isinstance(command_logs, Mapping) else {}
+    requested = {
+        str(name)
+        for side in ("hf", "trtmc")
+        for name in command_logs.get(side, [])
+        if str(name).strip()
+    }
+    artifacts = []
+    for name in sorted(requested):
+        matches = sorted(path for path in case_dir.rglob(Path(name).name) if path.is_file())
+        if not matches:
+            continue
+        path = matches[0]
+        artifacts.append(
+            {
+                "label": name,
+                "href": _materialize_accuracy_report_artifact(
+                    output,
+                    case_dir,
+                    path,
+                    category="commands",
+                ),
+            }
+        )
+    return artifacts
+
+
+def _accuracy_samples(result: Mapping[str, Any]) -> dict[str, int | None]:
+    reproduce = result.get("reproduce", {})
+    reproduce = reproduce if isinstance(reproduce, Mapping) else {}
+    dataset = reproduce.get("dataset", {})
+    dataset = dataset if isinstance(dataset, Mapping) else {}
+    comparison = result.get("comparison", {})
+    comparison = comparison if isinstance(comparison, Mapping) else {}
+    metrics = comparison.get("metrics", {})
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+
+    def nonnegative(value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+
+    planned = nonnegative(dataset.get("sample_limit"))
+    if planned == 0:
+        planned = None
+    evaluated = nonnegative(dataset.get("prepared_input_count"))
+    if evaluated is None:
+        evaluated = nonnegative(metrics.get("valid_count"))
+    if evaluated is None:
+        evaluated = nonnegative(metrics.get("sample_count"))
+    return {"planned": planned, "evaluated": evaluated}
+
+
+_SAMPLE_DIFFERENCE_RAW_KEYS = {
+    "generated_token_ids",
+    "generated_token_max_score_ids",
+    "input_token_ids",
+}
+
+
+def _compact_sample_difference(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        compact = {
+            str(name): _compact_sample_difference(item)
+            for name, item in value.items()
+            if name not in _SAMPLE_DIFFERENCE_RAW_KEYS and name != "artifacts"
+        }
+        artifacts = value.get("artifacts")
+        if isinstance(artifacts, Mapping) and artifacts.get("media"):
+            compact["artifacts"] = {
+                "media": _compact_sample_difference(artifacts["media"])
+            }
+        return compact
+    if isinstance(value, list):
+        return [_compact_sample_difference(item) for item in value]
+    return value
+
+
+def _public_sample_differences(
+    output: Path,
+    case_dir: Path,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    metadata = result.get("disagreements", {})
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    try:
+        count = max(0, int(metadata.get("count", 0) or 0))
+        limit = max(
+            0,
+            int(
+                metadata.get(
+                    "inline_limit",
+                    trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT,
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        count = 0
+        limit = 0
+    comparison = result.get("comparison", {})
+    failed = isinstance(comparison, Mapping) and comparison.get("status") == "disagreement"
+    public = {
+        "count": count,
+        "classification": "failed_samples" if failed else "sample_differences",
+        "href": None,
+        "preview": [],
+    }
+    if count <= 0:
+        return public
+    artifact_name = str(metadata.get("path", "disagreements.jsonl"))
+    artifact = case_dir / artifact_name
+    if not artifact.is_file():
+        return public
+    public["href"] = _materialize_accuracy_report_artifact(
+        output,
+        case_dir,
+        artifact,
+        category="differences",
+    )
+    public["preview"] = [
+        _compact_sample_difference(record)
+        for record in trtmc_disagreements.load_disagreement_preview(
+            artifact,
+            limit=limit,
+        )
+    ]
+    return public
+
+
+def _public_accuracy_result(
+    output: Path,
+    path: Path,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    public = dict(result)
+    public.update(
+        {
+            "id": f"{result.get('model', '')}::{result.get('workload') or 'not-compared'}",
+            "state": "terminal",
+            "result": _traffic_light_status(result),
+            "precision": _accuracy_precision(result),
+            "samples": _accuracy_samples(result),
+            "sample_differences": _public_sample_differences(
+                output,
+                path.parent,
+                result,
+            ),
+            "issue": _accuracy_issue(result),
+            "debug": {
+                "result": path.relative_to(output).as_posix(),
+                "logs": _report_log_links(output, path.parent),
+                "command_artifacts": _report_command_artifacts(
+                    output,
+                    path.parent,
+                    result,
+                ),
+            },
+        }
+    )
+    return public
 
 
 def _report_rows(
@@ -3062,70 +3438,152 @@ details {{ min-width: 210px; }}
 """
 
 
+def _accuracy_ledger_report_rows(
+    output: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ledger = ExecutionLedger.load(output, task_kind="accuracy")
+    terminal_results: list[dict[str, Any]] = []
+    public_results: list[dict[str, Any]] = []
+    for entry in ledger.snapshot():
+        case = entry["case"]
+        receipt = entry["receipt"]
+        report_fields = case.get("report", {})
+        if not isinstance(report_fields, Mapping):
+            raise ValidationError(f"invalid Accuracy ledger descriptor for {case['id']!r}")
+        if receipt["state"] != "terminal":
+            active = receipt["attempts"][-1] if receipt["attempts"] else {}
+            evidence = active.get("evidence", {})
+            evidence = evidence if isinstance(evidence, Mapping) else {}
+            public_results.append(
+                {
+                    **dict(report_fields),
+                    "id": case["id"],
+                    "state": receipt["state"],
+                    "result": None,
+                    "progress": {
+                        "stage": receipt["stage"],
+                        "attempt": receipt["active_attempt"]
+                        or len(receipt["attempts"]),
+                    },
+                    "precision": {
+                        "reference": "Not recorded",
+                        "candidate": "Not recorded",
+                    },
+                    "samples": {
+                        "planned": report_fields.get("sample_limit"),
+                        "evaluated": None,
+                    },
+                    "commands": copy.deepcopy(dict(evidence.get("commands", {}))),
+                    "debug": {
+                        "logs": copy.deepcopy(list(evidence.get("logs", []))),
+                        "command_artifacts": [],
+                    },
+                }
+            )
+            continue
+        result = _normalize_result(receipt["payload"])
+        derived = _traffic_light_status(result)
+        if receipt["result"] != derived:
+            raise ValidationError(
+                f"Accuracy ledger result mismatch for {case['id']!r}: "
+                f"receipt={receipt['result']}, comparison={derived}"
+            )
+        result_path = output / str(case["result_path"])
+        encoded = json.dumps(result, indent=2, ensure_ascii=False)
+        if not result_path.is_file() or result_path.read_text(encoding="utf-8") != encoded:
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = result_path.with_name(f".{result_path.name}.{os.getpid()}.tmp")
+            temporary.write_text(encoded, encoding="utf-8")
+            temporary.replace(result_path)
+        terminal_results.append(result)
+        public = _public_accuracy_result(output, result_path, result)
+        public["progress"] = {
+            "stage": receipt["stage"],
+            "attempt": len(receipt["attempts"]),
+        }
+        public_results.append(public)
+    return terminal_results, public_results
+
+
 def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
-    result_paths = sorted(output.glob("*/*/comparison.json"))
-    results = _normalize_result_files(result_paths)
-    result_paths, results = _deduplicate_results(result_paths, results)
+    if (output / "ledger" / "campaign.json").is_file():
+        results, public_results = _accuracy_ledger_report_rows(output)
+    else:
+        result_paths = sorted(output.glob("*/*/comparison.json"))
+        results = _normalize_result_files(result_paths)
+        result_paths, results = _deduplicate_results(result_paths, results)
+        selected = [
+            (path, result)
+            for path, result in zip(result_paths, results, strict=True)
+            if not isinstance(result.get("platform_exclusion"), Mapping)
+        ]
+        result_paths = [path for path, _result in selected]
+        results = [result for _path, result in selected]
+        public_results = [
+            _public_accuracy_result(output, path, result)
+            for path, result in zip(result_paths, results, strict=True)
+        ]
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
-    traffic_light_counts = _traffic_light_counts(results)
-    platform_excluded = _platform_exclusion_count(results)
     sample_counts = [
         count for result in results if (count := _selected_sample_count(result)) is not None
     ]
     generated_at = _utc_now()
-    report = {
-        "schema_version": "trtmc.validation-report/v2",
-        "generated_at": generated_at.isoformat(),
-        "validation_status": (
-            "failed"
-            if not results or validation_counts["failed"]
-            else "incomplete"
-            if validation_counts["not_compared"]
-            else "passed"
+    validation_status = (
+        "failed"
+        if not results or validation_counts["failed"]
+        else "incomplete"
+        if (
+            validation_counts["not_compared"]
+            or validation_counts["skipped"]
+            or execution_errors
+            or any(_traffic_light_status(result) == "white" for result in results)
+        )
+        else "passed"
+    )
+    summary = {
+        "cases": len(public_results),
+        "execution_completed": sum(
+            result["execution"]["status"] == "completed" for result in results
         ),
-        "summary": {
-            "cases": len(results),
-            "execution_completed": sum(
-                result["execution"]["status"] == "completed" for result in results
-            ),
-            "execution_errors": execution_errors,
-            "agreements": comparison_counts["agreement"],
-            "disagreements": comparison_counts["disagreement"],
-            "not_compared": comparison_counts["not_run"],
-            "validation_passed": validation_counts["passed"],
-            "validation_failed": validation_counts["failed"],
-            "validation_skipped": validation_counts["skipped"],
-            "platform_excluded": platform_excluded,
-            "selected_samples": sum(sample_counts),
-        },
-        "results": results,
+        "execution_errors": execution_errors,
+        "agreements": comparison_counts["agreement"],
+        "disagreements": comparison_counts["disagreement"],
+        "not_compared": comparison_counts["not_run"],
+        "validation_passed": validation_counts["passed"],
+        "validation_failed": validation_counts["failed"],
+        "validation_skipped": validation_counts["skipped"],
+        "selected_samples": sum(sample_counts),
     }
     run_path = output / "run.json"
+    run: dict[str, Any] = {}
     if run_path.is_file():
-        report["run"] = json.loads(run_path.read_text(encoding="utf-8"))
-        duration_seconds = report["run"].get("duration_seconds")
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        duration_seconds = run.get("duration_seconds")
         if duration_seconds is None:
             duration_seconds = _elapsed_seconds(
-                report["run"].get("started_at"),
+                run.get("started_at"),
                 generated_at,
             )
         if duration_seconds is not None:
-            report["summary"]["duration_seconds"] = duration_seconds
-    json_path = output / "report.json"
-    html_path = output / "report.html"
-    json_path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+            summary["duration_seconds"] = duration_seconds
+    if any(row["state"] != "terminal" for row in public_results):
+        validation_status = "running"
+    return qualification_report.materialize_report(
+        output,
+        report_kind="accuracy",
+        title="TRTMC Accuracy & Fidelity Qualification",
+        identity={
+            "run_id": output.name,
+            "disposition": validation_status,
+            "source_revision": run.get("source_revision"),
+        },
+        run=run,
+        results=public_results,
+        metadata={
+            "validation_status": validation_status,
+            "summary": summary,
+        },
     )
-    document = _report_document(
-        report,
-        rows=_report_rows(output, results, result_paths),
-        comparison_counts=comparison_counts,
-        execution_errors=execution_errors,
-        traffic_light_counts=traffic_light_counts,
-    )
-    html_path.write_text(document, encoding="utf-8")
-    return json_path, html_path, report
 
 
 def _print_result(
@@ -3140,6 +3598,7 @@ def _print_result(
         print("Status: NOT COMPARED")
         print(f"Reason: {not_compared_reason}")
         print(f"Compare result: {comparison}")
+        print(f"Report data:   {report.with_name('report.json')}")
         print(f"Report:         {report}")
         return
     execution = result.get("execution", {})
@@ -3168,6 +3627,7 @@ def _print_result(
             print(f"Worker log: {worker_log}")
     if not verbose:
         print(f"Compare result: {comparison}")
+        print(f"Report data: {report.with_name('report.json')}")
         print(f"Report: {report}")
         return
     reproduce = result.get("reproduce", {})
@@ -3193,6 +3653,7 @@ def _print_result(
         print("  unavailable; see comparison result")
     print()
     print(f"Compare result: {comparison}")
+    print(f"Report data:   {report.with_name('report.json')}")
     print(f"Report:         {report}")
 
 
@@ -3768,6 +4229,55 @@ def _worker_environment(arguments: argparse.Namespace) -> dict[str, str]:
     return environment
 
 
+def _accuracy_worker_attempt_evidence(
+    binding: Binding,
+    arguments: argparse.Namespace,
+    *,
+    worker_attempt: int,
+) -> dict[str, Any]:
+    case_dir = _case_directory(arguments.output, binding)
+    worker_log = _worker_log_path(
+        case_dir,
+        case_attempt=int(getattr(arguments, "case_attempt", 1)),
+        worker_attempt=worker_attempt,
+    )
+    worker_log.parent.mkdir(parents=True, exist_ok=True)
+    worker_log.touch(exist_ok=True)
+    worker_command = _worker_command(binding, arguments)
+    worker_environment = _worker_environment(arguments)
+    return {
+        "commands": {
+            "worker": {
+                "argv": worker_command,
+                "rendered": shlex.join(worker_command),
+                "cwd": str(REPO_ROOT),
+            }
+        },
+        "logs": [
+            {
+                "label": (
+                    f"Accuracy worker case attempt "
+                    f"{getattr(arguments, 'case_attempt', 1)}, "
+                    f"worker attempt {worker_attempt}"
+                ),
+                "href": worker_log.relative_to(arguments.output).as_posix(),
+            }
+        ],
+        "environment": {
+            name: worker_environment[name]
+            for name in (
+                "CUDA_VISIBLE_DEVICES",
+                "HF_HOME",
+                "LD_LIBRARY_PATH",
+                "PYTHONPATH",
+                "PYTORCH_CUDA_ALLOC_CONF",
+                "TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF",
+            )
+            if worker_environment.get(name)
+        },
+    }
+
+
 def _prepare_hf_on_demand(
     binding: Binding,
     arguments: argparse.Namespace,
@@ -3955,7 +4465,11 @@ def _run_supervised_binding(
     case_dir.mkdir(parents=True, exist_ok=True)
     comparison_path = case_dir / "comparison.json"
     comparison_path.unlink(missing_ok=True)
-    worker_log = case_dir / ("worker.log" if attempt == 1 else f"worker.attempt-{attempt}.log")
+    worker_log = _worker_log_path(
+        case_dir,
+        case_attempt=int(getattr(arguments, "case_attempt", 1)),
+        worker_attempt=attempt,
+    )
     command = _worker_command(binding, arguments)
     launch_error = ""
     error_type = "WorkerProcessError"
@@ -4008,6 +4522,20 @@ def _run_supervised_binding(
     return result
 
 
+def _worker_log_path(
+    case_dir: Path,
+    *,
+    case_attempt: int,
+    worker_attempt: int,
+) -> Path:
+    if case_attempt == 1:
+        name = "worker.log" if worker_attempt == 1 else f"worker.attempt-{worker_attempt}.log"
+    else:
+        suffix = "" if worker_attempt == 1 else f".worker-attempt-{worker_attempt}"
+        name = f"worker.case-attempt-{case_attempt}{suffix}.log"
+    return case_dir / name
+
+
 def _archive_failed_attempt(case_dir: Path, attempt: int) -> dict[str, str]:
     archived = {}
     for name in ("comparison.json", "execution.log", "disagreements.jsonl"):
@@ -4056,6 +4584,7 @@ def _run_supervised_binding_with_retries(
     *,
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
+    on_retry: Callable[[int, Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     case_dir = _case_directory(arguments.output, binding)
     revalidation_budget = _reused_bundle_revalidation_budget(arguments)
@@ -4075,9 +4604,12 @@ def _run_supervised_binding_with_retries(
         revalidation_budget.record_worker_result(result)
         execution = result.get("execution", {})
         execution_error = isinstance(execution, Mapping) and execution.get("status") == "error"
+        retryable = not (
+            isinstance(execution, Mapping) and execution.get("retryable") is False
+        )
         archived = (
             _archive_failed_attempt(case_dir, attempt)
-            if execution_error and attempt < arguments.model_attempts
+            if execution_error and retryable and attempt < arguments.model_attempts
             else {}
         )
         attempt_result = _attempt_record(
@@ -4086,8 +4618,11 @@ def _run_supervised_binding_with_retries(
             archived=archived,
         )
         attempts.append(attempt_result)
-        if not execution_error or attempt == arguments.model_attempts:
+        will_retry = execution_error and retryable and attempt < arguments.model_attempts
+        if not will_retry:
             break
+        if on_retry is not None:
+            on_retry(attempt, result)
         print(
             f"  Attempt {attempt}/{arguments.model_attempts}: FAILED",
             flush=True,
@@ -4183,6 +4718,53 @@ def _validate_resume_request(output: Path) -> None:
         raise ValidationError("cannot resume Accuracy results with a different resolved command")
 
 
+def _accuracy_case_id(binding: Binding) -> str:
+    return f"{binding.model}::{binding.workload or 'not-compared'}"
+
+
+def _open_accuracy_ledger(
+    bindings: Sequence[Binding],
+    arguments: argparse.Namespace,
+    catalog: Mapping[str, Any],
+) -> ExecutionLedger:
+    fingerprint_input = {
+        "source_revision": _source_revision(),
+        "command": _resume_command(shlex.join(sys.argv)),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_input, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    cases = []
+    for binding in bindings:
+        result_path = _case_directory(arguments.output, binding) / "comparison.json"
+        sample_limit = (
+            resolve_sample_limit(catalog, binding, arguments.limit)
+            if binding.runnable
+            else None
+        )
+        cases.append(
+            {
+                "id": _accuracy_case_id(binding),
+                "result_path": result_path.relative_to(arguments.output).as_posix(),
+                "report": {
+                    "model": binding.model,
+                    "workload": binding.workload,
+                    "sample_limit": sample_limit,
+                },
+            }
+        )
+    try:
+        return ExecutionLedger.open(
+            arguments.output,
+            campaign_id=arguments.output.name,
+            task_kind="accuracy",
+            fingerprint=fingerprint,
+            cases=cases,
+        )
+    except ExecutionLedgerError as error:
+        raise ValidationError(str(error)) from error
+
+
 def _run_all_bindings(
     bindings: Iterable[Binding],
     *,
@@ -4198,20 +4780,38 @@ def _run_all_bindings(
         arguments.output,
         cuda_visible_devices=arguments.cuda_visible_devices,
     )
+    ledger = _open_accuracy_ledger(bindings, arguments, catalog)
+    if arguments.resume_existing:
+        ledger.recover_interrupted()
+    write_report(arguments.output)
     failed = False
     not_compared = False
     remaining = Counter(binding.model for binding in bindings if binding.runnable)
     model_passed = {model: True for model in remaining}
     for binding in bindings:
+        case_id = _accuracy_case_id(binding)
+        receipt = ledger.receipt(case_id)
         if not binding.runnable:
-            print(
-                f"\nNot compared: {binding.model} / {binding.not_compared_reason}",
-                flush=True,
-            )
-            result, comparison = _write_not_compared_case(
-                binding,
-                arguments.output,
-            )
+            if receipt["state"] == "terminal":
+                result = _normalize_result(receipt["payload"])
+                comparison = _case_directory(arguments.output, binding) / "comparison.json"
+            else:
+                ledger.begin(case_id, stage="preflight")
+                write_report(arguments.output)
+                print(
+                    f"\nNot compared: {binding.model} / {binding.not_compared_reason}",
+                    flush=True,
+                )
+                result, comparison = _write_not_compared_case(
+                    binding,
+                    arguments.output,
+                )
+                normalized = _normalize_result(result)
+                ledger.finish(
+                    case_id,
+                    result=_traffic_light_status(normalized),
+                    payload=normalized,
+                )
             not_compared = True
             _, report_path, _ = write_report(arguments.output)
             _print_result(result, comparison, report_path, arguments.verbose)
@@ -4222,6 +4822,35 @@ def _run_all_bindings(
             arguments,
             binding,
         )
+        if receipt["state"] == "terminal":
+            result = _normalize_result(receipt["payload"])
+            model_failed = result["validation"]["status"] == "failed"
+            model_passed[binding.model] = model_passed[binding.model] and not model_failed
+            remaining[binding.model] -= 1
+            print(
+                f"\nResume: keeping terminal result for {binding.model} / {binding.workload}",
+                flush=True,
+            )
+            _, report_path, _ = write_report(arguments.output)
+            comparison = _case_directory(arguments.output, binding) / "comparison.json"
+            _print_result(result, comparison, report_path, arguments.verbose)
+            failed = failed or model_failed
+            if model_failed and arguments.on_model_failure == "stop":
+                print(f"Stopping after failed model: {binding.model}", flush=True)
+                break
+            continue
+        case_attempt = len(receipt["attempts"]) + 1
+        binding_arguments.case_attempt = case_attempt
+        ledger.begin(
+            case_id,
+            stage="preflight",
+            evidence=_accuracy_worker_attempt_evidence(
+                binding,
+                binding_arguments,
+                worker_attempt=1,
+            ),
+        )
+        write_report(arguments.output)
         result = (
             _resumable_binding_result(arguments.output, binding)
             if arguments.resume_existing
@@ -4229,19 +4858,53 @@ def _run_all_bindings(
         )
         if result is None:
             free_gib = _check_free_space(arguments, binding)
+            ledger.update_stage(case_id, "compare")
+            write_report(arguments.output)
             print(
                 f"\nStarting worker: {binding.model} / {binding.workload} / "
                 f"{sample_note} / {free_gib:.1f} GiB free",
                 flush=True,
             )
+
+            def record_retry(
+                worker_attempt: int,
+                attempt_result: Mapping[str, Any],
+            ) -> None:
+                stage = _accuracy_result_stage(attempt_result)
+                execution = attempt_result.get("execution", {})
+                execution = execution if isinstance(execution, Mapping) else {}
+                raw_result = attempt_result.get("raw_result", {})
+                raw_result = raw_result if isinstance(raw_result, Mapping) else {}
+                timed_out = raw_result.get("error_type") == "WorkerTimeoutError"
+                ledger.update_stage(case_id, stage)
+                ledger.retry(
+                    case_id,
+                    attempt_outcome="timed_out" if timed_out else "failed",
+                    evidence={
+                        "return_code": execution.get("exit_code"),
+                        "retryable": True,
+                    },
+                )
+                ledger.begin(
+                    case_id,
+                    stage="compare",
+                    evidence=_accuracy_worker_attempt_evidence(
+                        binding,
+                        binding_arguments,
+                        worker_attempt=worker_attempt + 1,
+                    ),
+                )
+                write_report(arguments.output)
+
             result = _run_supervised_binding_with_retries(
                 binding,
                 arguments=binding_arguments,
                 catalog=catalog,
+                on_retry=record_retry,
             )
         else:
             print(
-                f"\nResume: keeping terminal result for {binding.model} / {binding.workload}",
+                f"\nResume: importing terminal result for {binding.model} / {binding.workload}",
                 flush=True,
             )
         model_failed = result["validation"]["status"] == "failed"
@@ -4275,6 +4938,30 @@ def _run_all_bindings(
         comparison.write_text(
             json.dumps(result, indent=2, ensure_ascii=False),
             encoding="utf-8",
+        )
+        ledger.update_stage(case_id, _accuracy_result_stage(result))
+        normalized = _normalize_result(result)
+        light = _traffic_light_status(normalized)
+        raw_result = normalized.get("raw_result", {})
+        timed_out = (
+            isinstance(raw_result, Mapping)
+            and raw_result.get("error_type") == "WorkerTimeoutError"
+        )
+        ledger.finish(
+            case_id,
+            result=light,
+            payload=normalized,
+            attempt_outcome=(
+                "timed_out"
+                if timed_out
+                else "failed"
+                if normalized["execution"]["status"] == "error"
+                else "completed"
+            ),
+            evidence={
+                "return_code": normalized["execution"].get("exit_code"),
+                "retryable": normalized["execution"].get("retryable"),
+            },
         )
         _, report_path, _ = write_report(arguments.output)
         comparison = _case_directory(arguments.output, binding) / "comparison.json"
