@@ -140,19 +140,21 @@ def _effective_gate(
     sample_count: int,
 ) -> dict[str, Any]:
     if kind == "proportion_drop":
+        allowed_drop_count = math.floor(required * sample_count + 1e-12)
         return {
             "kind": kind,
-            "allowed_drop_count": math.floor(required * sample_count + 1e-12),
+            "allowed_drop_count": allowed_drop_count,
             "observed_drop_count": round(actual * sample_count),
             "resolution": 1 / sample_count,
         }
     if kind == "proportion":
-        required_passes = math.ceil(required * sample_count - 1e-12)
+        allowed_failures = sample_count - math.ceil(required * sample_count - 1e-12)
+        required_passes = max(0, sample_count - allowed_failures)
         observed_passes = min(sample_count, max(0, round(actual * sample_count)))
         return {
             "kind": kind,
             "required_passes": required_passes,
-            "allowed_failures": sample_count - required_passes,
+            "allowed_failures": allowed_failures,
             "observed_passes": observed_passes,
             "observed_failures": sample_count - observed_passes,
             "resolution": 1 / sample_count,
@@ -184,6 +186,108 @@ def _passed(actual: float, operator: str, required: float) -> bool:
     if operator == "<=":
         return actual <= required
     return actual == required
+
+
+def evaluate_sample_acceptance(
+    *,
+    policy: Mapping[str, Any],
+    sample_count: int,
+    passed_count: int,
+    expected_count: int,
+) -> dict[str, Any]:
+    """Apply one batch-level pass-rate rule to sample-level outcomes."""
+
+    issues: list[dict[str, Any]] = []
+    supported = {"min_pass_rate", "min_allowed_failures"}
+    unknown = sorted(str(name) for name in policy if name not in supported)
+    if unknown:
+        issues.append({"code": "unsupported_sample_acceptance_fields", "fields": unknown})
+    try:
+        min_pass_rate = _finite_number(policy["min_pass_rate"])
+    except (KeyError, TypeError, ValueError):
+        min_pass_rate = 0.0
+        issues.append({"code": "invalid_min_pass_rate"})
+    if not 0.0 < min_pass_rate <= 1.0:
+        issues.append({"code": "min_pass_rate_out_of_range", "value": min_pass_rate})
+    value = policy.get("min_allowed_failures")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        min_allowed_failures = 0
+        issues.append({"code": "invalid_min_allowed_failures", "value": value})
+    else:
+        min_allowed_failures = value
+    if sample_count != expected_count:
+        issues.append(
+            {"code": "incomplete_samples", "expected": expected_count, "actual": sample_count}
+        )
+    if sample_count <= 0 or passed_count < 0 or passed_count > sample_count:
+        issues.append(
+            {
+                "code": "invalid_sample_counts",
+                "sample_count": sample_count,
+                "passed_count": passed_count,
+            }
+        )
+    if sample_count > 0 and min_allowed_failures >= sample_count:
+        issues.append(
+            {
+                "code": "min_allowed_failures_out_of_range",
+                "value": min_allowed_failures,
+                "sample_count": sample_count,
+            }
+        )
+    rate_allowed_failures = max(
+        0,
+        sample_count - math.ceil(min_pass_rate * sample_count - 1e-12),
+    )
+    allowed_failures = max(rate_allowed_failures, min_allowed_failures)
+    failed_count = max(0, sample_count - passed_count)
+    return {
+        "sample_count": sample_count,
+        "passed_count": passed_count,
+        "failed_count": failed_count,
+        "min_pass_rate": min_pass_rate,
+        "min_allowed_failures": min_allowed_failures,
+        "allowed_failures": allowed_failures,
+        "verdict": (
+            "invalid"
+            if issues
+            else "pass"
+            if failed_count <= allowed_failures
+            else "fail"
+        ),
+        "issues": issues,
+    }
+
+
+def describe_sample_acceptance(
+    *,
+    policy: Mapping[str, Any],
+    sample_count: int | None,
+) -> dict[str, Any]:
+    if sample_count is None:
+        return {
+            "sample_count": None,
+            "min_pass_rate": policy.get("min_pass_rate"),
+            "min_allowed_failures": policy.get("min_allowed_failures"),
+            "allowed_failures": None,
+            "issues": [{"code": "sample_count_unavailable"}],
+        }
+    evaluation = evaluate_sample_acceptance(
+        policy=policy,
+        sample_count=sample_count,
+        passed_count=sample_count,
+        expected_count=sample_count,
+    )
+    return {
+        name: evaluation[name]
+        for name in (
+            "sample_count",
+            "min_pass_rate",
+            "min_allowed_failures",
+            "allowed_failures",
+            "issues",
+        )
+    }
 
 
 def describe_shadow_gate_policy(
@@ -361,6 +465,12 @@ def evaluate_shadow_gates(
                 }
             )
             continue
+        effective = _effective_gate(
+            kind=_metric_kind(metric_name, configured_kind),
+            actual=actual,
+            required=required,
+            sample_count=sample_count,
+        )
         checks.append(
             {
                 "gate": gate_name,
@@ -369,12 +479,7 @@ def evaluate_shadow_gates(
                 "actual": actual,
                 "required": required,
                 "verdict": "pass" if _passed(actual, operator, required) else "fail",
-                "effective": _effective_gate(
-                    kind=_metric_kind(metric_name, configured_kind),
-                    actual=actual,
-                    required=required,
-                    sample_count=sample_count,
-                ),
+                "effective": effective,
             }
         )
     return {

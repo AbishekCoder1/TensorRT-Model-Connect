@@ -75,15 +75,17 @@ suites:
           hf_use_cache: false
     model_profiles:
       phi-moe:
-        gates:
+        sample_acceptance:
           # Permit one backend disagreement in the 20-sample smoke slice when
           # task accuracy is preserved; the accuracy-drop gate remains strict.
-          min_prediction_agreement: 0.95
+          min_pass_rate: 0.95
     build:
       min_max_cache_length: 0
     gates:
       max_accuracy_drop_from_hf: 0.01
-      min_prediction_agreement: 0.98
+    sample_acceptance:
+      min_pass_rate: 0.98
+      min_allowed_failures: 1
     ci:
       eligible: false
       lane: local_only
@@ -185,11 +187,12 @@ suites:
           prompt_truncation_side: left
     build:
       min_max_cache_length: 0
-    gates:
-      # Validation samples are the pass/fail unit. Allow one non-tied
-      # divergence in the default 10-sample smoke. Exact HF argmax ties remain
-      # visible in raw divergence diagnostics but are gate-equivalent.
-      min_tie_adjusted_exact_match_rate: 0.9
+    gates: {}
+    sample_acceptance:
+      # Exact HF argmax ties remain visible in raw divergence diagnostics but
+      # are sample-pass equivalent.
+      min_pass_rate: 0.9
+      min_allowed_failures: 1
     ci:
       eligible: false
       lane: local_only
@@ -237,11 +240,12 @@ suites:
       scorer: continuation
     model_profiles:
       codegen-350m:
-        gates:
+        sample_acceptance:
           # CodeGen greedy continuations are deterministic. Any token
           # divergence is an accuracy regression, including the 1/10 failure
           # that the original diagnostic-only suite silently accepted.
-          min_exact_match_rate: 1.0
+          min_pass_rate: 1.0
+          min_allowed_failures: 0
     model_overrides:
       by_model:
         codegen-350m:
@@ -297,10 +301,12 @@ suites:
       by_model:
         distilgpt2:
           build_generation_headroom: true
-    gates:
-      # Samples are the pass/fail unit. Exact HF argmax ties remain visible in
-      # raw diagnostics but are gate-equivalent.
-      min_tie_adjusted_exact_match_rate: 0.9
+    gates: {}
+    sample_acceptance:
+      # Exact HF argmax ties remain visible in raw diagnostics but are
+      # sample-pass equivalent.
+      min_pass_rate: 0.9
+      min_allowed_failures: 0
     ci:
       eligible: false
       lane: local_only
@@ -505,7 +511,9 @@ suites:
       min_max_cache_length: 512
     gates:
       max_accuracy_drop_from_hf: 0.02
-      min_prediction_agreement: 0.95
+    sample_acceptance:
+      min_pass_rate: 0.95
+      min_allowed_failures: 0
     ci:
       eligible: false
       lane: local_only
@@ -566,7 +574,9 @@ suites:
       min_max_cache_length: 1024
     gates:
       max_accuracy_drop_from_hf: 0.02
-      min_prediction_agreement: 0.95
+    sample_acceptance:
+      min_pass_rate: 0.95
+      min_allowed_failures: 0
     ci:
       eligible: false
       lane: local_only
@@ -684,7 +694,9 @@ suites:
       min_max_cache_length: 1024
     gates:
       max_accuracy_drop_from_hf: 0.02
-      min_prediction_agreement: 0.95
+    sample_acceptance:
+      min_pass_rate: 0.95
+      min_allowed_failures: 0
     ci:
       eligible: false
       lane: local_only
@@ -858,7 +870,9 @@ suites:
       min_max_cache_length: 1024
     gates:
       max_pass_rate_drop_from_hf: 0.05
-      min_correctness_agreement: 0.95
+    sample_acceptance:
+      min_pass_rate: 0.95
+      min_allowed_failures: 0
     ci:
       eligible: false
       lane: local_only

@@ -3,6 +3,7 @@
 
 from tools.validation.gate_policy import (
     describe_shadow_gate_policy,
+    evaluate_sample_acceptance,
     evaluate_shadow_gates,
 )
 from tools.validation.catalog import load_suites
@@ -250,6 +251,100 @@ def test_rate_gate_recalculates_for_each_actual_sample_count() -> None:
         effective = evaluation["checks"][0]["effective"]
         assert effective["required_passes"] == required_passes
         assert effective["allowed_failures"] == allowed_failures
+
+
+def test_sample_acceptance_allows_one_failure_for_small_sample_set() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.98, "min_allowed_failures": 1},
+        sample_count=10,
+        passed_count=9,
+        expected_count=10,
+    )
+
+    assert evaluation == {
+        "sample_count": 10,
+        "passed_count": 9,
+        "failed_count": 1,
+        "min_pass_rate": 0.98,
+        "min_allowed_failures": 1,
+        "allowed_failures": 1,
+        "verdict": "pass",
+        "issues": [],
+    }
+
+
+def test_sample_acceptance_keeps_rate_budget_for_larger_sample_set() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.98, "min_allowed_failures": 1},
+        sample_count=100,
+        passed_count=98,
+        expected_count=100,
+    )
+
+    assert evaluation["allowed_failures"] == 2
+    assert evaluation["passed_count"] == 98
+    assert evaluation["failed_count"] == 2
+    assert evaluation["verdict"] == "pass"
+
+
+def test_sample_acceptance_fails_above_effective_failure_budget() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.98, "min_allowed_failures": 1},
+        sample_count=20,
+        passed_count=18,
+        expected_count=20,
+    )
+
+    assert evaluation["allowed_failures"] == 1
+    assert evaluation["passed_count"] == 18
+    assert evaluation["failed_count"] == 2
+    assert evaluation["verdict"] == "fail"
+
+
+def test_sample_acceptance_rejects_incomplete_evidence() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.98, "min_allowed_failures": 1},
+        sample_count=19,
+        passed_count=19,
+        expected_count=20,
+    )
+
+    assert evaluation["verdict"] == "invalid"
+    assert evaluation["issues"] == [
+        {"code": "incomplete_samples", "expected": 20, "actual": 19}
+    ]
+
+
+def test_sample_acceptance_rejects_a_failure_allowance_covering_every_sample() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.98, "min_allowed_failures": 3},
+        sample_count=3,
+        passed_count=2,
+        expected_count=3,
+    )
+
+    assert evaluation["verdict"] == "invalid"
+    assert evaluation["issues"] == [
+        {
+            "code": "min_allowed_failures_out_of_range",
+            "value": 3,
+            "sample_count": 3,
+        }
+    ]
+
+
+def test_sample_acceptance_rejects_a_zero_pass_rate() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.0, "min_allowed_failures": 0},
+        sample_count=10,
+        passed_count=0,
+        expected_count=10,
+    )
+
+    assert evaluation["verdict"] == "invalid"
+    assert evaluation["issues"] == [
+        {"code": "min_pass_rate_out_of_range", "value": 0.0}
+    ]
 
 
 def test_direct_minimum_gate_uses_its_declared_metric() -> None:

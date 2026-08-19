@@ -201,19 +201,35 @@
     return control;
   }
 
+  function sampleAcceptance(value) {
+    if (!value) return null;
+    const failed = Number(value.failed_count || 0);
+    const total = Number(value.sample_count || 0);
+    const control = el("details", "evidence sample-acceptance");
+    control.append(el("summary", "", `Sample acceptance · ${String(value.verdict || "unknown").toUpperCase()} · ${failed}/${total} failed`));
+    const body = el("div", "evidence-body");
+    add(body, el("div", "gate-fact", `Pass rate ≥${number(Number(value.min_pass_rate) * 100, 2)}% · minimum allowed failures ${value.min_allowed_failures ?? "—"} · allows ${value.allowed_failures ?? "—"}`));
+    (value.issues || []).forEach((issue) => body.append(el("div", "gate-issue", issue.code || "invalid sample acceptance")));
+    control.append(body);
+    return control;
+  }
+
   function metrics(row, kind) {
     const records = [];
     if (row.issue) records.push(["Failure", row.issue]);
     if ((row.warnings || []).length) records.push(["Warnings", row.warnings]);
     let gate = null;
+    let acceptance = null;
     if (kind === "accuracy") {
       const comparison = { ...(row.comparison || {}) };
       gate = gateEvaluation(comparison.gate_evaluation);
+      acceptance = sampleAcceptance(comparison.sample_acceptance);
       delete comparison.gate_evaluation;
+      delete comparison.sample_acceptance;
       records.push(["Comparison", comparison], ["Validation", row.validation || {}]);
     }
     else records.push(["Output validation", row.output_validation || {}], ["Reference samples", row.baseline?.samples_ms || []], ["TRTMC samples", row.candidate?.samples_ms || []], ["Comparison", row.comparison || {}]);
-    return add(el("div", "metric-evidence"), gate, details("Metrics", records));
+    return add(el("div", "metric-evidence"), acceptance, gate, details("Metrics", records));
   }
 
   function logs(row) {

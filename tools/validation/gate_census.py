@@ -10,7 +10,10 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from tools.validation import catalog as validation_catalog
-from tools.validation.gate_policy import describe_shadow_gate_policy
+from tools.validation.gate_policy import (
+    describe_sample_acceptance,
+    describe_shadow_gate_policy,
+)
 
 
 def _variant(
@@ -21,17 +24,34 @@ def _variant(
 ) -> dict[str, Any]:
     gates = suite.get("gates", {})
     gates = gates if isinstance(gates, Mapping) else {}
+    acceptance = suite.get("sample_acceptance")
+    acceptance = acceptance if isinstance(acceptance, Mapping) else None
     metric_kinds = suite.get("gate_metric_kinds", {})
     metric_kinds = metric_kinds if isinstance(metric_kinds, Mapping) else {}
-    return {
-        "models": list(models),
-        "policy": describe_shadow_gate_policy(
-            configured_gates=gates,
-            sample_count=sample_count,
-            policy_mode=str(suite.get("gate_policy", "blocking") or "blocking"),
-            metric_kinds={str(name): str(kind) for name, kind in metric_kinds.items()},
+    policy = describe_shadow_gate_policy(
+        configured_gates=gates,
+        sample_count=sample_count,
+        # An empty aggregate-gate list is valid when sample acceptance is the
+        # blocking rule.
+        policy_mode=(
+            "observation_only"
+            if acceptance and not gates
+            else str(suite.get("gate_policy", "blocking") or "blocking")
         ),
+        metric_kinds={str(name): str(kind) for name, kind in metric_kinds.items()},
+    )
+    if acceptance:
+        policy["policy_mode"] = "blocking"
+    variant = {
+        "models": list(models),
+        "policy": policy,
     }
+    if acceptance:
+        variant["sample_acceptance"] = describe_sample_acceptance(
+            policy=acceptance,
+            sample_count=sample_count,
+        )
+    return variant
 
 
 def _review(
@@ -45,24 +65,13 @@ def _review(
         review.append({"code": "no_selected_models"})
     if sample_count is None:
         review.append({"code": "sample_limit_unconfigured"})
-    if not any(variant.get("policy", {}).get("policy_mode") == "blocking" for variant in variants):
+    if not any(
+        variant.get("policy", {}).get("policy_mode") == "blocking"
+        for variant in variants
+    ):
         return review
-    review.append({"code": "minimum_sample_count_unapproved"})
-    scaling_gates = sorted(
-        {
-            str(gate.get("gate"))
-            for variant in variants
-            for gate in variant.get("policy", {}).get("gates", [])
-            if gate.get("effective", {}).get("kind") in {"proportion", "proportion_drop"}
-        }
-    )
-    if scaling_gates:
-        review.append(
-            {
-                "code": "sample_scaling_policy_unapproved",
-                "gates": scaling_gates,
-            }
-        )
+    if any(variant.get("sample_acceptance", {}).get("issues") for variant in variants):
+        review.append({"code": "invalid_sample_acceptance"})
     return review
 
 
@@ -79,6 +88,7 @@ def _signature(suite: Mapping[str, Any]) -> str:
             "gates": suite.get("gates", {}),
             "gate_policy": suite.get("gate_policy", "blocking"),
             "gate_metric_kinds": suite.get("gate_metric_kinds", {}),
+            "sample_acceptance": suite.get("sample_acceptance", {}),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -141,12 +151,18 @@ def build_gate_census(
             "bindings": binding_count,
             "variants": len(variants),
             "blocking_variants": sum(
-                variant["policy"]["policy_mode"] == "blocking" for variant in variants
+                variant["policy"]["policy_mode"] == "blocking"
+                for variant in variants
             ),
             "observation_only_variants": sum(
-                variant["policy"]["policy_mode"] == "observation_only" for variant in variants
+                variant["policy"]["policy_mode"] == "observation_only"
+                for variant in variants
             ),
-            "invalid_variants": sum(bool(variant["policy"]["issues"]) for variant in variants),
+            "invalid_variants": sum(
+                bool(variant["policy"]["issues"])
+                or bool(variant.get("sample_acceptance", {}).get("issues"))
+                for variant in variants
+            ),
             "review_required_suites": sum(bool(suite["review"]) for suite in suite_rows),
         },
         "suites": suite_rows,
