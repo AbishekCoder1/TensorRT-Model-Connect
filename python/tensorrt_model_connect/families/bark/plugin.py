@@ -62,7 +62,18 @@ def _load_bark_state_dict(model_dir: str) -> dict:
             for key in reader.keys():
                 state_dict[key] = reader.get_tensor(key).numpy()
         return state_dict
-    return torch.load(str(model_path), map_location="cpu", weights_only=True)
+    return torch.load(
+        str(model_path),
+        map_location="cpu",
+        weights_only=True,
+        mmap=True,
+    )
+
+
+def _discard_checkpoint_prefix(state_dict: dict, prefix: str) -> None:
+    for key in tuple(state_dict):
+        if key.startswith(prefix):
+            del state_dict[key]
 
 
 def _detect_sub_model_config(state_dict: dict, prefix: str) -> dict:
@@ -194,14 +205,14 @@ def _map_bark_decoder_weights(
 
     def _to_np(t):
         if hasattr(t, "numpy"):
-            return t.numpy().astype(np.float32)
+            t = t.numpy()
         return np.asarray(t, dtype=np.float32)
 
     def _t2d(w):
         """Transpose [out, in] -> [in, out] for matmul."""
         a = _to_np(w)
         if a.ndim == 2:
-            return np.ascontiguousarray(a.T)
+            return a.T
         return a
 
     # Embedding
@@ -312,14 +323,14 @@ def _map_bark_fine_weights(
 
     def _to_np(t):
         if hasattr(t, "numpy"):
-            return t.numpy().astype(np.float32)
+            t = t.numpy()
         return np.asarray(t, dtype=np.float32)
 
     def _t2d(w):
         """Transpose [out, in] -> [in, out] for matmul."""
         a = _to_np(w)
         if a.ndim == 2:
-            return np.ascontiguousarray(a.T)
+            return a.T
         return a
 
     # 8 embedding tables
@@ -437,15 +448,22 @@ class BarkPlugin:
         sem_w = _map_bark_decoder_weights(state_dict, "semantic", semantic_cfg)
         for k, v in sem_w.items():
             weights[f"semantic.{k}"] = v
+        _discard_checkpoint_prefix(state_dict, "semantic.")
 
         coarse_w = _map_bark_decoder_weights(state_dict, "coarse_acoustics", coarse_cfg)
         for k, v in coarse_w.items():
             weights[f"coarse.{k}"] = v
+        _discard_checkpoint_prefix(state_dict, "coarse_acoustics.")
 
         # Map fine model weights
         fine_w = _map_bark_fine_weights(state_dict, fine_cfg)
         for k, v in fine_w.items():
             weights[k] = v
+        _discard_checkpoint_prefix(state_dict, "fine_acoustics.")
+
+        for key in tuple(state_dict):
+            if not key.startswith("codec_model."):
+                del state_dict[key]
 
         # Store raw state_dict for codec engine builds
         weights["_state_dict"] = state_dict
@@ -494,8 +512,20 @@ class BarkPlugin:
                 verbose=verbose,
                 parallel_config=parallel,
             )
+        engine_role = str(config.raw.get("_decoder_engine_role", "decode"))
+        if engine_role not in {"decode", "dual_profile"}:
+            raise ValueError(
+                "Bark supports decoder_engine_layout='dual_profile' for batched prefill; "
+                f"got engine role {engine_role!r}"
+            )
         return _build_bark_standard_engine(
-            weights, "semantic", sem_cfg, max_cache_length, precision=precision, verbose=verbose
+            weights,
+            "semantic",
+            sem_cfg,
+            max_cache_length,
+            precision=precision,
+            verbose=verbose,
+            engine_role=engine_role,
         )
 
     def build_extra_engines(
@@ -540,6 +570,11 @@ class BarkPlugin:
                         parallel_config=rank_parallel,
                     )
         else:
+            engine_role = (
+                "dual_profile"
+                if config.raw.get("_decoder_engine_layout") == "dual_profile"
+                else "decode"
+            )
             with timed_trt_compile(build_timing, "extra_bark_coarse_decoder"):
                 coarse_plan = _build_bark_standard_engine(
                     weights,
@@ -548,26 +583,19 @@ class BarkPlugin:
                     max_cache_length,
                     precision=precision,
                     verbose=verbose,
+                    engine_role=engine_role,
                 )
             result["coarse_engine_plan"] = coarse_plan
 
         # Add embedding tables as raw bundle sections.
         # The C++ runtime does host-side embedding lookup for embed_input mode.
         state_dict = weights.get("_state_dict")
-        if state_dict is not None:
-            sem_key = "semantic.input_embeds_layer.weight"
-            if sem_key in state_dict:
-                w = state_dict[sem_key]
-                if hasattr(w, "numpy"):
-                    w = w.numpy()
-                result["semantic_embed"] = np.asarray(w, dtype=np.float32).tobytes()
-
-            coarse_key = "coarse_acoustics.input_embeds_layer.weight"
-            if coarse_key in state_dict:
-                w = state_dict[coarse_key]
-                if hasattr(w, "numpy"):
-                    w = w.numpy()
-                result["coarse_embed"] = np.asarray(w, dtype=np.float32).tobytes()
+        for section, key in (
+            ("semantic_embed", "semantic.embedding"),
+            ("coarse_embed", "coarse.embedding"),
+        ):
+            if key in weights:
+                result[section] = np.asarray(weights[key], dtype=np.float32).tobytes()
 
         # Calculate max codec frames from max_cache_length.
         # Semantic generates at most ~(max_cache_length - 257) tokens.
@@ -698,6 +726,8 @@ def _build_bark_standard_engine(
     max_cache_length: int,
     precision: str = "fp32",
     verbose: bool = False,
+    *,
+    engine_role: str = "decode",
 ) -> bytes:
     """Build a standard decoder engine for semantic or coarse using build_standard_decoder_engine."""
     from .standard_decoder_builder import build_standard_decoder_engine
@@ -719,12 +749,24 @@ def _build_bark_standard_engine(
         max_position_embeddings=sub_cfg.get("max_position", 1024),
         rms_norm_eps=1e-05,
         rope_theta=10000.0,
-        raw={},
+        raw={"_decoder_engine_role": engine_role},
     )
     if verbose:
         print(
             f"[trtmc build]   Building {sub_model} engine: layers={sub_cfg['num_layers']}, hidden={hidden}, vocab={sub_cfg['vocab_size']}, output_vocab={sub_cfg.get('output_vocab', sub_cfg['vocab_size'])}",
             file=sys.stderr,
+        )
+    if engine_role == "dual_profile":
+        from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+
+        return build_dual_profile_decoder_engine(
+            sub_mc,
+            sub_weights,
+            max_cache_length,
+            precision=precision,
+            verbose=verbose,
+            profile_mode="dual_profile",
+            embed_input=True,
         )
     return build_standard_decoder_engine(
         sub_mc, sub_weights, max_cache_length, precision=precision, verbose=verbose
