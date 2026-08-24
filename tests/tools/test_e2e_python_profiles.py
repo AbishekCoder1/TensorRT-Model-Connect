@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import sys
 import time
 from pathlib import Path
@@ -156,6 +157,7 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
     requirements = tmp_path / "requirements.lock.txt"
     requirements.write_text("demo-package==1.0\n", encoding="utf-8")
     monkeypatch.delenv("MAX_JOBS", raising=False)
+    monkeypatch.setenv("PYTHONPATH", "/untrusted/profile/source")
     monkeypatch.delenv(shared_profiles.PREBUILT_ONLY_ENV, raising=False)
     monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
     monkeypatch.setattr(
@@ -180,13 +182,17 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
         {
             "requirements": str(requirements),
             "system_site_packages": False,
+            "verification_script": "print('verified')",
         },
         sys.executable,
     )
 
     install = next(call for call in commands if call[1].startswith("install "))
     assert install[3]["env"]["MAX_JOBS"] == "4"
+    assert "PYTHONPATH" not in install[3]["env"]
     assert install[2] == 7200
+    verify = next(call for call in commands if call[1].startswith("verify "))
+    assert "PYTHONPATH" not in verify[3]["env"]
 
 
 def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):
@@ -265,6 +271,22 @@ def test_family_profile_registry_is_fully_exact_pinned():
         assert pins, name
 
 
+def test_profile_contract_has_one_family_owned_source_of_truth() -> None:
+    package_root = Path(shared_profiles.__file__).resolve().parent
+    with (package_root / "python_profiles.toml").open("rb") as stream:
+        shared_registry = shared_profiles.tomllib.load(stream)
+    from tensorrt_model_connect.families import family_python_profile_specs
+
+    shared_names = set(shared_registry["profiles"])
+    family_names = set(family_python_profile_specs())
+    merged_names = set(shared_profiles.load_python_profile_registry()["profiles"])
+
+    assert shared_names == {"base", "reference_common"}
+    assert family_names
+    assert shared_names.isdisjoint(family_names)
+    assert merged_names == shared_names | family_names
+
+
 def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
     registry = shared_profiles.load_python_profile_registry()
     prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
@@ -280,6 +302,117 @@ def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
         shared_profiles._exact_pinned_requirements(
             "huggingface-hub==0.28.1\nhuggingface_hub==0.28.1\n"
         )
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    (
+        "demo==1.*",
+        "demo===latest",
+        "demo==https://example.invalid/demo.whl",
+    ),
+)
+def test_profile_lock_rejects_non_deterministic_exact_pin_lookalikes(requirement):
+    with pytest.raises(ValueError, match="exact name==version pins"):
+        shared_profiles._exact_pinned_requirements(requirement + "\n")
+
+
+def test_profile_registry_validates_supported_global_defaults():
+    registry = copy.deepcopy(shared_profiles.load_python_profile_registry())
+    registry["runtime_strategy_defaults"] = {
+        "demo": {"runtime": "reference_common"}
+    }
+
+    shared_profiles._validate_python_profile_registry(registry)
+
+    registry["runtime_strategy_defaults"]["demo"]["runtime"] = "missing"
+    with pytest.raises(ValueError, match="undeclared profile"):
+        shared_profiles._validate_python_profile_registry(registry)
+
+
+def test_family_default_profile_must_be_declared(monkeypatch):
+    import tensorrt_model_connect.families as family_profiles
+
+    monkeypatch.setattr(
+        family_profiles,
+        "family_default_execution_profiles",
+        lambda _family: {"runtime": "missing"},
+    )
+
+    with pytest.raises(ValueError, match="selects undeclared profile 'missing'"):
+        shared_profiles.default_execution_profiles(family="demo")
+
+
+@pytest.mark.parametrize(
+    ("path_spec", "message"),
+    (
+        ("/tmp/absolute.lock.txt", "unsafe requirements path"),
+        ("../outside.lock.txt", "unsafe requirements path"),
+        ("missing.lock.txt", "missing requirements asset"),
+    ),
+)
+def test_profile_registry_rejects_unsafe_or_missing_assets(
+    monkeypatch, tmp_path, path_spec, message
+):
+    package_root = tmp_path / "package"
+    package_root.mkdir()
+    monkeypatch.setattr(shared_profiles, "_PACKAGE_DIR", package_root)
+
+    with pytest.raises(ValueError, match=message):
+        shared_profiles._profile_asset_path(
+            path_spec,
+            field="requirements",
+            profile_name="demo",
+        )
+
+
+def test_profile_registry_rejects_symlink_escape(monkeypatch, tmp_path):
+    package_root = tmp_path / "package"
+    package_root.mkdir()
+    outside = tmp_path / "outside.lock.txt"
+    outside.write_text("demo==1.0\n", encoding="utf-8")
+    (package_root / "escaped.lock.txt").symlink_to(outside)
+    monkeypatch.setattr(shared_profiles, "_PACKAGE_DIR", package_root)
+
+    with pytest.raises(ValueError, match="unsafe requirements path"):
+        shared_profiles._profile_asset_path(
+            "escaped.lock.txt",
+            field="requirements",
+            profile_name="demo",
+        )
+
+
+def test_profile_registry_rejects_ambiguous_schema_fields():
+    def add_unknown_top_level(registry):
+        registry["unknown"] = True
+
+    def add_unknown_profile_field(registry):
+        registry["profiles"]["base"]["unknown"] = True
+
+    def use_unknown_kind(registry):
+        registry["profiles"]["base"]["kind"] = "dynamic"
+
+    def use_non_boolean_flag(registry):
+        registry["profiles"]["reference_common"]["prebuild"] = 1
+
+    def declare_two_verification_sources(registry):
+        registry["profiles"]["reference_common"]["verification_script_file"] = (
+            registry["profiles"]["reference_common"]["requirements"]
+        )
+
+    cases = (
+        (add_unknown_top_level, "unknown top-level keys"),
+        (add_unknown_profile_field, "unknown keys"),
+        (use_unknown_kind, "unsupported kind"),
+        (use_non_boolean_flag, "must be a bool"),
+        (declare_two_verification_sources, "exactly one"),
+    )
+    baseline = shared_profiles.load_python_profile_registry()
+    for mutate, message in cases:
+        registry = copy.deepcopy(baseline)
+        mutate(registry)
+        with pytest.raises(ValueError, match=message):
+            shared_profiles._validate_python_profile_registry(registry)
 
 
 def test_exact_profile_pin_accepts_only_local_builds_of_same_public_version():

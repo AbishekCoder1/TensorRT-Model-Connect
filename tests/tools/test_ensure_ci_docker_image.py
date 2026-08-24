@@ -100,6 +100,12 @@ def test_workflow_image_lock_retries_when_another_runner_creates_file(
     assert modes == ["r+", "x+", "r+"]
 
 
+def test_default_image_lock_wait_covers_one_profile_install_budget() -> None:
+    manager = DockerImageManager(REPO_ROOT, {})
+
+    assert manager.config.lock_timeout >= 7200
+
+
 def _write_fake_docker(tmp_path: Path, existing_images: dict[str, str]) -> tuple[Path, Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True)
@@ -268,7 +274,6 @@ def _write_profile_fingerprint_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     for source in (
         REPO_ROOT / "python" / "tensorrt_model_connect" / "__init__.py",
         REPO_ROOT / "python" / "tensorrt_model_connect" / "python_profiles.py",
-        REPO_ROOT / "python" / "tensorrt_model_connect" / "python_profiles.toml",
     ):
         shutil.copy2(source, package_root / source.name)
     shutil.copy2(
@@ -284,10 +289,27 @@ plugin = "demo"
 module = "plugin"
 aliases = ["demo"]
 prefixes = ["demo"]
+default_execution_profiles = ["reference|demo"]
 python_profile_specs = [
   "demo|families/demo/requirements.lock.txt|families/demo/verify.py|true",
+  "lazy_demo|families/demo/requirements.lock.txt|families/demo/verify.py|true|false",
 ]
-default_execution_profiles = ["reference|demo"]
+""",
+        encoding="utf-8",
+    )
+    profile_registry = package_root / "python_profiles.toml"
+    profile_registry.write_text(
+        """version = 1
+
+[profiles.base]
+kind = "passthrough"
+
+[profiles.reference_common]
+kind = "venv"
+requirements = "families/demo/requirements.lock.txt"
+system_site_packages = true
+verification_script = "import demo_package"
+
 """,
         encoding="utf-8",
     )
@@ -515,7 +537,7 @@ def test_source_contract_describes_parameterized_tensorrt_overlay(tmp_path: Path
         tensorrt_apt_version="11.2.1.2-1+cuda13.3",
     )
     assert selected_contract["schema_version"] == 1
-    assert selected_contract["environment_contract_version"] == 1
+    assert selected_contract["environment_contract_version"] == 2
     assert (
         selected_contract["common_input_fingerprint"]
         == default_contract["common_input_fingerprint"]
@@ -564,6 +586,34 @@ def test_source_contract_loads_profiles_without_ambient_pythonpath(tmp_path: Pat
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "demo,reference_common"
+
+
+def test_image_contract_cli_emits_canonical_contract_json(tmp_path: Path) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tools.ci",
+            "image",
+            "contract",
+            "--tensorrt-version",
+            "11.2.1.2",
+            "--tensorrt-apt-version",
+            "11.2.1.2-1+cuda13.3",
+        ],
+        cwd=repo_root,
+        env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    contract = json.loads(result.stdout)
+    assert contract["environment_contract_version"] == 2
+    assert contract["tensorrt"]["version"] == "11.2.1.2"
+    assert contract["tensorrt"]["apt_version"] == "11.2.1.2-1+cuda13.3"
 
 
 def test_validate_image_contract_returns_the_verified_source_contract(
@@ -646,6 +696,35 @@ def test_source_contract_rejects_mixed_tensorrt_overlay_versions(tmp_path: Path)
         )
 
 
+def test_source_contract_rechecks_profile_asset_containment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    outside = tmp_path / "outside.lock.txt"
+    outside.write_text("demo==1.0\n", encoding="utf-8")
+    manager = DockerImageManager(repo_root)
+    monkeypatch.setattr(
+        manager,
+        "_load_profile_registry",
+        lambda: (
+            {
+                "version": 1,
+                "profiles": {
+                    "demo": {
+                        "kind": "venv",
+                        "prebuild": True,
+                        "requirements": str(outside),
+                    }
+                },
+            },
+            ("demo",),
+        ),
+    )
+
+    with pytest.raises(CiError, match="unsafe requirements path"):
+        manager.source_contract()
+
+
 def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
 
@@ -653,6 +732,7 @@ def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> No
     assert "semantic_fingerprint" in script
     assert 'b"python-profile-registry\\0"' in script
     assert "assets: set[Path]" in script
+    assert 'Path("tools/ci/process.py")' not in script
     assert 'package_root / "python_profiles.py"' in script
     assert '"-f"' in script
     assert "str(self.config.dockerfile)" in script
@@ -694,6 +774,122 @@ def test_profile_fingerprint_ignores_manifest_comments_and_ownership_fields(
     assert ownership_changed == baseline
 
 
+def test_profile_fingerprint_ignores_unrelated_family_loader_changes(
+    tmp_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+
+    family_loader = (
+        repo_root / "python" / "tensorrt_model_connect" / "families" / "__init__.py"
+    )
+    family_loader.write_text(
+        family_loader.read_text(encoding="utf-8")
+        + "\n# Unrelated application-only family parsing change.\n",
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "family-loader-change", repo_root)
+    assert changed == baseline
+
+
+def test_source_contract_does_not_execute_or_fingerprint_package_init(
+    tmp_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = DockerImageManager(repo_root).source_contract()
+    package_init = repo_root / "python" / "tensorrt_model_connect" / "__init__.py"
+    package_init.write_text(
+        "raise RuntimeError('package metadata must not execute')\n",
+        encoding="utf-8",
+    )
+
+    changed = DockerImageManager(repo_root).source_contract()
+
+    assert changed["common_input_fingerprint"] == baseline["common_input_fingerprint"]
+    assert changed["input_fingerprint"] == baseline["input_fingerprint"]
+
+
+def test_profile_builder_does_not_execute_package_init(tmp_path: Path) -> None:
+    package_root = tmp_path / "tensorrt_model_connect"
+    package_root.mkdir()
+    (package_root / "__init__.py").write_text(
+        "raise RuntimeError('package init must not execute')\n",
+        encoding="utf-8",
+    )
+    (package_root / "python_profiles.py").write_text(
+        "def load_python_profile_registry(): return {}\n"
+        "def prebuilt_python_profile_names(registry): return ()\n"
+        "def profile_root(): raise AssertionError('not reached')\n"
+        "def resolve_profile_python(name, base_python): raise AssertionError('not reached')\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["TRTMC_PYTHON_PROFILE_SOURCE"] = str(package_root)
+    env["PYTHONPATH"] = str(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / ".github/scripts/build-python-profiles.py")],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "no prebuilt Python profiles were declared" in result.stderr
+    assert "package init must not execute" not in result.stderr
+
+
+def test_source_contract_does_not_execute_or_fingerprint_family_loader(
+    tmp_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = DockerImageManager(repo_root).source_contract()
+    family_loader = (
+        repo_root / "python" / "tensorrt_model_connect" / "families" / "__init__.py"
+    )
+    family_loader.write_text(
+        "raise RuntimeError('family loader must not execute')\n",
+        encoding="utf-8",
+    )
+
+    changed = DockerImageManager(repo_root).source_contract()
+
+    assert changed["common_input_fingerprint"] == baseline["common_input_fingerprint"]
+    assert changed["input_fingerprint"] == baseline["input_fingerprint"]
+
+
+def test_profile_fingerprint_ignores_registry_comments(tmp_path: Path) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+
+    registry = repo_root / "python" / "tensorrt_model_connect" / "python_profiles.toml"
+    registry.write_text(
+        "# Review-only comment.\n" + registry.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "registry-comment", repo_root)
+    assert changed == baseline
+
+
+def test_profile_fingerprint_ignores_lazy_profile_declarations(tmp_path: Path) -> None:
+    repo_root, manifest, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "lazy_demo|families/demo/requirements.lock.txt",
+            "renamed_lazy_demo|families/demo/requirements.lock.txt",
+        ),
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "lazy-profile-change", repo_root)
+    assert changed == baseline
+
+
 def test_profile_fingerprint_changes_for_semantic_profile_declaration(
     tmp_path: Path,
 ) -> None:
@@ -702,8 +898,9 @@ def test_profile_fingerprint_changes_for_semantic_profile_declaration(
 
     manifest.write_text(
         manifest.read_text(encoding="utf-8").replace(
-            "families/demo/verify.py|true",
-            "families/demo/verify.py|false",
+            "demo|families/demo/requirements.lock.txt|families/demo/verify.py|true",
+            "demo|families/demo/requirements.lock.txt|families/demo/verify.py|false",
+            1,
         ),
         encoding="utf-8",
     )
@@ -722,3 +919,56 @@ def test_profile_fingerprint_changes_for_referenced_profile_asset_content(
 
     changed = _resolved_image_for_repo(tmp_path / "asset-change", repo_root)
     assert changed != baseline
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        Path("Dockerfile"),
+        Path(".github/scripts/build-python-profiles.py"),
+        Path("python/tensorrt_model_connect/python_profiles.py"),
+        Path("python/tensorrt_model_connect/families/demo/verify.py"),
+    ),
+)
+def test_profile_fingerprint_changes_for_every_baked_recipe_input(
+    tmp_path: Path,
+    relative_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+    target = repo_root / relative_path
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n# Environment-affecting recipe change.\n",
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "recipe-change", repo_root)
+
+    assert changed != baseline
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        Path("tools/__init__.py"),
+        Path("tools/ci/__init__.py"),
+        Path("tools/ci/__main__.py"),
+        Path("tools/ci/docker_image.py"),
+        Path("tools/ci/process.py"),
+    ),
+)
+def test_profile_fingerprint_ignores_contract_producer_code(
+    tmp_path: Path,
+    relative_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+    target = repo_root / relative_path
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n# Control-plane-only change.\n",
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "producer-change", repo_root)
+
+    assert changed == baseline

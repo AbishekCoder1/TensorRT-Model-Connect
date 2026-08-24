@@ -120,6 +120,8 @@ def _run_internal_ci_snapshot(
     event_name: str = "pull_request_target",
     actor_role: str = "maintain",
     community_conclusion: str = "success",
+    community_head_sha: str | None = None,
+    community_merge_sha: str | None = None,
     system_path: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_bin = tmp_path / "bin"
@@ -131,6 +133,7 @@ def _run_internal_ci_snapshot(
 import json
 import os
 import sys
+from urllib.parse import parse_qs, urlsplit
 
 arguments = sys.argv[1:]
 endpoint = next(
@@ -142,7 +145,14 @@ if "/collaborators/" in endpoint:
 elif "/pulls/" in endpoint:
     print(os.environ["FAKE_PULL_JSON"])
 elif "/actions/workflows/community-cpu.yml/runs" in endpoint:
-    if os.environ["FAKE_COMMUNITY_CONCLUSION"] == "success":
+    query = arguments[arguments.index("--jq") + 1]
+    old_merge = os.environ["FAKE_COMMUNITY_MERGE_SHA"]
+    requested_head = parse_qs(urlsplit(endpoint).query).get("head_sha", [""])[0]
+    if (
+        os.environ["FAKE_COMMUNITY_CONCLUSION"] == "success"
+        and requested_head == os.environ["FAKE_COMMUNITY_HEAD_SHA"]
+        and (not old_merge or "display_title" not in query or old_merge in query)
+    ):
         print("12345")
     else:
         print("")
@@ -171,6 +181,8 @@ else:
             "EVENT_NAME": event_name,
             "FAKE_ACTOR_ROLE": actor_role,
             "FAKE_COMMUNITY_CONCLUSION": community_conclusion,
+            "FAKE_COMMUNITY_HEAD_SHA": community_head_sha or pr_head_sha,
+            "FAKE_COMMUNITY_MERGE_SHA": community_merge_sha or "",
             "FAKE_PULL_JSON": json.dumps(pull),
             "GH_TOKEN": "test-token",
             "GITHUB_OUTPUT": str(output),
@@ -304,18 +316,21 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "head_repo" not in authorize
     assert "head_ref" not in authorize
     assert '[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
-    assert '[[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
     assert "Community CPU / Required" in authorize
-    assert "/actions/workflows/community-cpu.yml/runs?event=pull_request" in authorize
-    assert '.head_sha == \\"$head_sha\\"' in authorize
-    assert '.conclusion == \\"success\\"' in authorize
-    assert "PR #$PR_NUMBER · public CPU · merge $merge_sha" in authorize
+    assert (
+        "/actions/workflows/community-cpu.yml/runs?event=pull_request&head_sha=$head_sha"
+        in authorize
+    )
+    assert '.head_sha == \\"$head_sha\\"' not in authorize
+    assert '.conclusion == "success"' in authorize
+    assert "display_title" not in authorize
     assert 'if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then' in authorize
     assert 'echo "head_sha=$head_sha"' in authorize
     assert "pr_number=$PR_NUMBER" in authorize
     for legacy in (
         "base_sha",
         "BASE_SHA",
+        "merge_sha",
         "MERGE_SHA",
         "EVENT_BASE_SHA",
     ):
@@ -324,7 +339,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
         "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci"
     ) in authorize
     assert "gh api --silent --method DELETE" in authorize
-    assert "always() && github.event_name == 'pull_request_target'" in authorize
+    assert "success() && github.event_name == 'pull_request_target'" in authorize
 
     assert "needs: authorize" in dispatch
     assert workflow_config["jobs"]["dispatch"]["environment"] == {
@@ -401,6 +416,21 @@ def test_internal_ci_bridge_uses_upstream_pr_metadata_without_fork_access(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_internal_ci_bridge_accepts_a_green_head_after_the_base_moves(
+    tmp_path: Path,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        community_merge_sha="b" * 40,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_internal_ci_bridge_requires_current_community_cpu_success(
     tmp_path: Path,
 ) -> None:
@@ -411,6 +441,22 @@ def test_internal_ci_bridge_requires_current_community_cpu_success(
         event_head_sha=head_sha,
         pr_head_sha=head_sha,
         community_conclusion="failure",
+    )
+
+    assert result.returncode != 0
+    assert "Community CPU / Required must pass" in result.stdout + result.stderr
+
+
+def test_internal_ci_bridge_rejects_community_cpu_from_another_head(
+    tmp_path: Path,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        community_head_sha="f7b48712c82318ded4e41c0dd7003379e1790198",
     )
 
     assert result.returncode != 0
@@ -478,7 +524,7 @@ def test_internal_ci_bridge_tests_do_not_depend_on_host_jq(tmp_path: Path) -> No
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_internal_ci_trigger_label_is_always_consumed() -> None:
+def test_internal_ci_trigger_label_is_consumed_only_after_authorization() -> None:
     workflow = yaml.safe_load(
         (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
             encoding="utf-8"
@@ -491,7 +537,7 @@ def test_internal_ci_trigger_label_is_always_consumed() -> None:
     )
 
     assert step["if"] == (
-        "${{ always() && github.event_name == 'pull_request_target' }}"
+        "${{ success() && github.event_name == 'pull_request_target' }}"
     )
     assert step["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}"
 
@@ -634,6 +680,7 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert 'find_spec("tensorrt") is None' in common
     assert "NvInferVersion.h" in common
     assert "NvOnnxParser.h" in common
+    assert "ENV PYTHONPATH=/opt/trtmc-profile-source" not in dockerfile
 
     overlay = dockerfile.split("FROM ci-common AS ci-runtime", maxsplit=1)[1]
     for package in (

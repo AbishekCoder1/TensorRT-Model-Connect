@@ -139,13 +139,12 @@ ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 #   python3 -m pytest --help | grep -- '--cov' && \
 #   gcovr --version && lcov --version && genhtml --version
 
-# Build every family-declared Python execution profile while network access is
-# available. The family-owned lock and verification files are the only package
-# source of truth; python_profiles.py additionally rejects non-exact pins and
+# Build every declarative Python execution profile while network access is
+# available. Family-owned declarations, lock files, and verification scripts
+# are the package source of truth; python_profiles.py rejects non-exact pins and
 # verifies every installed distribution before marking a profile ready.
 FROM ci-common-base AS python-profile-builder
 
-ENV PYTHONPATH=/opt/trtmc-profile-source
 ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
 # sphn publishes no aarch64 wheel. Keep its Rust build toolchain in this
 # throwaway builder stage; the final development stage receives only the
