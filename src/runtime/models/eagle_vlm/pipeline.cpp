@@ -5,6 +5,7 @@
 
 #include "runtime/models/eagle_vlm/pipeline.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -130,6 +131,98 @@ float select_reranking_score(const EmbeddingResult& result, const std::vector<in
     throw std::runtime_error("EncoderPipeline: unsupported reranking pooling mode: " + pooling);
 }
 
+struct RerankingBatchInputs {
+    std::vector<int32_t> input_ids;
+    std::vector<int32_t> attention_mask;
+    std::vector<std::size_t> valid_lengths;
+    std::size_t sequence_length{};
+};
+
+std::vector<int32_t> tokenize_reranking_pair(const ITokenizer& tokenizer, const std::string& query,
+                                             const std::string& document,
+                                             std::size_t max_sequence) {
+    const std::string combined = "question:" + query + " \n \n passage:" + document;
+    auto ids = tokenizer.encode(combined);
+    canonicalize_reranking_separator_tokens(tokenizer, ids);
+    if (ids.empty())
+        throw std::runtime_error("EncoderPipeline: reranking input produced no tokens");
+    if (ids.size() > max_sequence)
+        throw std::runtime_error(
+            "EncoderPipeline: reranking input exceeds the engine sequence profile");
+    return ids;
+}
+
+RerankingBatchInputs prepare_reranking_batch(const ITokenizer& tokenizer, const std::string& query,
+                                             const std::vector<std::string>& documents,
+                                             std::size_t first, std::size_t batch_size,
+                                             std::size_t max_sequence) {
+    std::vector<std::vector<int32_t>> token_rows;
+    token_rows.reserve(batch_size);
+    RerankingBatchInputs inputs;
+    inputs.valid_lengths.reserve(batch_size);
+    for (std::size_t index = 0; index < batch_size; ++index) {
+        auto ids =
+            tokenize_reranking_pair(tokenizer, query, documents[first + index], max_sequence);
+        inputs.sequence_length = std::max(inputs.sequence_length, ids.size());
+        inputs.valid_lengths.push_back(ids.size());
+        token_rows.push_back(std::move(ids));
+    }
+
+    // Masked token ID zero is never attended to and therefore does not affect
+    // valid positions. Right padding matches the reference batch.
+    inputs.input_ids.assign(batch_size * inputs.sequence_length, 0);
+    inputs.attention_mask.assign(inputs.input_ids.size(), 0);
+    for (std::size_t row = 0; row < batch_size; ++row) {
+        const auto offset = row * inputs.sequence_length;
+        std::copy(token_rows[row].begin(), token_rows[row].end(),
+                  inputs.input_ids.begin() + offset);
+        std::fill_n(inputs.attention_mask.begin() + offset, token_rows[row].size(), 1);
+    }
+    return inputs;
+}
+
+std::size_t validate_batched_reranking_output(const EmbeddingResult& result,
+                                              const std::vector<int64_t>& shape,
+                                              std::size_t batch_size) {
+    const auto element_count = checked_element_count(shape);
+    if (result.data.size() != element_count || shape.size() < 2 ||
+        shape.front() != static_cast<int64_t>(batch_size) || element_count % batch_size != 0)
+        throw std::runtime_error(
+            "EncoderPipeline: batched reranking score shape does not match its inputs");
+    const auto elements_per_row = element_count / batch_size;
+    if (elements_per_row > 1 && shape.back() != 1)
+        throw std::runtime_error(
+            "EncoderPipeline: batched reranking output must have one score per position");
+    return elements_per_row;
+}
+
+float select_batched_reranking_score(const EmbeddingResult& result, std::size_t row,
+                                     std::size_t elements_per_row, std::size_t valid_tokens,
+                                     const std::string& pooling) {
+    if (elements_per_row == 1)
+        return result.data[row];
+    if (valid_tokens > elements_per_row)
+        throw std::runtime_error(
+            "EncoderPipeline: batched reranking output is shorter than an input");
+
+    const auto offset = row * elements_per_row;
+    if (pooling == "last")
+        return result.data[offset + valid_tokens - 1];
+    if (pooling == "avg") {
+        double sum = 0.0;
+        for (std::size_t index = 0; index < valid_tokens; ++index)
+            sum += result.data[offset + index];
+        return static_cast<float>(sum / static_cast<double>(valid_tokens));
+    }
+    throw std::runtime_error("EncoderPipeline: unsupported reranking pooling mode: " + pooling);
+}
+
+bool is_encoder_output_name(const std::string& name) {
+    return name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
+           name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
+           name.find("score") != std::string::npos;
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
@@ -185,6 +278,8 @@ EmbeddingResult EncoderPipeline::encode(const std::string& text) {
 float EncoderPipeline::rerank(const std::string& query, const std::string& document) {
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
+    if (supports_batched_reranking())
+        return rerank_batch(query, {document}).front();
     // Match LlamaNemotronVLRerankProcessor.prompt_template_question_passage()
     // from the pinned checkpoint. The whitespace is part of the trained input
     // contract and changes the token sequence.
@@ -201,31 +296,91 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
     return select_reranking_score(output.result, output.shape, ids.size(), reranking_pooling_);
 }
 
+std::vector<float> EncoderPipeline::rerank_batch(const std::string& query,
+                                                 const std::vector<std::string>& documents) {
+    if (!tokenizer_)
+        throw std::runtime_error("EncoderPipeline: no tokenizer configured");
+    if (documents.empty())
+        return {};
+    if (!supports_batched_reranking()) {
+        std::vector<float> scores;
+        scores.reserve(documents.size());
+        for (const auto& document : documents)
+            scores.push_back(rerank(query, document));
+        return scores;
+    }
+
+    const auto profile_max = reranking_profile_max_shape();
+    const auto max_batch = static_cast<std::size_t>(profile_max[0]);
+    const auto max_sequence = static_cast<std::size_t>(profile_max[1]);
+    std::vector<float> scores;
+    scores.reserve(documents.size());
+
+    for (std::size_t first = 0; first < documents.size(); first += max_batch) {
+        const auto batch_size = std::min(max_batch, documents.size() - first);
+        const auto inputs =
+            prepare_reranking_batch(*tokenizer_, query, documents, first, batch_size, max_sequence);
+        auto output = encode_batch_with_shape(inputs.input_ids, inputs.attention_mask, batch_size,
+                                              inputs.sequence_length);
+        const auto elements_per_row =
+            validate_batched_reranking_output(output.result, output.shape, batch_size);
+
+        for (std::size_t row = 0; row < batch_size; ++row)
+            scores.push_back(select_batched_reranking_score(output.result, row, elements_per_row,
+                                                            inputs.valid_lengths[row],
+                                                            reranking_pooling_));
+    }
+    return scores;
+}
+
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
     return encode_ids_with_shape(input_ids).result;
 }
 
 EncoderPipeline::EncodedOutput
 EncoderPipeline::encode_ids_with_shape(const std::vector<int32_t>& input_ids) {
-    const auto n = input_ids.size();
-    std::vector<int32_t> mask_i32(n, 1);
-    std::vector<float> mask_f32(n, 1.0f);
+    std::vector<int32_t> attention_mask(input_ids.size(), 1);
+    return forward_ids(input_ids, attention_mask, {static_cast<int64_t>(input_ids.size())});
+}
+
+EncoderPipeline::EncodedOutput
+EncoderPipeline::encode_batch_with_shape(const std::vector<int32_t>& input_ids,
+                                         const std::vector<int32_t>& attention_mask,
+                                         std::size_t batch_size, std::size_t sequence_length) {
+    if (batch_size == 0 || sequence_length == 0 ||
+        input_ids.size() != batch_size * sequence_length ||
+        attention_mask.size() != input_ids.size())
+        throw std::runtime_error("EncoderPipeline: invalid batched reranking input shape");
+    return forward_ids(input_ids, attention_mask,
+                       {static_cast<int64_t>(batch_size), static_cast<int64_t>(sequence_length)});
+}
+
+EncoderPipeline::EncodedOutput
+EncoderPipeline::forward_ids(const std::vector<int32_t>& input_ids,
+                             const std::vector<int32_t>& attention_mask,
+                             const std::vector<int64_t>& shape) {
+    std::vector<float> mask_f32;
+    if (!engine_mask_is_int32(*encoder_)) {
+        mask_f32.reserve(attention_mask.size());
+        for (const auto value : attention_mask)
+            mask_f32.push_back(static_cast<float>(value));
+    }
 
     auto ids_copy = input_ids;
     Tensor ids_t;
     ids_t.data = ids_copy.data();
-    ids_t.shape = {static_cast<int64_t>(n)};
+    ids_t.shape = shape;
     ids_t.dtype = DType::kInt32;
 
     // Match the engine's expected dtype for the attention mask.
     Tensor mask_t;
     if (engine_mask_is_int32(*encoder_)) {
-        mask_t.data = mask_i32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.data = const_cast<int32_t*>(attention_mask.data());
+        mask_t.shape = shape;
         mask_t.dtype = DType::kInt32;
     } else {
         mask_t.data = mask_f32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.shape = shape;
         mask_t.dtype = DType::kFloat32;
     }
 
@@ -237,9 +392,7 @@ EncoderPipeline::encode_ids_with_shape(const std::vector<int32_t>& input_ids) {
 
     EncodedOutput output;
     for (auto& [name, tensor] : outputs) {
-        if (name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
-            name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
-            name.find("score") != std::string::npos) {
+        if (is_encoder_output_name(name)) {
             const auto element_count = checked_element_count(tensor.shape);
             if (!tensor.data)
                 throw std::runtime_error("EncoderPipeline: output tensor has no data");
@@ -254,6 +407,21 @@ EncoderPipeline::encode_ids_with_shape(const std::vector<int32_t>& input_ids) {
     }
 
     return output;
+}
+
+bool EncoderPipeline::supports_batched_reranking() const {
+    for (const auto& input : encoder_->input_info())
+        if (input.name == "input_ids")
+            return input.shape.size() == 2;
+    return false;
+}
+
+std::vector<int64_t> EncoderPipeline::reranking_profile_max_shape() const {
+    const auto shape = encoder_->input_profile_shape("input_ids", encoder_->profile_idx(),
+                                                     ProfileShapeSelector::kMax);
+    if (shape.size() != 2 || shape[0] <= 0 || shape[1] <= 0)
+        throw std::runtime_error("EncoderPipeline: invalid batched reranking profile");
+    return shape;
 }
 
 } // namespace trtmc
