@@ -33,13 +33,13 @@ Tensor contract for the Qwen3 TensorRT native KV-cache path:
     position_id     int32   (-1,)
     cache_write_indices int32 (1,)                    # update start slot
     key_value_lengths   int32 (1,)                    # valid length after update
-    cache_k_i       bf16 (1, Hkv, capacity, D)        # static, user-owned
-    cache_v_i       bf16 (1, Hkv, capacity, D)        # static, user-owned
+    cache_k_i       fp16/bf16 (1, Hkv, capacity, D)   # static, user-owned
+    cache_v_i       fp16/bf16 (1, Hkv, capacity, D)   # static, user-owned
   Outputs
     logits          float32 (1, vocab)               # last-row sliced inside the engine
                     or (Sq, vocab) for full-logits diffusion builds
-    present_k_i     bf16 (1, Hkv, capacity, D)        # aliases cache_k_i
-    present_v_i     bf16 (1, Hkv, capacity, D)        # aliases cache_v_i
+    present_k_i     fp16/bf16 (1, Hkv, capacity, D)   # aliases cache_k_i
+    present_v_i     fp16/bf16 (1, Hkv, capacity, D)   # aliases cache_v_i
 
 The legacy dense-mask/row-cache contract remains available for the other model
 types handled by this family.
@@ -56,7 +56,11 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from . import graph_blocks
-from .builder_policy import configure_qwen_builder
+from .builder_policy import (
+    configure_qwen_builder,
+    requires_explicit_native_kv_mask,
+    validate_explicit_native_kv_cache_length,
+)
 
 trt = trt_compat.get_trt()
 
@@ -67,6 +71,76 @@ if TYPE_CHECKING:
 
 
 _NATIVE_PREFILL_CHUNK_TOKENS = 32768
+_EXPLICIT_MASK_PREFILL_CHUNK_TOKENS = 64
+
+
+def _cuda_runtime():
+    try:
+        from cuda.bindings import runtime as cudart
+    except ImportError:
+        try:
+            from cuda import cudart
+        except ImportError as exc:
+            raise RuntimeError(
+                "Unable to select Qwen native attention because CUDA Python "
+                "is unavailable"
+            ) from exc
+    return cudart
+
+
+def _current_cuda_compute_capability() -> tuple[int, int]:
+    """Return the active CUDA device's compute capability or fail closed."""
+    cudart = _cuda_runtime()
+    success = getattr(getattr(cudart, "cudaError_t", None), "cudaSuccess", 0)
+    try:
+        status, device = cudart.cudaGetDevice()
+        if status not in (success, 0):
+            raise RuntimeError(f"cudaGetDevice failed with status {status}")
+        status, properties = cudart.cudaGetDeviceProperties(int(device))
+        if status not in (success, 0):
+            raise RuntimeError(
+                f"cudaGetDeviceProperties({int(device)}) failed with status {status}"
+            )
+        major = int(properties.major)
+        minor = int(properties.minor)
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to query the active CUDA device: {exc}"
+        ) from exc
+    if major <= 0 or minor < 0:
+        raise RuntimeError(
+            "The active CUDA device returned an invalid compute capability"
+        )
+    return major, minor
+
+
+def _resolve_prefill_lengths(
+    max_cache_length: int,
+    opt_prefill_length: int,
+    requested: int | None,
+    *,
+    native_kv_cache: bool,
+    explicit_native_attention_mask: bool,
+    profile_mode: str,
+) -> tuple[int, int]:
+    """Resolve one enqueue's query limit independently of cache capacity."""
+    if requested is None:
+        requested = (
+            min(max_cache_length, _NATIVE_PREFILL_CHUNK_TOKENS)
+            if native_kv_cache
+            else max_cache_length
+        )
+    if (
+        native_kv_cache
+        and explicit_native_attention_mask
+        and profile_mode != "decode"
+    ):
+        requested = min(requested, _EXPLICIT_MASK_PREFILL_CHUNK_TOKENS)
+    resolved_max = max(1, min(requested, max_cache_length))
+    resolved_opt = max(1, min(opt_prefill_length, resolved_max))
+    return resolved_opt, resolved_max
 
 
 def _const_in_work_dtype(
@@ -304,10 +378,14 @@ def build_dual_profile_decoder_engine(
     * ``"decode"``: one fixed-Sq=1 profile only. This is the decode half of a
       split-engine bundle.
 
-    ``native_kv_cache`` selects TensorRT's ``IKVCacheUpdateLayer`` and
-    ``IAttention.key_value_lengths`` contract. It is an internal model-family
-    choice, not a user-facing build flag. The legacy dense-mask graph remains
-    available for non-Qwen3 models handled by this family.
+    ``native_kv_cache`` selects TensorRT's ``IKVCacheUpdateLayer`` contract.
+    Affected TensorRT/GPU combinations replace ``IAttention``'s broken native
+    active-length predicate with an explicit additive mask. Affected FP16
+    builds keep the surrounding model FP16 but use BF16 for the native cache
+    and attention boundary because that target's FP16 fused kernel rejects a
+    fourth live input. This is an internal model-family choice, not a
+    user-facing build flag. The legacy dense-mask graph remains available for
+    non-Qwen3 models handled by this family.
     """
     _supports_config(config, weights)
     if profile_mode not in ("dual_profile", "prefill", "decode"):
@@ -321,18 +399,38 @@ def build_dual_profile_decoder_engine(
     if native_kv_cache and position_type == "alibi":
         raise NotImplementedError(
             "TensorRT native KV cache prototype does not support ALiBi")
-    if max_prefill_length is None:
-        # Physical KV capacity and one TensorRT enqueue's query length are
-        # separate limits. Keep the complete model context in the cache while
-        # bounding activation/workspace pressure for very long prompts; the
-        # family runtime transparently advances through multiple chunks.
-        max_prefill_length = (
-            min(max_cache_length, _NATIVE_PREFILL_CHUNK_TOKENS)
-            if native_kv_cache
-            else max_cache_length
+    compute_capability = (
+        _current_cuda_compute_capability() if native_kv_cache else (0, 0)
+    )
+    explicit_native_attention_mask = (
+        native_kv_cache
+        and requires_explicit_native_kv_mask(
+            precision,
+            trt.__version__,
+            compute_capability,
         )
-    max_prefill_length = max(1, min(max_prefill_length, max_cache_length))
-    opt_prefill_length = max(1, min(opt_prefill_length, max_prefill_length))
+    )
+    if explicit_native_attention_mask:
+        validate_explicit_native_kv_cache_length(max_cache_length)
+        print(
+            "[trtmc build] Using explicit Qwen native-KV attention mask "
+            f"in {'BF16' if precision.lower() == 'fp16' else precision.upper()} "
+            f"for SM {compute_capability[0]}.{compute_capability[1]} with "
+            f"TensorRT {trt.__version__}",
+            file=sys.stderr,
+        )
+    # Physical KV capacity and one TensorRT enqueue's query length are
+    # separate limits. Keep the complete model context in the cache while
+    # bounding activation/workspace pressure for very long prompts; the
+    # family runtime transparently advances through multiple chunks.
+    opt_prefill_length, max_prefill_length = _resolve_prefill_lengths(
+        max_cache_length,
+        opt_prefill_length,
+        max_prefill_length,
+        native_kv_cache=native_kv_cache,
+        explicit_native_attention_mask=explicit_native_attention_mask,
+        profile_mode=profile_mode,
+    )
 
     multi_bucket_decode = bool(dynamic_kv_profile_rows)
     if multi_bucket_decode:
@@ -399,6 +497,25 @@ def build_dual_profile_decoder_engine(
         work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
     else:
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    native_attention_trt_dtype = work_trt_dtype
+    if explicit_native_attention_mask and precision.lower() == "fp16":
+        native_attention_trt_dtype = trt.bfloat16
+    native_cache_trt_dtype = (
+        native_attention_trt_dtype if native_kv_cache else work_trt_dtype
+    )
+    if native_kv_cache:
+        metadata = config.raw.setdefault("_native_kv_cache_metadata", {})
+        metadata["native_kv_cache"] = True
+        if native_cache_trt_dtype != work_trt_dtype:
+            metadata["native_kv_contract_version"] = 2
+            metadata["native_kv_cache_dtype"] = (
+                "bf16"
+                if native_cache_trt_dtype == trt.bfloat16
+                else "fp16"
+            )
+        else:
+            metadata["native_kv_contract_version"] = 1
+            metadata.pop("native_kv_cache_dtype", None)
 
     # ---- Inputs (dynamic Sq) ---------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (-1,))
@@ -427,10 +544,10 @@ def build_dual_profile_decoder_engine(
     for i in range(num_layers):
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
-            work_trt_dtype, cache_shape)
+            native_cache_trt_dtype, cache_shape)
         cv = network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
-            work_trt_dtype, cache_shape)
+            native_cache_trt_dtype, cache_shape)
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
 
@@ -650,6 +767,18 @@ def build_dual_profile_decoder_engine(
 
     present_k_outs: list[trt.ITensor] = []
     present_v_outs: list[trt.ITensor] = []
+    native_attention_mask: trt.ITensor | None = None
+    if explicit_native_attention_mask:
+        assert cache_write_indices is not None
+        assert key_value_lengths is not None
+        native_attention_mask = graph_ops.add_native_kv_attention_mask(
+            network,
+            token_id,
+            cache_write_indices,
+            key_value_lengths,
+            max_cache_length,
+            native_attention_trt_dtype,
+        )
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
@@ -734,9 +863,12 @@ def build_dual_profile_decoder_engine(
                 scale=attn_scale, tag=f"{prefix}.attn",
                 recipe_instance=(
                     f"decoder.layers.{layer_idx}.decode_attention"
-                    if profile_mode == "decode"
+                    if profile_mode == "decode" and native_attention_mask is None
                     else None
-                ))
+                ),
+                explicit_mask=native_attention_mask,
+                attention_dtype=native_attention_trt_dtype,
+            )
             context = native_attention["context"]
             present_k_outs.append(native_attention["present_k"])
             present_v_outs.append(native_attention["present_v"])
