@@ -1151,6 +1151,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "openai/whisper-small",
+      "revision": "973afd24965f72e36ca33b3055d56a652f456b4d",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "whisper",
+      "architectures": [
+        "WhisperForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "openai/whisper-tiny",
       "revision": "169d4a4341b33bc18d8881c4b69c2e104e1cc0af",
       "revision_source": "resolved",
