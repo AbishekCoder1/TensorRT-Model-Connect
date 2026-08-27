@@ -1027,6 +1027,8 @@ trtmc_add_test(test_decoder_config)
 
 # TVM-FFI plugin
 if(_trtmc_has_tvm_ffi)
+  trtmc_add_test(test_tvm_ffi_shape_spec REQUIRES_TRT)
+
   add_library(trtmc_test_tvm_ffi_runtime_kernel SHARED EXCLUDE_FROM_ALL
     tests/cpp/test_tvm_ffi_runtime_bindings.cpp
   )
