@@ -840,6 +840,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "intfloat/multilingual-e5-small",
+      "revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "bert",
+      "architectures": [
+        "BertModel"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "katuni4ka/tiny-random-deepseek-v3",
       "revision": "ba144b0d3331a5892aa588d82722d382be2b6e6b",
       "revision_source": "declared",

@@ -1372,8 +1372,8 @@ def test_default_suites_include_encoder_embedding_parity() -> None:
         "representation_parity",
         "embedding_vector",
     ]
-    assert len(suite["default_model_names"]) == 19
-    assert len(selected) == 19
+    assert len(suite["default_model_names"]) == 20
+    assert len(selected) == 20
     assert {model["name"] for model in selected} == set(suite["default_model_names"])
     models_by_name = {model["name"]: model for model in models}
     assert validation_engine.resolve_suite_for_model(
@@ -1388,6 +1388,9 @@ def test_default_suites_include_encoder_embedding_parity() -> None:
     assert validation_engine.resolve_suite_for_model(
         suite, models_by_name["fnet-base"]
     )["gates"]["max_pair_cosine_abs_delta"] == 0.1
+    assert validation_engine.effective_validation_config(
+        suite, models_by_name["multilingual-e5-small"]
+    )["sts_prompt_prefix"] == "query: "
 
 
 def test_phi4_multimodal_workload_reserves_dynamic_hd_cache() -> None:
@@ -1435,6 +1438,32 @@ def test_prepare_stsbenchmark_expands_each_pair_to_shared_sentence_inputs(
     assert len(answers["requests"]) == 2
     assert manifest["pair_count"] == 1
     assert manifest["request_count"] == 2
+
+
+def test_prepare_stsbenchmark_applies_configured_shared_prompt_prefix(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "stsbenchmark_test.jsonl"
+    _write_stsbenchmark(dataset)
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "stsbenchmark_encoder_embedding_parity"
+    )
+
+    outputs = validation_engine.prepare_sts_pair_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+        subject="main-captions",
+        sample_seed=None,
+        validation_config={"sts_prompt_prefix": "query: "},
+    )
+
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
+    assert [row["prompt"] for row in prompts] == [
+        "query: A plane is taking off.",
+        "query: An airplane is taking off.",
+    ]
 
 
 def test_compare_encoder_embedding_predictions_gates_vector_and_pair_parity() -> None:

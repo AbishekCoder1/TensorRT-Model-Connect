@@ -172,6 +172,8 @@ models:
     workloads: [mmlu_continuation_parity]
   modernbert-base:
     workloads: [stsbenchmark_encoder_embedding_parity]
+  multilingual-e5-small:
+    workloads: [stsbenchmark_encoder_embedding_parity]
   nemotron-3.5-asr-streaming-0.6b:
     workloads: [librispeech_clean_asr_streaming]
   nemotron-embed-vl-1b-v2:
