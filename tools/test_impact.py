@@ -1937,6 +1937,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="report_generation_tool",
             matcher=_path_in(
                 {
+                    "tools/case_evidence.py",
                     "tools/execution_ledger.py",
                     "tools/performance/__init__.py",
                     "tools/performance/catalog.py",

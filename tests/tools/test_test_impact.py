@@ -1828,6 +1828,7 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
+            "tools/case_evidence.py",
             "tools/execution_ledger.py",
             "tools/performance/__init__.py",
             "tools/performance/catalog.py",
