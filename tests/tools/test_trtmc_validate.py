@@ -64,7 +64,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 117
+    assert len(bindings) == 118
     assert {
         binding.model for binding in bindings if binding.workload == "mmlu_continuation_parity"
     } >= {
@@ -93,6 +93,16 @@ def test_model_workload_catalog_covers_every_ready_model():
     )
     assert [binding.workload for binding in bindings if binding.model == "qwen25vl-3b"] == [
         "vlm_mmmu_pro_vision_fixed_mcq"
+    ]
+
+
+def test_fast_foundation_stereo_catalog_binds_middlebury_task_accuracy() -> None:
+    catalog = trtmc_validate.load_catalog()
+
+    assert catalog["sample_limits"]["fast_foundation_stereo_middlebury_q_task_accuracy"] == 15
+    assert catalog["models"]["fast-foundation-stereo"]["workloads"] == [
+        "fast_foundation_stereo_synthetic_parity",
+        "fast_foundation_stereo_middlebury_q_task_accuracy",
     ]
 
 
@@ -246,6 +256,24 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
 
     assert not missing
     assert len({model for model, _workload in bindings}) == 117
+
+
+def test_shadow_gate_metrics_include_plugin_task_accuracy() -> None:
+    metrics = trtmc_validate._shadow_gate_metrics(
+        {"metrics": {"sample_pass_rate": 1.0}},
+        {
+            "task_accuracy": {
+                "candidate_nonocc_epe_px": 0.44,
+                "reference_nonocc_epe_px": 0.43,
+            }
+        },
+    )
+
+    assert metrics == {
+        "sample_pass_rate": 1.0,
+        "candidate_nonocc_epe_px": 0.44,
+        "reference_nonocc_epe_px": 0.43,
+    }
 
 
 def test_resolve_binding_requires_an_explicit_choice_for_multi_workload_model():
