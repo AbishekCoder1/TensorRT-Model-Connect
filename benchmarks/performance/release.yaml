@@ -34,6 +34,8 @@ excluded_profiles:
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
       into the release performance runner.
+  - model: s1-mini-fp16
+    reason: "WIP model not targeted for performance qualification in this release"
 
 entries:
   - id: albert.encode
