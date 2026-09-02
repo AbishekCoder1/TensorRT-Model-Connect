@@ -303,5 +303,4 @@ models:
     workloads: [stsbenchmark_encoder_embedding_parity]
   z-image-turbo:
     workloads: [dpg_bench_diffusion_image]
-  s1-mini-fp16:
-    workloads: [mmlu_five_shot_mcq]
+  
