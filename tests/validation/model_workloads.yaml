@@ -304,4 +304,4 @@ models:
   z-image-turbo:
     workloads: [dpg_bench_diffusion_image]
   s1-mini-fp16:
-    workloads: [mmlu_five_shot_mcq]
+    workloads: []
