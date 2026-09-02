@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build outputs
+/build/
+**/build/
+/build_*/
+/build-*/
+/build-container/
+/build-container-*/
+/build-docker/
+/build-gpu/
+/build-gpu-*/
+cmake-build-*/
+
+# Local coverage and investigation output
+/.ci/
+/coverage/
+/artifacts/
+/symphony_workspaces/
+
+# Stray inference output at repo root
+/*.wav
+/*.png
+/*.jpg
+/*-outputs/
+
+# CMake/Ninja generated files
+CMakeFiles/
+CMakeCache.txt
+CMakeUserPresets.json
+cmake_install.cmake
+install_manifest.txt
+Makefile
+.ninja_*
+*.ninja
+Testing/
+compile_commands.json
+
+# Native build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.d
+*.pdb
+
+# Python envs and caches
+.venv/
+.venv-*/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+*.egg
+conan-py-build.profile
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Website local dependencies and generated state
+website/node_modules/
+website/.docusaurus/
+
+# Claude Code
+.claude/
+
+# Generated agent prompts
+scripts/agents/prompts/
+
+# Logs and editor swap files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Downloaded HF model directories (heavyweight, not committed)
+# Checked-in family fixtures live under tests/e2e/models/<family>/data/.
+models/hf/TinyLlama__*/
+models/hf/tiny-random-*/
+models/hf/01-ai__*/
+models/hf/Felladrin__*/
+models/hf/Locutusque__*/
+models/hf/mistralai__*/
+models/hf/google__*/
+models/hf/deepseek-ai__*/
+models/hf/internlm__*/
+models/hf/baichuan-inc__*/
+models/hf/hf-internal-testing__*/
+models/hf/trl-internal-testing__*/
+models/hf/*/.cache/
+
+.*
+!.github/
+!.github/**
+!.gitignore
+!.dockerignore
+!.pre-commit-config.yaml
+!.coderabbit.yaml
+!website/docs/context/.last_scan_sha
+!.agents/
+!.agents/plugins/
+!.agents/plugins/marketplace.json
+!plugins/trtmc-agent-skills/.codex-plugin/
+!plugins/trtmc-agent-skills/.codex-plugin/**
+config
+HEAD
+hooks
+objects
+refs
+!include/trtmc/config/
+!include/trtmc/config/**
+!python/tensorrt_model_connect/config/
+!python/tensorrt_model_connect/config/**
+!tests/config/
+!tests/config/**
+!src/runtime/config/
+!src/runtime/config/**
+# Re-ignore transient build artifacts inside the un-ignored config dirs.
+**/__pycache__/
+**/*.pyc
+# Ambient leftovers from recovery/benchmark work — not part of source.
+recovery-*-clone/
+/tmp/
+engines
+*.png
+!website/static/img/readme/*.png
+!website/static/img/blog/ai-native-by-design/*.png
+*.wav
+*.bundle
+*.ttrtb
+results.json
+!**/Recording.wav
+!tests/e2e/models/whisper/data/librispeech-test-clean-6930-75918-0003.wav
+worktrees/

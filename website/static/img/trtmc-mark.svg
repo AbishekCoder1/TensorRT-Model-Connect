@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="TensorRT-Model-Connect mark">
+  <rect width="64" height="64" rx="10" fill="#101418"/>
+  <path d="M14 18h36v8H36v20h-8V26H14z" fill="#75aadb"/>
+  <path d="M14 46h36v4H14z" fill="#d2e5f5"/>
+</svg>

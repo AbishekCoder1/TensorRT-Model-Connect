@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Default owner for the public repository. Replace this entry with project
+# teams once those teams are created in the NVIDIA GitHub organization.
+* @yifeif-nv

@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trtmc-dev
+    working_dir: /workspace/tensorrt-model-connect
+    tty: true
+    stdin_open: true
+    gpus: all
+    environment:
+      - TRT_ROOT=/opt/trt
+    volumes:
+      - ./:/workspace/tensorrt-model-connect
+      - ${TRT_ROOT:-/opt/trt}:/opt/trt:ro

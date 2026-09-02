@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["tomli>=2.0; python_version < '3.11'"]
+build-backend = "_pyproject_backend"
+backend-path = ["."]
+
+[project]
+name = "tensorrt-model-connect"
+dynamic = ["version", "dependencies"]
+description = "TensorRT-Model-Connect builder for HuggingFace models and .bundle artifacts"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "ASSET_LICENSES.md"]
+requires-python = ">=3.10"
+
+[tool.tensorrt-model-connect.package]
+base-version = "0.1.0"
+default-tensorrt-version = "11.1.0.106"
+dependencies = [
+    "safetensors>=0.4",
+    "numpy>=1.24",
+    "ml_dtypes>=0.4",
+    "onnx>=1.16",
+    "onnxscript>=0.2",
+    "transformers>=4.40",
+    "huggingface_hub>=0.23",
+    "sentencepiece>=0.1.99",
+    "cuda-python>=13.0.3,<14",
+    "apache-tvm-ffi==0.1.12",
+    "PyYAML>=6.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0", "torch>=2.0", "jsonschema>=4.23,<5"]
+# Build-only dependency for official Wan checkpoints containing T5/VAE .pth
+# files. Kept out of the base install and never required by the C++ runtime.
+wan = ["torch>=2.0"]
+fast-foundation-stereo = [
+    "torch>=2.6",
+    "timm>=1.0",
+]
+moge = ["torch>=2.4"]
+chronos = ["chronos-forecasting>=2.2.2"]
+# clip: required by tests/e2e/models/flux/e2e_plugins/comparators/clip_metrics.py for
+# CLIP-based semantic metrics on diffusion model outputs.  Gracefully skipped
+# at runtime when absent, but all CLIP gates become no-ops without it.
+clip = ["open-clip-torch>=2.20", "Pillow>=9.0"]
+validation = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
+
+[tool.conan-py-build.wheel]
+packages = ["python/tensorrt_model_connect"]
+
+[tool.conan-py-build.sdist]
+include = [
+    "python",
+    "src/runtime/models/fast_foundation_stereo/native_plugins",
+    "third_party",
+]
+exclude = [
+    "__pycache__",
+    "*.pyc",
+    "python/tensorrt_model_connect/build",
+    "python/tensorrt_model_connect/*.egg-info",
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests/builder",
+    "tests/tools",
+    "tests/e2e",
+    "python/tensorrt_model_connect/families",
+]
+markers = [
+    "trt: tests requiring TensorRT + CUDA GPU",
+    "e2e: end-to-end tests requiring GPU and engine bundles",
+    "unit: Unit tests — no GPU, no TRT",
+    "gpu: Requires NVIDIA GPU",
+    "model_proof_allocator: resource-sensitive model-proof lease concurrency tests",
+    "slow: Slow tests (>30s)",
+    "text: Text generation models",
+    "vision: Vision/VL models",
+    "audio: Audio models (Whisper, Bark, PersonaPlex, Nemotron VoiceChat)",
+    "diffusion: Diffusion models (Wan, FLUX, Z-Image)",
+]
+
+[tool.coverage.run]
+source = ["tensorrt_model_connect"]
+omit = ["*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "raise NotImplementedError",
+]

@@ -1,0 +1,272 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+:root {
+  --ifm-color-primary: #76b900;
+  --ifm-color-primary-dark: #68a500;
+  --ifm-color-primary-darker: #5f9600;
+  --ifm-color-primary-darkest: #4d7a00;
+  --ifm-color-primary-light: #86c51d;
+  --ifm-color-primary-lighter: #9ad044;
+  --ifm-color-primary-lightest: #c7e58b;
+  --ifm-code-font-size: 92%;
+  --ifm-font-family-base: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ifm-heading-font-weight: 700;
+  --trtmc-border: #d5dbe3;
+  --trtmc-surface: #f7f8fa;
+  --trtmc-muted: #5f6b7a;
+}
+
+[data-theme='dark'] {
+  --ifm-background-color: #101214;
+  --ifm-background-surface-color: #171a1f;
+  --ifm-navbar-background-color: #101214;
+  --ifm-footer-background-color: #0f1114;
+  --ifm-color-primary: #9bdc28;
+  --ifm-color-primary-dark: #8ac71f;
+  --ifm-color-primary-darker: #7db51b;
+  --ifm-color-primary-darkest: #638f16;
+  --ifm-color-primary-light: #afe34e;
+  --ifm-color-primary-lighter: #c0ea74;
+  --ifm-color-primary-lightest: #dbf5ad;
+  --trtmc-border: #2c333a;
+  --trtmc-surface: #171a1f;
+  --trtmc-muted: #abb3bd;
+}
+
+.navbar {
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+  box-shadow: none;
+}
+
+.navbar__title,
+.menu__link,
+.table-of-contents__link,
+.breadcrumbs__link {
+  letter-spacing: 0;
+}
+
+.theme-doc-sidebar-container {
+  border-right: 1px solid var(--ifm-toc-border-color);
+}
+
+.menu__link {
+  border-radius: 2px;
+}
+
+.menu__link--active:not(.menu__link--sublist) {
+  border-left: 3px solid var(--ifm-color-primary);
+  background: var(--ifm-menu-color-background-active);
+  font-weight: 650;
+}
+
+.markdown table {
+  display: table;
+  width: 100%;
+}
+
+.markdown table th {
+  background: var(--trtmc-surface);
+}
+
+.markdown table th,
+.markdown table td {
+  border-color: var(--trtmc-border);
+  vertical-align: top;
+}
+
+.markdown h2 {
+  margin-top: 2.25rem;
+}
+
+.markdown h3 {
+  margin-top: 1.8rem;
+}
+
+.markdown blockquote {
+  border-left-color: var(--ifm-color-primary);
+  color: var(--trtmc-muted);
+}
+
+.alert {
+  border-radius: 2px;
+  box-shadow: none;
+}
+
+.alert .alert__heading {
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+
+details {
+  border: 1px solid var(--trtmc-border);
+  border-radius: 2px;
+  background: var(--ifm-background-surface-color);
+}
+
+details summary {
+  font-weight: 700;
+}
+
+.theme-code-block,
+.prism-code {
+  border-radius: 2px;
+}
+
+.markdown img[src*="/img/diagrams/"],
+.markdown p > img[src^="data:image/svg+xml"] {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.trtmc-diagram {
+  margin: 1.5rem 0 2rem;
+}
+
+.trtmc-diagram--wide {
+  width: 100%;
+}
+
+.trtmc-diagram__media {
+  overflow-x: auto;
+  padding: 0.65rem;
+  border: 1px solid var(--trtmc-border);
+  border-radius: 2px;
+  background: var(--trtmc-surface);
+  box-shadow: none;
+}
+
+.trtmc-diagram__media:focus-visible {
+  outline: 3px solid var(--ifm-color-primary);
+  outline-offset: 2px;
+}
+
+.trtmc-diagram img,
+.trtmc-diagram img[src*="/img/diagrams/"] {
+  display: block;
+  width: auto;
+  max-width: none;
+  height: auto;
+  margin-inline: auto;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.trtmc-diagram img.trtmc-diagram__image {
+  width: auto;
+  max-width: none;
+  margin-inline: auto;
+}
+
+.trtmc-diagram figcaption {
+  margin-top: 0.5rem;
+  color: var(--trtmc-muted);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 640px) {
+  .trtmc-diagram__media {
+    margin-right: calc(-1 * var(--ifm-spacing-horizontal));
+    margin-left: calc(-1 * var(--ifm-spacing-horizontal));
+    border-right: 0;
+    border-left: 0;
+    border-radius: 0;
+  }
+
+}
+
+.trtmc-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  margin: 0 0 2rem;
+}
+
+.trtmc-hero h1 {
+  margin-bottom: 0.5rem;
+}
+
+.trtmc-hero__lead {
+  max-width: 760px;
+  font-size: 1.12rem;
+  line-height: 1.65;
+  color: var(--ifm-color-emphasis-700);
+}
+
+.trtmc-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin: 1.25rem 0 2rem;
+}
+
+.trtmc-card {
+  border: 1px solid var(--trtmc-border);
+  border-radius: 2px;
+  padding: 1rem;
+  background: var(--ifm-background-surface-color);
+}
+
+.trtmc-card strong {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--ifm-heading-color);
+}
+
+.trtmc-course-step {
+  border-left: 4px solid var(--ifm-color-primary);
+  padding: 0.75rem 1rem;
+  margin: 0.9rem 0;
+  background: var(--ifm-background-surface-color);
+  border-radius: 0 2px 2px 0;
+}
+
+.trtmc-handout-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 0;
+  margin: 1.25rem 0 1.75rem;
+  border: 1px solid var(--trtmc-border);
+  border-radius: 2px;
+  background: var(--ifm-background-surface-color);
+}
+
+.trtmc-handout-meta div {
+  padding: 0.9rem 1rem;
+  border-right: 1px solid var(--trtmc-border);
+  border-bottom: 1px solid var(--trtmc-border);
+}
+
+.trtmc-handout-meta div:last-child {
+  border-right: 0;
+}
+
+.trtmc-handout-meta strong {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--ifm-heading-color);
+}
+
+.trtmc-handout-meta span {
+  color: var(--trtmc-muted);
+  font-size: 0.92rem;
+}
+
+.trtmc-log-template {
+  border: 1px solid var(--trtmc-border);
+  border-left: 4px solid var(--ifm-color-primary);
+  border-radius: 2px;
+  padding: 1rem 1.15rem;
+  margin: 1rem 0 1.5rem;
+  background: var(--trtmc-surface);
+}
+
+.trtmc-log-template p:last-child {
+  margin-bottom: 0;
+}
