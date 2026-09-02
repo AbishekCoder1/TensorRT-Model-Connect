@@ -3,7 +3,7 @@
   "hf_id": "superwhisper/s1-mini",
   "bundle": "s1-mini-fp16.bundle",
   "family": "qwen",
-  "status": "wip",
+  "benchmark_exclusion_reason": "WIP model pending production qualification",
   "runtime_strategy": "qwen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
