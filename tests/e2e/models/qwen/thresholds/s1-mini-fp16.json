@@ -1,8 +1,4 @@
 {
-  "tolerances": {
-    "default": {
   "atol": 1e-3,
   "rtol": 1e-3
-}
-  }
 }
