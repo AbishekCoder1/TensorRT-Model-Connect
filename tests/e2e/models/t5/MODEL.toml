@@ -6,6 +6,7 @@ plugin = "t5"
 test_manifests = [
   "manifests/t5-small-tp4.json",
   "manifests/t5-small.json",
+  
 ]
 
 [e2e_defaults.text_generation_causal]
