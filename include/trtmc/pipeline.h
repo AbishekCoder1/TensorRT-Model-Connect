@@ -474,12 +474,16 @@ class IPipeline {
     }
 
     // -- Text generation with image --
+    // A pipeline that cannot consume an image must reject one rather than
+    // answer from the prompt alone. Forwarding is reserved for the case where
+    // the caller supplied no image at all.
     virtual TextResult generate(const std::string& prompt, const float* image_pixels,
                                 int32_t image_height, int32_t image_width,
                                 const GenerateConfig& cfg = {}) {
-        (void)image_pixels;
-        (void)image_height;
-        (void)image_width;
+        if (image_pixels != nullptr || image_height > 0 || image_width > 0) {
+            throw std::runtime_error(std::string(pipeline_type()) +
+                                     " does not accept an input image");
+        }
         return generate(prompt, cfg);
     }
 
@@ -502,9 +506,10 @@ class IPipeline {
     virtual ImageResult generate_image(const std::string& prompt, const float* image_pixels,
                                        int32_t image_height, int32_t image_width,
                                        const GenerateConfig& cfg = {}) {
-        (void)image_pixels;
-        (void)image_height;
-        (void)image_width;
+        if (image_pixels != nullptr || image_height > 0 || image_width > 0) {
+            throw std::runtime_error(std::string(pipeline_type()) +
+                                     " does not accept an input image");
+        }
         return generate_image(prompt, cfg);
     }
 
