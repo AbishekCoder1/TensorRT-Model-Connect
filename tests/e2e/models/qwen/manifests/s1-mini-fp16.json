@@ -7,18 +7,18 @@
   "runtime_strategy": "qwen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
-  "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
     {
-      "name": "s1-mini-fp16",
-      "trace_id": "IT-E2E-S1MINI-FP16-01",
-      "reference_family": "chat_qwen3_posttrained",
-      "user_contract": "transcript-normalization",
-      "reference_precision": "fp32",
+      "name": "s1-mini-fp16-e2e",
       "prompt": "[Styling: semi-formal] [Structure: prose] [Context: general] so um yeah for the trip we need to pack like sunscreen and uh chargers",
       "max_new_tokens": 64,
-      "core": true
+      "max_cache_length": 256,
+      "assertions": {
+        "min_throughput_tps": 180.0,
+        "max_decode_latency_ms": 5.5,
+        "max_total_latency_ms": 500.0
+      }
     }
   ]
 }
