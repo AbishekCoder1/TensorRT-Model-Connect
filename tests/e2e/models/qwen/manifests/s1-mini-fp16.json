@@ -13,12 +13,7 @@
       "name": "s1-mini-fp16-e2e",
       "prompt": "[Styling: semi-formal] [Structure: prose] [Context: general] so um yeah for the trip we need to pack like sunscreen and uh chargers",
       "max_new_tokens": 64,
-      "max_cache_length": 256,
-      "assertions": {
-        "min_throughput_tps": 180.0,
-        "max_decode_latency_ms": 5.5,
-        "max_total_latency_ms": 500.0
-      }
+      "max_cache_length": 256
     }
   ]
 }

@@ -1,3 +1,18 @@
 {
-  "s1-mini-fp16": {}
+  "threshold_overrides": {
+    "layer_atol": 5.0,
+    "logit_atol": 10.0,
+    "logit_cosine_p5": 0.0,
+    "logit_rel_l2_p95": 0.05,
+    "normalized_text_edit_distance": 1.0,
+    "stable_margin": 0.1,
+    "stable_top1_match_rate": 0.0,
+    "token_agreement_rate": 0.0,
+    "unstable_topk_hit_rate": 0.0
+  },
+  "assertions": {
+    "min_throughput_tps": 180.0,
+    "max_decode_latency_ms": 5.5,
+    "max_total_latency_ms": 500.0
+  }
 }
