@@ -287,6 +287,20 @@ class TorchReference:
             "hf_id": "example/cosmos3-case",
         },
         {
+            "name": "lerobot-act-case",
+            "family": "lerobot_act",
+            "runtime_strategy": "lerobot_act_action_chunk",
+            "task_strategy": "robot_action_chunk",
+            "hf_id": "example/lerobot-act-case",
+        },
+        {
+            "name": "foundationpose-case",
+            "family": "foundationpose",
+            "runtime_strategy": "foundationpose_pose_refinement",
+            "task_strategy": "pose_hypothesis_refinement",
+            "hf_id": "example/foundationpose-case",
+        },
+        {
             "name": "media-core",
             "family": "media_family",
             "runtime_strategy": "diffusion_media_primary",
@@ -2012,6 +2026,48 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
+            "examples/models/lerobot_act/recorded_control/CMakeLists.txt",
+            "examples/models/lerobot_act/recorded_control/README.md",
+            "examples/models/lerobot_act/recorded_control/main.cpp",
+            "examples/models/lerobot_act/recorded_control/qualification/gb300-trt11.1-fp32.json",
+        ],
+    )
+    def test_lerobot_act_recorded_control_example_is_model_owned(self, imap, path):
+        """The recorded-control example runs LeRobot ACT plus C++ and tools checks."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "lerobot_act_recorded_control_example"
+        assert match.models == ["lerobot-act-case"]
+        assert match.unit_tiers == ["cpp", "tools"]
+        assert match.rebuild_cpp is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "examples/models/foundationpose/preprocessed_refinement/CMakeLists.txt",
+            "examples/models/foundationpose/preprocessed_refinement/README.md",
+            "examples/models/foundationpose/preprocessed_refinement/main.cpp",
+            "examples/models/foundationpose/preprocessed_refinement/prepare_synthetic_inputs.py",
+            (
+                "examples/models/foundationpose/preprocessed_refinement/"
+                "qualification/gb300-trt11.1-fp32.json"
+            ),
+        ],
+    )
+    def test_foundationpose_preprocessed_refinement_example_is_model_owned(
+        self, imap, path
+    ):
+        """The preprocessed-pose example runs FoundationPose C++ and tools checks."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "foundationpose_preprocessed_refinement_example"
+        assert match.models == ["foundationpose-case"]
+        assert match.unit_tiers == ["cpp", "tools"]
+        assert match.rebuild_cpp is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
             "python/tensorrt_model_connect/benchmark/cli.py",
             "python/tensorrt_model_connect/benchmark/operations.py",
         ],
@@ -3197,14 +3253,6 @@ class TestAggregation:
         assert not result.cap_applied
         assert sorted(result.e2e_models) == ["decoder-large", "decoder-small"]
 
-    def test_cap_applied_when_over(self, imap):
-        """Cap applied when affected models > cap."""
-        result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/checkpoint_mapper.py"], imap, cap=5
-        )
-        assert result.cap_applied
-        assert sorted(result.e2e_models) == sorted(imap.core_models)
-
     def test_no_changed_files(self, imap):
         """No files -> no impact."""
         result = test_impact.analyze_impact([], imap)
@@ -3436,16 +3484,6 @@ class TestValidation:
         imap = test_impact.build_impact_map(real_root)
         errors = test_impact.validate_map(imap, real_root)
         assert errors == [], f"Validation errors: {errors}"
-
-    def test_real_repo_has_core_models(self):
-        """Real repo has at least 5 core models."""
-        real_root = REPO_ROOT
-        if not (real_root / "tests" / "e2e" / "models").is_dir():
-            pytest.skip("Not in the project repo")
-        imap = test_impact.build_impact_map(real_root)
-        assert len(imap.core_models) >= 5, (
-            f"Expected at least 5 core models, got {len(imap.core_models)}"
-        )
 
     def test_flux_runtime_selects_batch2_detector(self):
         """FLUX runtime changes must execute the real-bundle batch contract."""

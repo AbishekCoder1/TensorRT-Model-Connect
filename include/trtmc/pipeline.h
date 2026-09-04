@@ -179,6 +179,84 @@ struct ClassificationResult {
     float top_score{0.0F};
 };
 
+// One robotics observation. Image pixels are RGB HWC float values in [0, 1].
+// The state vector and its semantics are defined by the model bundle.
+struct RobotObservation {
+    const float* image_pixels{nullptr};
+    int32_t image_height{0};
+    int32_t image_width{0};
+    int32_t image_channels{3};
+    const float* state{nullptr};
+    int32_t state_dim{0};
+};
+
+struct RobotActionChunk {
+    // Row-major [num_actions, action_dim] action values in the policy's
+    // documented physical/control coordinate system.
+    std::vector<float> actions;
+    int32_t num_actions{0};
+    int32_t action_dim{0};
+    // False means at least one value lies outside the training-data range
+    // recorded in the bundle. The runtime reports this condition but never
+    // silently clips a command.
+    bool within_training_bounds{false};
+    double inference_ms{0.0};
+};
+
+struct RobotAction {
+    std::vector<float> values;
+    int32_t action_dim{0};
+    bool within_training_bounds{false};
+    // True when this call ran the policy to refill its action queue. A false
+    // value means the action came from the previously predicted chunk.
+    bool started_new_chunk{false};
+    double inference_ms{0.0};
+};
+
+// A model-based pose refiner can request caller-produced rendered/observed
+// feature crops. Layout and feature semantics are owned by the model bundle;
+// rendering and segmentation remain outside this model-agnostic contract.
+enum class PoseCropStage {
+    kRefinement,
+    kScoring,
+};
+
+struct PoseCropBatch {
+    std::vector<float> rendered_features;
+    std::vector<float> observed_features;
+    int32_t num_hypotheses{0};
+    int32_t height{0};
+    int32_t width{0};
+    int32_t channels{0};
+};
+
+using PoseCropProvider =
+    std::function<PoseCropBatch(const std::vector<float>& current_object_to_camera_poses,
+                                PoseCropStage stage, int32_t refinement_iteration)>;
+
+struct PoseEstimationRequest {
+    // Row-major [num_hypotheses, 4, 4] object-to-camera rigid transforms.
+    // Leave empty with use_tracked_pose=true to refine the last selected pose.
+    std::vector<float> candidate_poses;
+    int32_t num_hypotheses{0};
+    float mesh_diameter{0.0F};
+    int32_t refinement_iterations{1};
+    bool score_hypotheses{true};
+    bool use_tracked_pose{false};
+    bool update_tracking_state{true};
+    PoseCropProvider crop_provider;
+};
+
+struct PoseEstimationResult {
+    std::vector<float> refined_poses; // row-major [num_hypotheses, 4, 4]
+    std::vector<float> scores;        // one confidence logit per hypothesis
+    int32_t num_hypotheses{0};
+    int32_t best_index{-1};
+    bool all_poses_rigid{false};
+    double refinement_ms{0.0};
+    double scoring_ms{0.0};
+};
+
 struct TextEmbedding {
     std::vector<float> data;
     std::vector<int64_t> shape;
@@ -396,12 +474,16 @@ class IPipeline {
     }
 
     // -- Text generation with image --
+    // A pipeline that cannot consume an image must reject one rather than
+    // answer from the prompt alone. Forwarding is reserved for the case where
+    // the caller supplied no image at all.
     virtual TextResult generate(const std::string& prompt, const float* image_pixels,
                                 int32_t image_height, int32_t image_width,
                                 const GenerateConfig& cfg = {}) {
-        (void)image_pixels;
-        (void)image_height;
-        (void)image_width;
+        if (image_pixels != nullptr || image_height > 0 || image_width > 0) {
+            throw std::runtime_error(std::string(pipeline_type()) +
+                                     " does not accept an input image");
+        }
         return generate(prompt, cfg);
     }
 
@@ -424,9 +506,10 @@ class IPipeline {
     virtual ImageResult generate_image(const std::string& prompt, const float* image_pixels,
                                        int32_t image_height, int32_t image_width,
                                        const GenerateConfig& cfg = {}) {
-        (void)image_pixels;
-        (void)image_height;
-        (void)image_width;
+        if (image_pixels != nullptr || image_height > 0 || image_width > 0) {
+            throw std::runtime_error(std::string(pipeline_type()) +
+                                     " does not accept an input image");
+        }
         return generate_image(prompt, cfg);
     }
 
@@ -687,6 +770,43 @@ class IPipeline {
     // -- Metadata --
     virtual const char* model_id() const = 0;
     virtual const char* pipeline_type() const = 0;
+
+    // -- Robotics policy inference --
+    // Keep newly added virtuals after the pre-existing interface so older
+    // method slots retain their ABI positions.
+    virtual RobotActionChunk predict_action_chunk(const RobotObservation& observation) {
+        (void)observation;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support predict_action_chunk()");
+    }
+
+    virtual RobotAction act(const RobotObservation& observation) {
+        auto chunk = predict_action_chunk(observation);
+        if (chunk.num_actions <= 0 || chunk.action_dim <= 0 ||
+            chunk.actions.size() < static_cast<std::size_t>(chunk.action_dim)) {
+            throw std::runtime_error(std::string(pipeline_type()) +
+                                     " returned an empty robotics action chunk");
+        }
+        RobotAction action;
+        action.values.assign(chunk.actions.begin(), chunk.actions.begin() + chunk.action_dim);
+        action.action_dim = chunk.action_dim;
+        action.within_training_bounds = chunk.within_training_bounds;
+        action.started_new_chunk = true;
+        action.inference_ms = chunk.inference_ms;
+        return action;
+    }
+
+    // Clear model-owned request/episode state while retaining reusable engine
+    // allocations. Stateless pipelines may keep the default no-op.
+    virtual void reset() {}
+
+    // -- Model-based object pose refinement and scoring --
+    // Added after all pre-existing virtuals to retain their ABI slots.
+    virtual PoseEstimationResult estimate_pose_hypotheses(const PoseEstimationRequest& request) {
+        (void)request;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support estimate_pose_hypotheses()");
+    }
 };
 
 // --- Factory ---

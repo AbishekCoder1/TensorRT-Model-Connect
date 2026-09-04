@@ -573,7 +573,7 @@ def _load_asr(
     max_new_tokens = int(request.get("max_new_tokens", 100))
     device = torch.device("cuda")
 
-    if arguments.family in {"canary", "nemotron_speech_streaming"}:
+    if arguments.family in {"canary", "nemotron_speech_streaming", "timm_mobilenetv3"}:
         from tools.validation.engine import _transcription_text
 
         model = _load_nemo_asr_reference_model(arguments, device=device).eval().to(device)
@@ -1839,7 +1839,7 @@ def _load_vision(
     kwargs = _load_kwargs(arguments, torch)
     processor_kwargs = _processor_kwargs(arguments)
 
-    if arguments.family == "timm_vit":
+    if arguments.family in {"timm_vit", "timm_resnet", "timm_vgg"}:
         import timm
         from timm.data import create_transform, resolve_model_data_config
 

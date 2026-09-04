@@ -53,6 +53,9 @@ def test_model_workload_catalog_covers_every_ready_model():
         catalog["models"]["flux-2-dev"]["reference_cache_identity"]
         == catalog["models"]["flux-2-dev-fp8"]["reference_cache_identity"]
     )
+    assert catalog["models"]["foundationpose-ngc-1.0.1"]["workloads"] == [
+        "foundationpose_preprocessed_pose_refinement_fp32_parity"
+    ]
     assert catalog["models"]["flux-2-dev"]["reference_cache_identity"] == "flux-2-dev-dpg-v2"
     qwen_identities = {
         catalog["models"][name]["reference_cache_identity"]
@@ -104,6 +107,15 @@ def test_fast_foundation_stereo_catalog_binds_middlebury_task_accuracy() -> None
         "fast_foundation_stereo_synthetic_parity",
         "fast_foundation_stereo_middlebury_q_task_accuracy",
     ]
+
+
+def test_lerobot_act_catalog_binds_recorded_control_parity() -> None:
+    catalog = trtmc_validate.load_catalog()
+
+    assert catalog["sample_limits"]["lerobot_act_recorded_control_fp32_parity"] == 1
+    assert catalog["models"]["act-aloha-sim-transfer-cube"] == {
+        "workloads": ["lerobot_act_recorded_control_fp32_parity"],
+    }
 
 
 def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
@@ -217,7 +229,9 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     assert {workload for workload, limit in catalog["sample_limits"].items() if limit == 1} == {
         "dinov3_image_feature_extraction_parity",
         "fast_foundation_stereo_synthetic_parity",
+        "foundationpose_preprocessed_pose_refinement_fp32_parity",
         "lfm2_model_card_sampling_parity",
+        "lerobot_act_recorded_control_fp32_parity",
         "minimax_h3_official_profile_parity",
         "moge_monocular_geometry_fp32_parity",
         "nemotron_voicechat_model_card_general_conversation",
