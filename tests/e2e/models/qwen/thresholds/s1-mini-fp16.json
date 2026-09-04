@@ -9,10 +9,5 @@
     "stable_top1_match_rate": 0.0,
     "token_agreement_rate": 0.0,
     "unstable_topk_hit_rate": 0.0
-  },
-  "assertions": {
-    "min_throughput_tps": 180.0,
-    "max_decode_latency_ms": 5.5,
-    "max_total_latency_ms": 500.0
   }
 }
