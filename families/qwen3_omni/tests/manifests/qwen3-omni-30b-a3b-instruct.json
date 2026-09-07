@@ -1,0 +1,21 @@
+{
+  "name": "qwen3-omni-30b-a3b-instruct",
+  "hf_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+  "hf_revision": "26291f793822fb6be9555850f06dfe95f2d7e695",
+  "bundle": "qwen3-omni-30b-a3b-instruct.bundle",
+  "family": "qwen3_omni",
+  "task": "text_generation",
+  "precision": "bf16",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "qwen3-omni-30b-a3b-instruct",
+      "premerge": true,
+      "prompt": "Please say hello from Qwen3 Omni in one short sentence.",
+      "max_new_tokens": 16,
+      "expected_continuation_text": "Hello from Qwen-Omni!",
+      "runtime_timeout_s": 900
+    }
+  ]
+}
