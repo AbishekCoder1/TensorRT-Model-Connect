@@ -19,7 +19,7 @@ import yaml
 from tools.ci.context import CiContext
 from tools.ci.container import CiContainer
 from tools.ci.docker_image import DockerImageManager
-from tools.ci.e2e import E2ERunner, _require_passing_junit
+from tools.ci.e2e import E2ERunner, _require_e2e_junit, _require_passing_junit
 from tools.ci.package import (
     SourceArchiveValidator,
     WheelArchiveValidator,
@@ -40,6 +40,7 @@ class RecordingContext:
         self.runtime_snapshots = []
         self.skip_ctest = False
         self.no_cpu_family_tests = False
+        self.missing_e2e_testcases = set()
 
     def run(self, command, **kwargs):
         self.calls.append((list(command), kwargs))
@@ -80,10 +81,25 @@ class RecordingContext:
         if "--junitxml" in command:
             report = Path(command[command.index("--junitxml") + 1])
             empty = self.no_cpu_family_tests and "-unit-junit.xml" in report.name
+            testcases = "" if empty else '<testcase name="hardware" />'
+            if any(str(item).endswith("/test_e2e.py") for item in command):
+                family = str(command[3]).split("/")[1]
+                if "--e2e-testcase" in command:
+                    raw = str(command[command.index("--e2e-testcase") + 1])
+                    selected = set(raw.split(",")) - self.missing_e2e_testcases
+                else:
+                    selected = {
+                        str(case["name"])
+                        for path in (self.repository / f"families/{family}/tests/manifests").glob(
+                            "*.json"
+                        )
+                        for case in json.loads(path.read_text(encoding="utf-8"))["testcases"]
+                    }
+                testcases = "".join(
+                    f'<testcase name="test_e2e[{name}]" />' for name in sorted(selected)
+                )
             report.write_text(
-                "<testsuites><testsuite>"
-                + ("" if empty else '<testcase name="hardware" />')
-                + "</testsuite></testsuites>",
+                f"<testsuites><testsuite>{testcases}</testsuite></testsuites>",
                 encoding="utf-8",
             )
             if empty:
@@ -92,22 +108,30 @@ class RecordingContext:
 
 
 @pytest.mark.parametrize(
-    ("testcases", "selector"),
+    ("testcases", "selector", "external_junit"),
     (
-        (None, ["--e2e-model", "beta"]),
-        (["beta-case"], ["--e2e-testcase", "beta-case"]),
+        (None, ["--e2e-model", "beta"], False),
+        (["beta-case"], ["--e2e-testcase", "beta-case"], False),
+        (["beta-case"], ["--e2e-testcase", "beta-case"], True),
     ),
 )
 def test_selective_e2e_calls_family_tests_directly(
     tmp_path: Path,
     testcases: list[str] | None,
     selector: list[str],
+    external_junit: bool,
 ) -> None:
     for family in ("alpha", "beta"):
         root = tmp_path / "families" / family
         (root / "tests").mkdir(parents=True)
+        (root / "tests/manifests").mkdir()
         (root / "model.py").write_text("def build(request, writer): pass\n")
         (root / "tests/test_e2e.py").write_text("def test_e2e(): pass\n")
+        manifest = json.dumps({"testcases": [{"name": f"{family}-case"}]})
+        if family == "beta" and testcases is not None:
+            # Explicit auxiliary E2E cases do not depend on model manifests.
+            manifest = "invalid manifest"
+        (root / "tests/manifests/case.json").write_text(manifest, encoding="utf-8")
         if family == "beta":
             (root / "tests/test_model.py").write_text(
                 "def test_model(): pass\n",
@@ -131,14 +155,17 @@ def test_selective_e2e_calls_family_tests_directly(
     if testcases is not None:
         impact["testcases"] = testcases
     (tmp_path / "impact.json").write_text(json.dumps(impact))
-    context = RecordingContext(
-        tmp_path,
-        {
-            "TRTMC_BINARY": str(binary),
-            "TRTMC_RUNTIME_ROOT": str(runtime),
-            "TRTMC_NATIVE_BUILD_DIR": str(native_build),
-        },
-    )
+    env = {
+        "TRTMC_BINARY": str(binary),
+        "TRTMC_RUNTIME_ROOT": str(runtime),
+        "TRTMC_NATIVE_BUILD_DIR": str(native_build),
+    }
+    expected_e2e_junit = native_build / "trtmc-beta-e2e-junit.xml"
+    if external_junit:
+        expected_e2e_junit = tmp_path / ".ci/family-beta-junit.xml"
+        expected_e2e_junit.parent.mkdir()
+        env["PYTEST_ADDOPTS"] = f"--maxfail=2 --junitxml={expected_e2e_junit}"
+    context = RecordingContext(tmp_path, env)
 
     E2ERunner(context).selective()
 
@@ -179,12 +206,17 @@ def test_selective_e2e_calls_family_tests_directly(
     command, options = context.calls[5]
     assert command[:4] == ["python", "-m", "pytest", "families/beta/tests/test_e2e.py"]
     assert selector == command[4:6]
-    rendered = " ".join(command)
+    assert command[-2:] == [
+        "--junitxml",
+        expected_e2e_junit,
+    ]
+    rendered = " ".join(map(str, command))
     assert "e2e_harness" not in rendered
     assert "--trtmc-binary" not in rendered
     assert "--model-plugin-dir" not in rendered
     assert options["updates"]["TRTMC_BINARY"] == str(binary)
     assert options["updates"]["TRTMC_RUNTIME_ROOT"] != str(runtime)
+    assert options["unset"] == ("PYTEST_ADDOPTS",)
     assert context.runtime_snapshots == [
         ("libtrtmc_backend_trt.so", "libtrtmc_core.so", "libtrtmc_model_beta.so")
     ]
@@ -195,8 +227,13 @@ def test_family_with_only_hardware_tests_accepts_exact_empty_cpu_result(
 ) -> None:
     family = tmp_path / "families/beta"
     (family / "tests").mkdir(parents=True)
+    (family / "tests/manifests").mkdir()
     (family / "model.py").write_text("def build(request, writer): pass\n")
     (family / "tests/test_e2e.py").write_text("def test_e2e(): pass\n")
+    (family / "tests/manifests/case.json").write_text(
+        json.dumps({"testcases": [{"name": "beta-case"}]}),
+        encoding="utf-8",
+    )
     (family / "tests/test_gpu.py").write_text(
         "import pytest\n\n@pytest.mark.gpu\ndef test_gpu(): pass\n",
         encoding="utf-8",
@@ -284,11 +321,102 @@ def test_family_python_unit_junit_fails_closed(
         _require_passing_junit(report, "family Python unit tests")
 
 
+def test_e2e_junit_reports_exact_requested_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = tmp_path / "e2e.xml"
+    report.write_text(
+        '<testsuites><testsuite><testcase name="test_e2e[alpha]" />'
+        '<testcase name="test_e2e[beta]"><skipped /></testcase>'
+        '<testcase name="test_helper" /></testsuite></testsuites>',
+        encoding="utf-8",
+    )
+
+    _require_e2e_junit(report, "family", ("alpha",))
+
+    assert (
+        "family E2E results: requested=1 executed=1 passed=1 failed=0 skipped=0"
+        in capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize(
+    ("testcases", "requested", "message"),
+    (
+        ("", ("missing",), "missing requested E2E testcase: missing"),
+        (
+            '<testcase name="test_e2e[duplicate]" />'
+            '<testcase name="test_official_checkpoint_e2e[duplicate]" />',
+            ("duplicate",),
+            "duplicate E2E testcase result: duplicate",
+        ),
+        (
+            '<testcase name="test_e2e[skipped]"><skipped /></testcase>',
+            ("skipped",),
+            "requested E2E testcase skipped: skipped",
+        ),
+        (
+            '<testcase name="test_e2e[failed]"><failure /></testcase>',
+            ("failed",),
+            "requested E2E testcase failed: failed",
+        ),
+        (
+            '<testcase name="test_e2e[duplicate-request]" />',
+            ("duplicate-request", "duplicate-request"),
+            "duplicate requested E2E testcase: duplicate-request",
+        ),
+    ),
+)
+def test_e2e_junit_fails_closed_for_invalid_result_cardinality_or_skip(
+    tmp_path: Path,
+    testcases: str,
+    requested: tuple[str, ...],
+    message: str,
+) -> None:
+    report = tmp_path / "e2e.xml"
+    report.write_text(
+        f"<testsuites><testsuite>{testcases}</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CiError, match=message):
+        _require_e2e_junit(report, "family", requested)
+
+
 def test_e2e_rejects_multiple_family_environments(tmp_path: Path) -> None:
     context = RecordingContext(tmp_path, {})
 
     with pytest.raises(CiError, match="exactly one family"):
         E2ERunner(context)._run(("alpha", "beta"))
+
+
+def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    binary = tmp_path / "trtmc"
+    binary.write_text("")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    for name in (
+        "libtrtmc_core.so",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_gpt2.so",
+    ):
+        (runtime / name).write_text("")
+    native_build = tmp_path / "native-build"
+    native_build.mkdir()
+    (native_build / "CTestTestfile.cmake").write_text("")
+    context = RecordingContext(
+        repository,
+        {
+            "TRTMC_BINARY": str(binary),
+            "TRTMC_RUNTIME_ROOT": str(runtime),
+            "TRTMC_NATIVE_BUILD_DIR": str(native_build),
+        },
+    )
+    context.missing_e2e_testcases.add("does-not-exist")
+
+    with pytest.raises(CiError, match="missing requested E2E testcase: does-not-exist"):
+        E2ERunner(context)._run(("gpt2",), ("does-not-exist",))
 
 
 def test_pipeline_exposes_only_active_stages(tmp_path: Path) -> None:
