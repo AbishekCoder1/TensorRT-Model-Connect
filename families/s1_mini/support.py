@@ -4,7 +4,7 @@ from tensorrt_model_connect.model_support import family_support
 
 
 describe = family_support(
-    model_types=("qwen3",),
+    required_files=("banner.jpg",),
     tasks=("text_generation",),
     default_task="text_generation",
 )

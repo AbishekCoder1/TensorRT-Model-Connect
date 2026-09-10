@@ -260,7 +260,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         or "image" in model_type
         or model_type in {"qwen3_5", "qwen3.5"}
     )
-    if unsupported_variant or not (model_type.startswith("s1_mini") or model_type.startswith("qwq")):
+    if unsupported_variant or not (model_type.startswith("qwen3") or model_type.startswith("qwq")):
         raise ValueError(f"Qwen does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
     if precision not in {"fp32", "fp16", "bf16"}:

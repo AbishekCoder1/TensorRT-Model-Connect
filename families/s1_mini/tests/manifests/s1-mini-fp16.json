@@ -21,6 +21,17 @@
         "Thursday"
       ],
       "premerge": true
+    },
+    {
+      "name": "s1-mini-fp16-e2e-tuesday",
+      "system_prompt": "You are a text normalizer for speech-to-text transcripts. The input begins with a control line specifying the styling, structure, and context settings; clean the transcript to match those settings and output only the cleaned text.",
+      "prompt": "[Styling: semi-formal] [Structure: prose] [Context: general]\nso um yeah the meeting got moved to next tuesday instead",
+      "max_new_tokens": 40,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "expected_answers": [
+        "Tuesday"
+      ]
     }
   ]
 }

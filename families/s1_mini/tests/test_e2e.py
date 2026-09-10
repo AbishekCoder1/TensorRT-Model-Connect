@@ -197,6 +197,7 @@ def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict)
         "repetition_penalty": "--repetition-penalty",
         "use_chat_template": "--use-chat-template",
         "enable_thinking": "--enable-thinking",
+        "system_prompt": "--system-prompt",
     }
     for field, option in options.items():
         if field not in case:
@@ -642,7 +643,9 @@ def _assert_correctness(
         and _contains_expected_answer(normalized_reference, answer)
         for answer in expected_answers
     )
-    assert ned <= _text_threshold(thresholds) or expected_answer_matches
+    if expected_answers:
+        assert expected_answer_matches, f"expected one of {expected_answers} in both outputs"
+    assert ned <= _text_threshold(thresholds)
 
 
 def test_fp8_text_gate_uses_prefix_fallback_and_expected_answer_or() -> None:
