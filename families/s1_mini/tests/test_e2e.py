@@ -23,7 +23,7 @@ from tensorrt_model_connect import BuildRequest, build
 _TEST_DIR = Path(__file__).resolve().parent
 _FAMILY = _TEST_DIR.parent.name
 _MPI_RANK_ZERO = re.compile(r"^\[[^,]+,0\]<stdout>:(.*)$")
-_LOGIT_ORACLES = frozenset({"qwen3-0.6b-fp8", "qwen3-0.6b-fp8-tp4"})
+_LOGIT_ORACLES = frozenset()
 _NATIVE_KV_FIELDS = frozenset(
     {"expected_kv_cache_rows", "expected_prefill_chunks", "expected_prefill_chunk_limit"}
 )
@@ -488,28 +488,6 @@ def _assert_logits_oracle(
     return agreement
 
 
-def test_fp8_logits_oracle_keeps_the_old_stable_top1_gate() -> None:
-    reference = np.asarray([[3.0, 1.0, 0.0], [0.0, 1.0, 3.0]], dtype=np.float32)
-    thresholds = {
-        "logit_cosine_p5": 0.2,
-        "logit_rel_l2_p95": 1.5,
-        "stable_margin": 0.1,
-        "stable_top1_match_rate": 0.9,
-        "unstable_topk_hit_rate": 0.8,
-        "token_agreement_rate": 0.8,
-    }
-    _assert_logits_oracle("qwen3-0.6b-fp8", reference, reference, thresholds)
-    with pytest.raises(AssertionError):
-        _assert_logits_oracle("qwen3-0.6b-fp8", reference[:, ::-1], reference, thresholds)
-    nonfinite = np.asarray([[np.nan, np.inf, -np.inf]], dtype=np.float32)
-    _assert_logits_oracle(
-        "qwen3-0.6b-fp8",
-        np.pad(nonfinite, ((0, 0), (0, 1)), constant_values=123.0),
-        nonfinite,
-        thresholds,
-    )
-
-
 def _normalize_text(value: str) -> str:
     return " ".join(value.casefold().split()).strip()
 
@@ -648,43 +626,37 @@ def _assert_correctness(
     assert ned <= _text_threshold(thresholds)
 
 
-def test_fp8_text_gate_uses_prefix_fallback_and_expected_answer_or() -> None:
-    thresholds = {
-        "logit_cosine_p5": 0.2,
-        "logit_rel_l2_p95": 1.5,
-        "normalized_text_edit_distance": 0.0,
-        "stable_margin": 0.1,
-        "stable_top1_match_rate": 0.9,
-        "token_agreement_rate": 0.8,
-        "unstable_topk_hit_rate": 0.8,
+def test_s1_mini_text_gate_requires_expected_answer_and_distance() -> None:
+    thresholds = {"normalized_text_edit_distance": 0.35}
+    case = {
+        "name": "s1-mini-fp16-e2e",
+        "max_new_tokens": 40,
+        "expected_answers": ["Thursday"],
     }
-    logits = np.asarray([[3.0, 1.0, 0.0]], dtype=np.float32)
-    prefix = "this is a sufficiently long generated prefix"
-    payload = {"token_ids": [1], "text": prefix, "logits_trace": logits}
-    case = {"name": "qwen3-0.6b-fp8", "max_new_tokens": 2}
-    _assert_correctness(payload, case, thresholds, [], prefix + " suffix", None, "", logits)
+    reference_text = "so um i need to like send the report by thursday"
+    payload = {"token_ids": [1], "text": ""}
 
-    answer_case = {**case, "expected_answers": ["C"]}
+    # Contains "Thursday" within the 0.35 distance threshold -> passes.
+    close_text = "so um i need to send the report by thursday"
     _assert_correctness(
-        {**payload, "text": "Answer: C"},
-        answer_case,
-        thresholds,
-        [],
-        "The answer is C indeed",
-        None,
-        "",
-        logits,
+        {**payload, "text": close_text}, case, thresholds, [], reference_text, None, "", None
+    )
+
+    # Contains "Thursday" but the transcript diverges past the threshold -> fails on distance.
+    far_text = (
+        "Thursday, completely different padding words here that push the edit "
+        "distance well past the allowed threshold for this contract"
     )
     with pytest.raises(AssertionError):
         _assert_correctness(
-            {**payload, "text": "cat"},
-            answer_case,
-            thresholds,
-            [],
-            "dog",
-            None,
-            "",
-            logits,
+            {**payload, "text": far_text}, case, thresholds, [], reference_text, None, "", None
+        )
+
+    # Omits "Thursday" entirely -> fails on the answer gate, independent of distance.
+    missing_text = "so um i need to send the report by friday"
+    with pytest.raises(AssertionError):
+        _assert_correctness(
+            {**payload, "text": missing_text}, case, thresholds, [], reference_text, None, "", None
         )
 
 
